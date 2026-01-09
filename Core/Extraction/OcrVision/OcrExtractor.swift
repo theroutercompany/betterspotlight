@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 import Vision
 
 /// Extracts text from images using Apple's Vision framework OCR

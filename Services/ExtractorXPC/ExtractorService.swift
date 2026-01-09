@@ -1,4 +1,6 @@
 import Foundation
+import Shared
+import Core
 
 /// XPC Service for text extraction from files
 public final class ExtractorService: NSObject, ExtractorServiceProtocol {

@@ -291,8 +291,3 @@ extension SearchQuery: Codable {
         try container.encode(options, forKey: .options)
     }
 }
-
-extension QueryContext: Codable {}
-extension SearchOptions: Codable {}
-extension IndexHealthSnapshot: Codable {}
-extension IndexRootStatus: Codable {}

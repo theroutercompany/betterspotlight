@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 
 /// Protocol for text extraction from files
 public protocol TextExtractor: Sendable {

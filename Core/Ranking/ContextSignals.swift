@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Shared
 
 /// Gathers context signals for ranking adjustments
 public actor ContextSignalProvider {

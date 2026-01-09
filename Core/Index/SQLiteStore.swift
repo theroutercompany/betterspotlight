@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 import SQLite
 
 /// SQLite-based storage for the search index
@@ -46,6 +47,7 @@ public actor SQLiteStore {
 
     // MARK: - Failures Columns
 
+    private let failureItemId = SQLite.Expression<Int64?>("item_id")
     private let stage = SQLite.Expression<String>("stage")
     private let error = SQLite.Expression<String>("error")
     private let lastSeen = SQLite.Expression<Double>("last_seen")
@@ -303,7 +305,7 @@ public actor SQLiteStore {
         } else {
             try db.run(failures.insert(
                 path <- failure.path,
-                itemId <- failure.itemId,
+                failureItemId <- failure.itemId,
                 stage <- failure.stage,
                 error <- failure.error,
                 lastSeen <- failure.lastSeen.timeIntervalSince1970,

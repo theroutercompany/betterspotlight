@@ -48,7 +48,7 @@ public struct HighlightRange: Codable, Sendable {
 }
 
 /// Query context for ranking adjustments
-public struct QueryContext: Sendable {
+public struct QueryContext: Codable, Sendable {
     public let frontmostAppBundleId: String?
     public let frontmostAppName: String?
     public let currentWorkingDirectory: String?
@@ -85,7 +85,7 @@ public struct SearchQuery: Sendable {
 }
 
 /// Options for search behavior
-public struct SearchOptions: Sendable {
+public struct SearchOptions: Codable, Sendable {
     public let maxResults: Int
     public let includeContent: Bool
     public let includeSemantic: Bool

@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 import Carbon
 import AppKit
 

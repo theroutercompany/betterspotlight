@@ -1,4 +1,5 @@
 import SwiftUI
+import Shared
 
 /// Main settings view
 struct SettingsView: View {
@@ -303,7 +304,7 @@ struct ExclusionPatternRow: View {
     var body: some View {
         HStack {
             Toggle("", isOn: enabledBinding)
-                .labellength(0)
+                .labelsHidden()
 
             VStack(alignment: .leading) {
                 Text(pattern.pattern)

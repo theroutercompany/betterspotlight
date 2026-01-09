@@ -1,5 +1,6 @@
 import XCTest
 @testable import Core
+@testable import Shared
 
 final class TextExtractorTests: XCTestCase {
 
@@ -142,12 +143,17 @@ final class ExtractionManagerTests: XCTestCase {
     func testIdentifiesSupportedExtensions() async {
         let manager = ExtractionManager()
 
-        XCTAssertTrue(await manager.isSupported(extension: "txt"))
-        XCTAssertTrue(await manager.isSupported(extension: "swift"))
-        XCTAssertTrue(await manager.isSupported(extension: "pdf"))
+        let txtSupported = await manager.isSupported(extension: "txt")
+        let swiftSupported = await manager.isSupported(extension: "swift")
+        let pdfSupported = await manager.isSupported(extension: "pdf")
+        let exeSupported = await manager.isSupported(extension: "exe")
+        let dmgSupported = await manager.isSupported(extension: "dmg")
 
-        XCTAssertFalse(await manager.isSupported(extension: "exe"))
-        XCTAssertFalse(await manager.isSupported(extension: "dmg"))
+        XCTAssertTrue(txtSupported)
+        XCTAssertTrue(swiftSupported)
+        XCTAssertTrue(pdfSupported)
+        XCTAssertFalse(exeSupported)
+        XCTAssertFalse(dmgSupported)
     }
 
     func testOcrExtractorDisabledByDefault() async {
@@ -155,7 +161,8 @@ final class ExtractionManagerTests: XCTestCase {
         let manager = ExtractionManager(settings: settings)
 
         // PNG should not be supported when OCR is disabled
-        XCTAssertFalse(await manager.isSupported(extension: "png"))
+        let pngSupported = await manager.isSupported(extension: "png")
+        XCTAssertFalse(pngSupported)
     }
 
     func testOcrExtractorEnabledWhenConfigured() async {
@@ -163,6 +170,7 @@ final class ExtractionManagerTests: XCTestCase {
         let manager = ExtractionManager(settings: settings)
 
         // PNG should be supported when OCR is enabled
-        XCTAssertTrue(await manager.isSupported(extension: "png"))
+        let pngSupported = await manager.isSupported(extension: "png")
+        XCTAssertTrue(pngSupported)
     }
 }
