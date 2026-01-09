@@ -9,7 +9,7 @@ public enum IndexHealthStatus: String, Codable, Sendable {
 }
 
 /// Snapshot of index health for display
-public struct IndexHealthSnapshot: Sendable {
+public struct IndexHealthSnapshot: Codable, Sendable {
     public let status: IndexHealthStatus
     public let totalItems: Int64
     public let totalContentChunks: Int64
@@ -57,7 +57,7 @@ public struct IndexHealthSnapshot: Sendable {
 }
 
 /// Status of a single index root
-public struct IndexRootStatus: Sendable, Identifiable {
+public struct IndexRootStatus: Codable, Sendable, Identifiable {
     public var id: String { path }
 
     public let path: String

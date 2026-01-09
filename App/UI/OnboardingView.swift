@@ -1,4 +1,6 @@
 import SwiftUI
+import Shared
+import Core
 
 /// First-run onboarding flow
 struct OnboardingView: View {

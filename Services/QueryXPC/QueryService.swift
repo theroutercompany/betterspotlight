@@ -1,4 +1,6 @@
 import Foundation
+import Shared
+import Core
 import SQLite
 
 /// XPC Service for handling search queries

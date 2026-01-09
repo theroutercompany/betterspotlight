@@ -1,4 +1,6 @@
 import Foundation
+import Shared
+import Core
 
 /// XPC Service for background indexing
 public final class IndexerService: NSObject, IndexerServiceProtocol {

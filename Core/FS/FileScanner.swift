@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 
 /// Result of scanning a file or directory
 public struct ScanResult: Sendable {
@@ -63,7 +64,7 @@ public actor FileScanner {
             if isDirectory.boolValue {
                 if path.hasSuffix(".app") {
                     kind = .application
-                } else if self.isBundle(at: path) {
+                } else if FileScanner.isBundle(at: path) {
                     kind = .bundle
                 } else {
                     kind = .folder
@@ -217,7 +218,7 @@ public actor FileScanner {
         return results
     }
 
-    private func isBundle(at path: String) -> Bool {
+    private static func isBundle(at path: String) -> Bool {
         let bundleExtensions = ["app", "framework", "bundle", "plugin", "kext", "xpc"]
         let ext = (path as NSString).pathExtension.lowercased()
         return bundleExtensions.contains(ext)

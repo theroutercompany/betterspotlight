@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 import SQLite
 
 /// Full-text search index using SQLite FTS5

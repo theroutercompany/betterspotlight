@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "BetterSpotlight",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(name: "BetterSpotlight", targets: ["App"]),

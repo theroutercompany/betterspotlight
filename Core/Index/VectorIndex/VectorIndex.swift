@@ -1,4 +1,5 @@
 import Foundation
+import Shared
 
 /// Vector similarity search index for semantic search (optional feature)
 /// This is a placeholder implementation - in production, you'd use a proper vector DB

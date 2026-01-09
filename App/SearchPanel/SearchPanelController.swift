@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Shared
 
 /// Controls the floating search panel window
 @MainActor

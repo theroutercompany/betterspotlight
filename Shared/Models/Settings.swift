@@ -72,7 +72,7 @@ public struct SensitiveFolderConfig: Codable, Sendable, Hashable {
 }
 
 /// Main application settings
-public struct AppSettings: Codable, Sendable {
+public struct AppSettings: Codable, Sendable, Equatable {
     public var indexRoots: [IndexRoot]
     public var exclusionPatterns: [ExclusionPattern]
     public var sensitiveFolders: [SensitiveFolderConfig]
@@ -101,7 +101,7 @@ public struct AppSettings: Codable, Sendable {
 }
 
 /// Hotkey configuration
-public struct HotkeyConfig: Codable, Sendable {
+public struct HotkeyConfig: Codable, Sendable, Equatable {
     public var keyCode: UInt16
     public var modifiers: UInt32
 
@@ -113,7 +113,7 @@ public struct HotkeyConfig: Codable, Sendable {
 }
 
 /// Indexing behavior settings
-public struct IndexingSettings: Codable, Sendable {
+public struct IndexingSettings: Codable, Sendable, Equatable {
     public var maxFileSizeMB: Int
     public var debounceDelayMs: Int
     public var batchSize: Int
@@ -139,7 +139,7 @@ public struct IndexingSettings: Codable, Sendable {
 }
 
 /// Search behavior settings
-public struct SearchSettings: Codable, Sendable {
+public struct SearchSettings: Codable, Sendable, Equatable {
     public var maxResults: Int
     public var debounceDelayMs: Int
     public var enableFuzzyMatching: Bool
@@ -162,7 +162,7 @@ public struct SearchSettings: Codable, Sendable {
 }
 
 /// Privacy-related settings
-public struct PrivacySettings: Codable, Sendable {
+public struct PrivacySettings: Codable, Sendable, Equatable {
     public var enableFeedbackLogging: Bool
     public var feedbackRetentionDays: Int
     public var maskSensitivePreviews: Bool

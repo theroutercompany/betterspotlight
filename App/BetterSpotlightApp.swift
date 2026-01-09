@@ -1,4 +1,5 @@
 import SwiftUI
+import Shared
 
 @main
 struct BetterSpotlightApp: App {
@@ -13,6 +14,7 @@ struct BetterSpotlightApp: App {
 }
 
 /// Main application delegate
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private var hotkeyManager: HotkeyManager?
@@ -73,9 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showSettings() {
         NSApp.activate(ignoringOtherApps: true)
         if #available(macOS 14.0, *) {
-            NSApp.mainMenu?.items.first?.submenu?.items.first(where: { $0.title == "Settings…" })?.performAction()
-        } else {
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
 

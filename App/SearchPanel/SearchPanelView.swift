@@ -1,4 +1,5 @@
 import SwiftUI
+import Shared
 
 /// Main search panel view
 struct SearchPanelView: View {
@@ -68,11 +69,13 @@ struct SearchPanelView: View {
             viewModel.openSelected()
             return .handled
         }
-        .onKeyPress(keys: [.init("r")], modifiers: .command) { _ in
+        .onKeyPress(characters: .init(charactersIn: "r"), phases: .down) { press in
+            guard press.modifiers.contains(.command) else { return .ignored }
             viewModel.revealSelected()
             return .handled
         }
-        .onKeyPress(keys: [.init("c")], modifiers: [.command, .shift]) { _ in
+        .onKeyPress(characters: .init(charactersIn: "c"), phases: .down) { press in
+            guard press.modifiers.contains(.command) && press.modifiers.contains(.shift) else { return .ignored }
             viewModel.copyPathSelected()
             return .handled
         }
