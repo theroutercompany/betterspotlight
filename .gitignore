@@ -1,0 +1,27 @@
+# Build artifacts
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+*.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+
+# Testing
+*.xcresult
+
+# Application data (for development)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
