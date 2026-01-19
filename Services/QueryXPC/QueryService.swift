@@ -1,10 +1,46 @@
 import Foundation
-import Shared
-import Core
 import SQLite
+
+/// XPC Service delegate for setting up connections
+final class QueryServiceDelegate: NSObject, NSXPCListenerDelegate {
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
+        newConnection.exportedInterface = NSXPCInterface(with: QueryServiceProtocol.self)
+
+        do {
+            let service = try QueryService.shared
+            newConnection.exportedObject = service
+            newConnection.resume()
+            return true
+        } catch {
+            print("QueryXPC: Failed to create service: \(error)")
+            return false
+        }
+    }
+}
 
 /// XPC Service for handling search queries
 public final class QueryService: NSObject, QueryServiceProtocol {
+    /// Shared singleton instance
+    static var shared: QueryService = {
+        do {
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let appFolder = appSupport.appendingPathComponent("BetterSpotlight")
+            let settingsURL = appFolder.appendingPathComponent("settings.json")
+
+            let settings: AppSettings
+            if let data = try? Data(contentsOf: settingsURL),
+               let loaded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+                settings = loaded
+            } else {
+                settings = AppSettings()
+            }
+
+            return try QueryService(settings: settings)
+        } catch {
+            fatalError("Failed to initialize QueryService: \(error)")
+        }
+    }()
+
     private let store: SQLiteStore
     private let lexicalIndex: LexicalIndex
     private let vectorIndex: VectorIndex?
