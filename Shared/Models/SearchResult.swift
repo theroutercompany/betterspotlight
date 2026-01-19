@@ -1,7 +1,7 @@
 import Foundation
 
 /// Represents a search result with scoring information
-public struct SearchResult: Identifiable, Sendable {
+public struct SearchResult: Identifiable, Codable, Sendable {
     public let id: Int64
     public let item: IndexItem
     public let score: Double
@@ -68,7 +68,7 @@ public struct QueryContext: Codable, Sendable {
 }
 
 /// Search query with options
-public struct SearchQuery: Sendable {
+public struct SearchQuery: Codable, Sendable {
     public let text: String
     public let context: QueryContext
     public let options: SearchOptions
