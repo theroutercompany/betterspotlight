@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 
 /// Evaluates paths against configured rules to determine indexing behavior
 public struct PathRules: Sendable {

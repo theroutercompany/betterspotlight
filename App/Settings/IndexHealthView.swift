@@ -1,5 +1,4 @@
 import SwiftUI
-import Shared
 
 /// Index health monitoring view
 struct IndexHealthView: View {

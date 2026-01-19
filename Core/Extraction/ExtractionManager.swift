@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 
 /// Manages text extraction from files using appropriate extractors
 public actor ExtractionManager {

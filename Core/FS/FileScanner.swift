@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 
 /// Result of scanning a file or directory
 public struct ScanResult: Sendable {

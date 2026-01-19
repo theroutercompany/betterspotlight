@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 import PDFKit
 
 /// Extracts text from PDF files using PDFKit

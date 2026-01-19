@@ -1,5 +1,4 @@
 import SwiftUI
-import Shared
 
 /// Main search panel view
 struct SearchPanelView: View {
