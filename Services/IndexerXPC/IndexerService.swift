@@ -1,9 +1,46 @@
 import Foundation
-import Shared
-import Core
+
+/// XPC Service delegate for setting up connections
+final class IndexerServiceDelegate: NSObject, NSXPCListenerDelegate {
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
+        newConnection.exportedInterface = NSXPCInterface(with: IndexerServiceProtocol.self)
+
+        do {
+            let service = try IndexerService.shared
+            newConnection.exportedObject = service
+            newConnection.resume()
+            return true
+        } catch {
+            print("IndexerXPC: Failed to create service: \(error)")
+            return false
+        }
+    }
+}
 
 /// XPC Service for background indexing
 public final class IndexerService: NSObject, IndexerServiceProtocol {
+    /// Shared singleton instance
+    static var shared: IndexerService = {
+        do {
+            // Load settings from shared location
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let appFolder = appSupport.appendingPathComponent("BetterSpotlight")
+            let settingsURL = appFolder.appendingPathComponent("settings.json")
+
+            let settings: AppSettings
+            if let data = try? Data(contentsOf: settingsURL),
+               let loaded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+                settings = loaded
+            } else {
+                settings = AppSettings()
+            }
+
+            return try IndexerService(settings: settings)
+        } catch {
+            fatalError("Failed to initialize IndexerService: \(error)")
+        }
+    }()
+
     private let store: SQLiteStore
     private let scanner: FileScanner
     private let watcher: FSEventsWatcher?

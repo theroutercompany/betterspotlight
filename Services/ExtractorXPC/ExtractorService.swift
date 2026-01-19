@@ -1,6 +1,16 @@
 import Foundation
-import Shared
-import Core
+
+/// XPC Service delegate for setting up connections
+final class ExtractorServiceDelegate: NSObject, NSXPCListenerDelegate {
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
+        newConnection.exportedInterface = NSXPCInterface(with: ExtractorServiceProtocol.self)
+
+        let service = ExtractorService()
+        newConnection.exportedObject = service
+        newConnection.resume()
+        return true
+    }
+}
 
 /// XPC Service for text extraction from files
 public final class ExtractorService: NSObject, ExtractorServiceProtocol {
