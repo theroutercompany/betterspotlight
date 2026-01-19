@@ -17,7 +17,12 @@ public actor ServiceClient {
 
         let connection = NSXPCConnection(serviceName: XPCServiceIdentifier.indexer.rawValue)
         connection.remoteObjectInterface = NSXPCInterface(with: IndexerServiceProtocol.self)
+        connection.interruptionHandler = { [weak self] in
+            print("ServiceClient: Indexer connection interrupted")
+            Task { await self?.handleIndexerInvalidation() }
+        }
         connection.invalidationHandler = { [weak self] in
+            print("ServiceClient: Indexer connection invalidated")
             Task { await self?.handleIndexerInvalidation() }
         }
         connection.resume()
@@ -32,6 +37,9 @@ public actor ServiceClient {
 
         let connection = NSXPCConnection(serviceName: XPCServiceIdentifier.extractor.rawValue)
         connection.remoteObjectInterface = NSXPCInterface(with: ExtractorServiceProtocol.self)
+        connection.interruptionHandler = { [weak self] in
+            Task { await self?.handleExtractorInvalidation() }
+        }
         connection.invalidationHandler = { [weak self] in
             Task { await self?.handleExtractorInvalidation() }
         }
@@ -47,6 +55,9 @@ public actor ServiceClient {
 
         let connection = NSXPCConnection(serviceName: XPCServiceIdentifier.query.rawValue)
         connection.remoteObjectInterface = NSXPCInterface(with: QueryServiceProtocol.self)
+        connection.interruptionHandler = { [weak self] in
+            Task { await self?.handleQueryInvalidation() }
+        }
         connection.invalidationHandler = { [weak self] in
             Task { await self?.handleQueryInvalidation() }
         }
@@ -71,7 +82,10 @@ public actor ServiceClient {
 
     public func startIndexing() async throws {
         let connection = try getIndexerConnection()
-        guard let proxy = connection.remoteObjectProxy as? IndexerServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Indexer proxy error: \(error)")
+        }) as? IndexerServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -90,7 +104,10 @@ public actor ServiceClient {
 
     public func stopIndexing() async throws {
         let connection = try getIndexerConnection()
-        guard let proxy = connection.remoteObjectProxy as? IndexerServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Indexer proxy error: \(error)")
+        }) as? IndexerServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -109,7 +126,10 @@ public actor ServiceClient {
 
     public func reindexFolder(at path: String) async throws {
         let connection = try getIndexerConnection()
-        guard let proxy = connection.remoteObjectProxy as? IndexerServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Indexer proxy error: \(error)")
+        }) as? IndexerServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -128,7 +148,10 @@ public actor ServiceClient {
 
     public func getQueueLength() async throws -> Int {
         let connection = try getIndexerConnection()
-        guard let proxy = connection.remoteObjectProxy as? IndexerServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Indexer proxy error: \(error)")
+        }) as? IndexerServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -147,7 +170,10 @@ public actor ServiceClient {
 
     public func search(query: SearchQuery) async throws -> [SearchResult] {
         let connection = try getQueryConnection()
-        guard let proxy = connection.remoteObjectProxy as? QueryServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Query proxy error: \(error)")
+        }) as? QueryServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -181,7 +207,10 @@ public actor ServiceClient {
 
     public func getIndexHealth() async throws -> IndexHealthSnapshot {
         let connection = try getQueryConnection()
-        guard let proxy = connection.remoteObjectProxy as? QueryServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Query proxy error: \(error)")
+        }) as? QueryServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -210,7 +239,10 @@ public actor ServiceClient {
 
     public func recordFeedback(_ feedback: FeedbackEntry) async throws {
         let connection = try getQueryConnection()
-        guard let proxy = connection.remoteObjectProxy as? QueryServiceProtocol else {
+
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
+            print("ServiceClient: Query proxy error: \(error)")
+        }) as? QueryServiceProtocol else {
             throw XPCError.serviceUnavailable
         }
 
@@ -241,53 +273,5 @@ public actor ServiceClient {
         indexerConnection = nil
         extractorConnection = nil
         queryConnection = nil
-    }
-}
-
-// MARK: - Codable Conformance for XPC Types
-
-extension SearchResult: Codable {
-    enum CodingKeys: String, CodingKey {
-        case item, score, matchType, highlights, snippet
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let item = try container.decode(IndexItem.self, forKey: .item)
-        let score = try container.decode(Double.self, forKey: .score)
-        let matchType = try container.decode(MatchType.self, forKey: .matchType)
-        let highlights = try container.decode([HighlightRange].self, forKey: .highlights)
-        let snippet = try container.decodeIfPresent(String.self, forKey: .snippet)
-        self.init(item: item, score: score, matchType: matchType, highlights: highlights, snippet: snippet)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(item, forKey: .item)
-        try container.encode(score, forKey: .score)
-        try container.encode(matchType, forKey: .matchType)
-        try container.encode(highlights, forKey: .highlights)
-        try container.encodeIfPresent(snippet, forKey: .snippet)
-    }
-}
-
-extension SearchQuery: Codable {
-    enum CodingKeys: String, CodingKey {
-        case text, context, options
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let text = try container.decode(String.self, forKey: .text)
-        let context = try container.decode(QueryContext.self, forKey: .context)
-        let options = try container.decode(SearchOptions.self, forKey: .options)
-        self.init(text: text, context: context, options: options)
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(text, forKey: .text)
-        try container.encode(context, forKey: .context)
-        try container.encode(options, forKey: .options)
     }
 }
