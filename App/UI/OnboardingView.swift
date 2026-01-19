@@ -1,6 +1,4 @@
 import SwiftUI
-import Shared
-import Core
 
 /// First-run onboarding flow
 struct OnboardingView: View {
@@ -104,11 +102,21 @@ struct OnboardingView: View {
     }
 
     private func completeOnboarding() {
+        print("BetterSpotlight: Completing onboarding...")
+
         let roots = homeDirectoryItems
             .filter { $0.classification != .exclude }
             .map { IndexRoot(path: $0.path, classification: $0.classification, isUserOverride: false) }
 
+        print("BetterSpotlight: Selected \(roots.count) roots to index")
+
         appState.completeOnboarding(with: roots)
+
+        // Close the onboarding window and switch to accessory mode
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.accessory)
+            NSApp.keyWindow?.close()
+        }
     }
 }
 

@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import Shared
 
 /// Controls the status bar menu
 @MainActor
@@ -20,8 +19,14 @@ public final class StatusBarController {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "BetterSpotlight")
-            button.image?.isTemplate = true
+            // Try SF Symbol first, fall back to text if not available
+            if let image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "BetterSpotlight") {
+                button.image = image
+                button.image?.isTemplate = true
+            } else {
+                // Fallback to text title
+                button.title = "🔍"
+            }
         }
 
         updateMenu()
