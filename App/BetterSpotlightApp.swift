@@ -1,5 +1,4 @@
 import SwiftUI
-import Shared
 
 @main
 struct BetterSpotlightApp: App {
@@ -10,6 +9,13 @@ struct BetterSpotlightApp: App {
             SettingsView()
                 .environmentObject(appDelegate.appState)
         }
+
+        WindowGroup("Onboarding", id: "onboarding") {
+            OnboardingView()
+                .environmentObject(appDelegate.appState)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
     }
 }
 
@@ -20,8 +26,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyManager: HotkeyManager?
     private var searchPanelController: SearchPanelController?
     private var statusBarController: StatusBarController?
+    private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Show confirmation that app launched
+        print("BetterSpotlight: Application launched successfully")
+
         // Set up as accessory app (no dock icon)
         NSApp.setActivationPolicy(.accessory)
 
@@ -42,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Set up status bar
         statusBarController = StatusBarController(appState: appState)
+        print("BetterSpotlight: Status bar controller created")
         statusBarController?.onShowSettings = { [weak self] in
             self?.showSettings()
         }
@@ -50,9 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Check permissions on first run
+        print("BetterSpotlight: hasCompletedOnboarding = \(appState.hasCompletedOnboarding)")
         if !appState.hasCompletedOnboarding {
+            print("BetterSpotlight: Showing onboarding...")
             showOnboarding()
         } else {
+            print("BetterSpotlight: Skipping onboarding, starting indexing...")
             // Start indexing
             Task {
                 await appState.startIndexing()
@@ -82,8 +96,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showOnboarding() {
-        // Would show onboarding window
-        // For now, just mark as completed
-        appState.hasCompletedOnboarding = true
+        print("BetterSpotlight: Creating onboarding window...")
+
+        let onboardingView = OnboardingView()
+            .environmentObject(appState)
+
+        let hostingController = NSHostingController(rootView: onboardingView)
+
+        onboardingWindow = NSWindow(contentViewController: hostingController)
+        onboardingWindow?.title = "Welcome to BetterSpotlight"
+        onboardingWindow?.styleMask = [.titled, .closable]
+        onboardingWindow?.setContentSize(NSSize(width: 600, height: 500))
+        onboardingWindow?.center()
+
+        // Need to change activation policy to show window (we set it to .accessory earlier)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
+
+        print("BetterSpotlight: Onboarding window should be visible now")
     }
 }

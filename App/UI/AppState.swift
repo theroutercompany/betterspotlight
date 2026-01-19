@@ -1,7 +1,5 @@
 import Foundation
-import Shared
 import SwiftUI
-import Shared
 
 /// Central application state
 @MainActor
@@ -139,14 +137,20 @@ public final class AppState: ObservableObject {
     // MARK: - Onboarding
 
     public func completeOnboarding(with roots: [IndexRoot]) {
+        print("BetterSpotlight: AppState.completeOnboarding called with \(roots.count) roots")
+
         settings.indexRoots = roots
         saveSettings()
+        print("BetterSpotlight: Settings saved")
 
         hasCompletedOnboarding = true
         UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+        print("BetterSpotlight: Onboarding marked complete")
 
         Task {
+            print("BetterSpotlight: Starting indexing...")
             await startIndexing()
+            print("BetterSpotlight: Indexing started")
         }
     }
 }
