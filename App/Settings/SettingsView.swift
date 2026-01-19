@@ -1,5 +1,4 @@
 import SwiftUI
-import Shared
 
 /// Main settings view
 struct SettingsView: View {

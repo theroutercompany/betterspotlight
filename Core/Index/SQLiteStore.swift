@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 import SQLite
 
 /// SQLite-based storage for the search index

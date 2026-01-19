@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 
 /// Scores and ranks search results
 public struct ResultScorer: Sendable {

@@ -1,5 +1,4 @@
 import Foundation
-import Shared
 
 /// Delegate for receiving file system events
 public protocol FSEventsWatcherDelegate: AnyObject {
