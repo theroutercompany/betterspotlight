@@ -1,0 +1,1070 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		/* App Target */
+		APP001 /* BetterSpotlightApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC001; };
+		APP002 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC002; };
+		APP003 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC003; };
+		APP004 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC004; };
+		APP005 /* IndexHealthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC005; };
+		APP006 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC006; };
+		APP007 /* HotkeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC007; };
+		APP008 /* SearchPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC008; };
+		APP009 /* SearchPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRC009; };
+
+		/* Shared Sources */
+		SHR001 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC001; };
+		SHR002 /* IndexItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC002; };
+		SHR003 /* SearchResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC003; };
+		SHR004 /* IndexHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC004; };
+		SHR005 /* ServiceProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC005; };
+		SHR006 /* ServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC006; };
+		SHR007 /* Feedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHRSRC007; };
+
+		/* Core Sources */
+		COR001 /* SQLiteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC001; };
+		COR002 /* LexicalIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC002; };
+		COR003 /* VectorIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC003; };
+		COR004 /* FileScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC004; };
+		COR005 /* FSEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC005; };
+		COR006 /* PathRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC006; };
+		COR007 /* ExtractionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC007; };
+		COR008 /* TextExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC008; };
+		COR009 /* PdfExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC009; };
+		COR010 /* OcrExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC010; };
+		COR011 /* Scoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC011; };
+		COR012 /* ContextSignals.swift in Sources */ = {isa = PBXBuildFile; fileRef = CORSRC012; };
+
+		/* IndexerXPC Sources */
+		IDX001 /* IndexerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = IDXSRC001; };
+		IDX002 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = IDXSRC002; };
+
+		/* QueryXPC Sources */
+		QRY001 /* QueryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = QRYSRC001; };
+		QRY002 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = QRYSRC002; };
+
+		/* ExtractorXPC Sources */
+		EXT001 /* ExtractorService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EXTSRC001; };
+		EXT002 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = EXTSRC002; };
+
+		/* XPC Service Embed */
+		EMB001 /* IndexerXPC.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = PROD002; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		EMB002 /* QueryXPC.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = PROD003; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		EMB003 /* ExtractorXPC.xpc in Embed XPC Services */ = {isa = PBXBuildFile; fileRef = PROD004; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+
+		/* SQLite.swift Package */
+		PKG001 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = PKGREF001; };
+		PKG002 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = PKGREF002; };
+		PKG003 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = PKGREF003; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		PROXY001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = PROJ001;
+			proxyType = 1;
+			remoteGlobalIDString = TGT002;
+			remoteInfo = IndexerXPC;
+		};
+		PROXY002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = PROJ001;
+			proxyType = 1;
+			remoteGlobalIDString = TGT003;
+			remoteInfo = QueryXPC;
+		};
+		PROXY003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = PROJ001;
+			proxyType = 1;
+			remoteGlobalIDString = TGT004;
+			remoteInfo = ExtractorXPC;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		COPY001 /* Embed XPC Services */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				EMB001 /* IndexerXPC.xpc in Embed XPC Services */,
+				EMB002 /* QueryXPC.xpc in Embed XPC Services */,
+				EMB003 /* ExtractorXPC.xpc in Embed XPC Services */,
+			);
+			name = "Embed XPC Services";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		/* Products */
+		PROD001 /* BetterSpotlight.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BetterSpotlight.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		PROD002 /* IndexerXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = IndexerXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		PROD003 /* QueryXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = QueryXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		PROD004 /* ExtractorXPC.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = ExtractorXPC.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+
+		/* App Sources */
+		SRC001 /* BetterSpotlightApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetterSpotlightApp.swift; sourceTree = "<group>"; };
+		SRC002 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		SRC003 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		SRC004 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		SRC005 /* IndexHealthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexHealthView.swift; sourceTree = "<group>"; };
+		SRC006 /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
+		SRC007 /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
+		SRC008 /* SearchPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelController.swift; sourceTree = "<group>"; };
+		SRC009 /* SearchPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelView.swift; sourceTree = "<group>"; };
+
+		/* Shared Sources */
+		SHRSRC001 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		SHRSRC002 /* IndexItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexItem.swift; sourceTree = "<group>"; };
+		SHRSRC003 /* SearchResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResult.swift; sourceTree = "<group>"; };
+		SHRSRC004 /* IndexHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexHealth.swift; sourceTree = "<group>"; };
+		SHRSRC005 /* ServiceProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceProtocols.swift; sourceTree = "<group>"; };
+		SHRSRC006 /* ServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceClient.swift; sourceTree = "<group>"; };
+		SHRSRC007 /* Feedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Feedback.swift; sourceTree = "<group>"; };
+
+		/* Core Sources */
+		CORSRC001 /* SQLiteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteStore.swift; sourceTree = "<group>"; };
+		CORSRC002 /* LexicalIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LexicalIndex.swift; sourceTree = "<group>"; };
+		CORSRC003 /* VectorIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VectorIndex.swift; sourceTree = "<group>"; };
+		CORSRC004 /* FileScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileScanner.swift; sourceTree = "<group>"; };
+		CORSRC005 /* FSEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FSEvents.swift; sourceTree = "<group>"; };
+		CORSRC006 /* PathRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PathRules.swift; sourceTree = "<group>"; };
+		CORSRC007 /* ExtractionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionManager.swift; sourceTree = "<group>"; };
+		CORSRC008 /* TextExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextExtractor.swift; sourceTree = "<group>"; };
+		CORSRC009 /* PdfExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PdfExtractor.swift; sourceTree = "<group>"; };
+		CORSRC010 /* OcrExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OcrExtractor.swift; sourceTree = "<group>"; };
+		CORSRC011 /* Scoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scoring.swift; sourceTree = "<group>"; };
+		CORSRC012 /* ContextSignals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextSignals.swift; sourceTree = "<group>"; };
+
+		/* Service Sources */
+		IDXSRC001 /* IndexerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexerService.swift; sourceTree = "<group>"; };
+		IDXSRC002 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		QRYSRC001 /* QueryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryService.swift; sourceTree = "<group>"; };
+		QRYSRC002 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		EXTSRC001 /* ExtractorService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractorService.swift; sourceTree = "<group>"; };
+		EXTSRC002 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+
+		/* Info.plist files */
+		INFO001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		INFO002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		INFO003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		INFO004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+
+		/* Entitlements */
+		ENT001 /* BetterSpotlight.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BetterSpotlight.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FRM001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				PKG001 /* SQLite in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FRM002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				PKG002 /* SQLite in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FRM003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				PKG003 /* SQLite in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FRM004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		ROOT001 = {
+			isa = PBXGroup;
+			children = (
+				GRP001 /* App */,
+				GRP002 /* Core */,
+				GRP003 /* Shared */,
+				GRP004 /* Services */,
+				GRP005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		GRP001 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				SRC001 /* BetterSpotlightApp.swift */,
+				GRP006 /* UI */,
+				GRP007 /* Hotkey */,
+				GRP008 /* SearchPanel */,
+				GRP009 /* Settings */,
+				INFO001 /* Info.plist */,
+				ENT001 /* BetterSpotlight.entitlements */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		GRP002 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				GRP010 /* Index */,
+				GRP011 /* FS */,
+				GRP012 /* Extraction */,
+				GRP013 /* Ranking */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		GRP003 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				GRP014 /* Models */,
+				GRP015 /* IPC */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		GRP004 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				GRP016 /* IndexerXPC */,
+				GRP017 /* QueryXPC */,
+				GRP018 /* ExtractorXPC */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		GRP005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				PROD001 /* BetterSpotlight.app */,
+				PROD002 /* IndexerXPC.xpc */,
+				PROD003 /* QueryXPC.xpc */,
+				PROD004 /* ExtractorXPC.xpc */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		GRP006 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				SRC002 /* AppState.swift */,
+				SRC003 /* OnboardingView.swift */,
+				SRC006 /* StatusBarController.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		GRP007 /* Hotkey */ = {
+			isa = PBXGroup;
+			children = (
+				SRC007 /* HotkeyManager.swift */,
+			);
+			path = Hotkey;
+			sourceTree = "<group>";
+		};
+		GRP008 /* SearchPanel */ = {
+			isa = PBXGroup;
+			children = (
+				SRC008 /* SearchPanelController.swift */,
+				SRC009 /* SearchPanelView.swift */,
+			);
+			path = SearchPanel;
+			sourceTree = "<group>";
+		};
+		GRP009 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				SRC004 /* SettingsView.swift */,
+				SRC005 /* IndexHealthView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		GRP010 /* Index */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC001 /* SQLiteStore.swift */,
+				GRP019 /* LexicalIndex */,
+				GRP020 /* VectorIndex */,
+			);
+			path = Index;
+			sourceTree = "<group>";
+		};
+		GRP011 /* FS */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC004 /* FileScanner.swift */,
+				CORSRC005 /* FSEvents.swift */,
+				CORSRC006 /* PathRules.swift */,
+			);
+			path = FS;
+			sourceTree = "<group>";
+		};
+		GRP012 /* Extraction */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC007 /* ExtractionManager.swift */,
+				GRP021 /* TextExtractors */,
+				GRP022 /* PdfExtractor */,
+				GRP023 /* OcrVision */,
+			);
+			path = Extraction;
+			sourceTree = "<group>";
+		};
+		GRP013 /* Ranking */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC011 /* Scoring.swift */,
+				CORSRC012 /* ContextSignals.swift */,
+			);
+			path = Ranking;
+			sourceTree = "<group>";
+		};
+		GRP014 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				SHRSRC001 /* Settings.swift */,
+				SHRSRC002 /* IndexItem.swift */,
+				SHRSRC003 /* SearchResult.swift */,
+				SHRSRC004 /* IndexHealth.swift */,
+				SHRSRC007 /* Feedback.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		GRP015 /* IPC */ = {
+			isa = PBXGroup;
+			children = (
+				SHRSRC005 /* ServiceProtocols.swift */,
+				SHRSRC006 /* ServiceClient.swift */,
+			);
+			path = IPC;
+			sourceTree = "<group>";
+		};
+		GRP016 /* IndexerXPC */ = {
+			isa = PBXGroup;
+			children = (
+				IDXSRC001 /* IndexerService.swift */,
+				IDXSRC002 /* main.swift */,
+				INFO002 /* Info.plist */,
+			);
+			path = IndexerXPC;
+			sourceTree = "<group>";
+		};
+		GRP017 /* QueryXPC */ = {
+			isa = PBXGroup;
+			children = (
+				QRYSRC001 /* QueryService.swift */,
+				QRYSRC002 /* main.swift */,
+				INFO003 /* Info.plist */,
+			);
+			path = QueryXPC;
+			sourceTree = "<group>";
+		};
+		GRP018 /* ExtractorXPC */ = {
+			isa = PBXGroup;
+			children = (
+				EXTSRC001 /* ExtractorService.swift */,
+				EXTSRC002 /* main.swift */,
+				INFO004 /* Info.plist */,
+			);
+			path = ExtractorXPC;
+			sourceTree = "<group>";
+		};
+		GRP019 /* LexicalIndex */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC002 /* LexicalIndex.swift */,
+			);
+			path = LexicalIndex;
+			sourceTree = "<group>";
+		};
+		GRP020 /* VectorIndex */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC003 /* VectorIndex.swift */,
+			);
+			path = VectorIndex;
+			sourceTree = "<group>";
+		};
+		GRP021 /* TextExtractors */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC008 /* TextExtractor.swift */,
+			);
+			path = TextExtractors;
+			sourceTree = "<group>";
+		};
+		GRP022 /* PdfExtractor */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC009 /* PdfExtractor.swift */,
+			);
+			path = PdfExtractor;
+			sourceTree = "<group>";
+		};
+		GRP023 /* OcrVision */ = {
+			isa = PBXGroup;
+			children = (
+				CORSRC010 /* OcrExtractor.swift */,
+			);
+			path = OcrVision;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		TGT001 /* BetterSpotlight */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CFG001 /* Build configuration list for PBXNativeTarget "BetterSpotlight" */;
+			buildPhases = (
+				SRC100 /* Sources */,
+				FRM001 /* Frameworks */,
+				RES001 /* Resources */,
+				COPY001 /* Embed XPC Services */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DEP001 /* PBXTargetDependency */,
+				DEP002 /* PBXTargetDependency */,
+				DEP003 /* PBXTargetDependency */,
+			);
+			name = BetterSpotlight;
+			packageProductDependencies = (
+				PKGREF001 /* SQLite */,
+			);
+			productName = BetterSpotlight;
+			productReference = PROD001 /* BetterSpotlight.app */;
+			productType = "com.apple.product-type.application";
+		};
+		TGT002 /* IndexerXPC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CFG002 /* Build configuration list for PBXNativeTarget "IndexerXPC" */;
+			buildPhases = (
+				SRC200 /* Sources */,
+				FRM002 /* Frameworks */,
+				RES002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = IndexerXPC;
+			packageProductDependencies = (
+				PKGREF002 /* SQLite */,
+			);
+			productName = IndexerXPC;
+			productReference = PROD002 /* IndexerXPC.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
+		TGT003 /* QueryXPC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CFG003 /* Build configuration list for PBXNativeTarget "QueryXPC" */;
+			buildPhases = (
+				SRC300 /* Sources */,
+				FRM003 /* Frameworks */,
+				RES003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = QueryXPC;
+			packageProductDependencies = (
+				PKGREF003 /* SQLite */,
+			);
+			productName = QueryXPC;
+			productReference = PROD003 /* QueryXPC.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
+		TGT004 /* ExtractorXPC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CFG004 /* Build configuration list for PBXNativeTarget "ExtractorXPC" */;
+			buildPhases = (
+				SRC400 /* Sources */,
+				FRM004 /* Frameworks */,
+				RES004 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ExtractorXPC;
+			productName = ExtractorXPC;
+			productReference = PROD004 /* ExtractorXPC.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		PROJ001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					TGT001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					TGT002 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					TGT003 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					TGT004 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = CFGPROJ /* Build configuration list for PBXProject "BetterSpotlight" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = ROOT001;
+			packageReferences = (
+				PKGDEP001 /* XCRemoteSwiftPackageReference "SQLite.swift" */,
+			);
+			productRefGroup = GRP005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				TGT001 /* BetterSpotlight */,
+				TGT002 /* IndexerXPC */,
+				TGT003 /* QueryXPC */,
+				TGT004 /* ExtractorXPC */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		RES001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		RES002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		RES003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		RES004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		SRC100 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				APP001 /* BetterSpotlightApp.swift in Sources */,
+				APP002 /* AppState.swift in Sources */,
+				APP003 /* OnboardingView.swift in Sources */,
+				APP004 /* SettingsView.swift in Sources */,
+				APP005 /* IndexHealthView.swift in Sources */,
+				APP006 /* StatusBarController.swift in Sources */,
+				APP007 /* HotkeyManager.swift in Sources */,
+				APP008 /* SearchPanelController.swift in Sources */,
+				APP009 /* SearchPanelView.swift in Sources */,
+				SHR001 /* Settings.swift in Sources */,
+				SHR002 /* IndexItem.swift in Sources */,
+				SHR003 /* SearchResult.swift in Sources */,
+				SHR004 /* IndexHealth.swift in Sources */,
+				SHR005 /* ServiceProtocols.swift in Sources */,
+				SHR006 /* ServiceClient.swift in Sources */,
+				SHR007 /* Feedback.swift in Sources */,
+				COR001 /* SQLiteStore.swift in Sources */,
+				COR002 /* LexicalIndex.swift in Sources */,
+				COR003 /* VectorIndex.swift in Sources */,
+				COR004 /* FileScanner.swift in Sources */,
+				COR005 /* FSEvents.swift in Sources */,
+				COR006 /* PathRules.swift in Sources */,
+				COR007 /* ExtractionManager.swift in Sources */,
+				COR008 /* TextExtractor.swift in Sources */,
+				COR009 /* PdfExtractor.swift in Sources */,
+				COR010 /* OcrExtractor.swift in Sources */,
+				COR011 /* Scoring.swift in Sources */,
+				COR012 /* ContextSignals.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		SRC200 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				IDX001 /* IndexerService.swift in Sources */,
+				IDX002 /* main.swift in Sources */,
+				SHR001 /* Settings.swift in Sources */,
+				SHR002 /* IndexItem.swift in Sources */,
+				SHR003 /* SearchResult.swift in Sources */,
+				SHR004 /* IndexHealth.swift in Sources */,
+				SHR005 /* ServiceProtocols.swift in Sources */,
+				SHR007 /* Feedback.swift in Sources */,
+				COR001 /* SQLiteStore.swift in Sources */,
+				COR002 /* LexicalIndex.swift in Sources */,
+				COR004 /* FileScanner.swift in Sources */,
+				COR005 /* FSEvents.swift in Sources */,
+				COR006 /* PathRules.swift in Sources */,
+				COR007 /* ExtractionManager.swift in Sources */,
+				COR008 /* TextExtractor.swift in Sources */,
+				COR009 /* PdfExtractor.swift in Sources */,
+				COR010 /* OcrExtractor.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		SRC300 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				QRY001 /* QueryService.swift in Sources */,
+				QRY002 /* main.swift in Sources */,
+				SHR001 /* Settings.swift in Sources */,
+				SHR002 /* IndexItem.swift in Sources */,
+				SHR003 /* SearchResult.swift in Sources */,
+				SHR004 /* IndexHealth.swift in Sources */,
+				SHR005 /* ServiceProtocols.swift in Sources */,
+				SHR007 /* Feedback.swift in Sources */,
+				COR001 /* SQLiteStore.swift in Sources */,
+				COR002 /* LexicalIndex.swift in Sources */,
+				COR003 /* VectorIndex.swift in Sources */,
+				COR006 /* PathRules.swift in Sources */,
+				COR011 /* Scoring.swift in Sources */,
+				COR012 /* ContextSignals.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		SRC400 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EXT001 /* ExtractorService.swift in Sources */,
+				EXT002 /* main.swift in Sources */,
+				SHR001 /* Settings.swift in Sources */,
+				SHR002 /* IndexItem.swift in Sources */,
+				SHR005 /* ServiceProtocols.swift in Sources */,
+				COR007 /* ExtractionManager.swift in Sources */,
+				COR008 /* TextExtractor.swift in Sources */,
+				COR009 /* PdfExtractor.swift in Sources */,
+				COR010 /* OcrExtractor.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DEP001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = TGT002 /* IndexerXPC */;
+			targetProxy = PROXY001 /* PBXContainerItemProxy */;
+		};
+		DEP002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = TGT003 /* QueryXPC */;
+			targetProxy = PROXY002 /* PBXContainerItemProxy */;
+		};
+		DEP003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = TGT004 /* ExtractorXPC */;
+			targetProxy = PROXY003 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		/* Project Debug */
+		CFGPROJ_DEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		/* Project Release */
+		CFGPROJ_RELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		/* App Debug */
+		CFG001_DEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = App/BetterSpotlight.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		/* App Release */
+		CFG001_RELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = App/BetterSpotlight.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		/* IndexerXPC Debug */
+		CFG002_DEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/IndexerXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.IndexerXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		/* IndexerXPC Release */
+		CFG002_RELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/IndexerXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.IndexerXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		/* QueryXPC Debug */
+		CFG003_DEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/QueryXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.QueryXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		/* QueryXPC Release */
+		CFG003_RELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/QueryXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.QueryXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		/* ExtractorXPC Debug */
+		CFG004_DEBUG /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/ExtractorXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.ExtractorXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		/* ExtractorXPC Release */
+		CFG004_RELEASE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Services/ExtractorXPC/Info.plist;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.betterspotlight.app.ExtractorXPC;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CFGPROJ /* Build configuration list for PBXProject "BetterSpotlight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFGPROJ_DEBUG /* Debug */,
+				CFGPROJ_RELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CFG001 /* Build configuration list for PBXNativeTarget "BetterSpotlight" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG001_DEBUG /* Debug */,
+				CFG001_RELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CFG002 /* Build configuration list for PBXNativeTarget "IndexerXPC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG002_DEBUG /* Debug */,
+				CFG002_RELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CFG003 /* Build configuration list for PBXNativeTarget "QueryXPC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG003_DEBUG /* Debug */,
+				CFG003_RELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CFG004 /* Build configuration list for PBXNativeTarget "ExtractorXPC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CFG004_DEBUG /* Debug */,
+				CFG004_RELEASE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		PKGDEP001 /* XCRemoteSwiftPackageReference "SQLite.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stephencelis/SQLite.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.15.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		PKGREF001 /* SQLite */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = PKGDEP001 /* XCRemoteSwiftPackageReference "SQLite.swift" */;
+			productName = SQLite;
+		};
+		PKGREF002 /* SQLite */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = PKGDEP001 /* XCRemoteSwiftPackageReference "SQLite.swift" */;
+			productName = SQLite;
+		};
+		PKGREF003 /* SQLite */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = PKGDEP001 /* XCRemoteSwiftPackageReference "SQLite.swift" */;
+			productName = SQLite;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = PROJ001 /* Project object */;
+}
