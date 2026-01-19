@@ -1,15 +1,26 @@
 # Build artifacts
 .build/
 DerivedData/
+Build/
+build/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
 
 # Swift Package Manager
 .swiftpm/
-Package.resolved
 
 # macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon?
+.Spotlight-V100
+.Trashes
 *.swp
 *~
 
@@ -20,6 +31,16 @@ Package.resolved
 
 # Testing
 *.xcresult
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+
+# Build products
+*.app
+*.appex
+*.framework
+*.xcframework
+*.bundle
 
 # Application data (for development)
 *.sqlite
