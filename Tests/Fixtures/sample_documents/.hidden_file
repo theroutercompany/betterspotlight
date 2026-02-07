@@ -1,0 +1,14 @@
+This is a hidden file (dot-prefixed) on Unix/macOS systems.
+
+Hidden files are common and important:
+- .gitignore, .editorconfig, .env
+- .ssh/, .gnupg/, .aws/ (sensitive!)
+- .bashrc, .zshrc, .profile
+- .DS_Store (excluded)
+- .bsignore (BetterSpotlight's own config)
+
+BetterSpotlight should:
+1. Index hidden files by default (they contain useful content)
+2. Respect exclusion rules for specific hidden files/dirs
+3. Mark sensitive hidden directories as metadata-only
+4. Handle the dot prefix in filename extraction correctly

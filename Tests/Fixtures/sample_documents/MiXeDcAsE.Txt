@@ -1,0 +1,12 @@
+This file has mixed case in both the name and extension.
+
+Testing case handling throughout the pipeline:
+- Extension normalization: .Txt -> .txt for classification
+- Filename indexing: "MiXeDcAsE" in the items table
+- Search matching: query "mixedcase" should find this file
+- Display: original casing should be preserved in results
+
+Unicode case folding is more nuanced than ASCII:
+- German eszett: ß -> SS (but SS -> ss, not ß)
+- Turkish dotless i: ı vs I
+- The unicode61 FTS5 tokenizer handles these cases

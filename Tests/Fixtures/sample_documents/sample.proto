@@ -1,0 +1,94 @@
+// Sample Protocol Buffer fixture for text extraction testing.
+// BetterSpotlight IPC message definitions.
+
+syntax = "proto3";
+
+package betterspotlight.ipc;
+
+option swift_prefix = "BS";
+
+// Search service
+service QueryService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc GetHealth(HealthRequest) returns (HealthResponse);
+}
+
+// Indexer service
+service IndexerService {
+  rpc IndexPath(IndexRequest) returns (IndexResponse);
+  rpc RemovePath(RemoveRequest) returns (RemoveResponse);
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+}
+
+message SearchRequest {
+  string query = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  bool fuzzy_matching = 4;
+  repeated string extensions = 5;
+}
+
+message SearchResponse {
+  repeated SearchResult results = 1;
+  int32 total_count = 2;
+  double query_time_ms = 3;
+}
+
+message SearchResult {
+  string path = 1;
+  string filename = 2;
+  double score = 3;
+  MatchType match_type = 4;
+  string snippet = 5;
+}
+
+enum MatchType {
+  MATCH_TYPE_UNSPECIFIED = 0;
+  EXACT_NAME = 1;
+  PREFIX_NAME = 2;
+  SUBSTRING_NAME = 3;
+  CONTENT_EXACT = 4;
+  CONTENT_PREFIX = 5;
+  CONTENT_FUZZY = 6;
+  PATH_COMPONENT = 7;
+}
+
+message IndexRequest {
+  string path = 1;
+  bool recursive = 2;
+  bool force = 3;
+}
+
+message IndexResponse {
+  int32 items_indexed = 1;
+  int32 items_skipped = 2;
+  int32 items_failed = 3;
+  double elapsed_seconds = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  int64 total_items = 1;
+  int64 total_chunks = 2;
+  int64 pending_items = 3;
+  int64 failed_items = 4;
+  int64 db_size_bytes = 5;
+}
+
+message RemoveRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message RemoveResponse {
+  int32 items_removed = 1;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+  bool is_indexing = 1;
+  double progress = 2;
+  string current_path = 3;
+}

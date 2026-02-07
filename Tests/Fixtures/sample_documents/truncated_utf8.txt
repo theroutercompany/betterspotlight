@@ -1,0 +1,4 @@
+This is valid UTF-8 text with some unicode: café, naïve, résumé.
+The text above is fine. But the bytes at the end of this file are a
+truncated UTF-8 multi-byte sequence that should cause decoding errors.
+��

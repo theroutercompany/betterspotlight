@@ -1,0 +1,44 @@
+# Sample .editorconfig fixture for text extraction testing.
+# BetterSpotlight project editor configuration.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.swift]
+indent_size = 4
+max_line_length = 120
+
+[*.{js,ts,tsx,jsx}]
+indent_size = 2
+
+[*.{json,yaml,yml,toml}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = 80
+
+[*.{h,cpp,cc,c}]
+indent_size = 4
+max_line_length = 100
+
+[Makefile]
+indent_style = tab
+
+[*.sh]
+indent_size = 2
+shell_variant = bash
+
+[*.sql]
+indent_size = 4
+keyword_case = upper
+
+[*.{xml,html,css}]
+indent_size = 2

@@ -1,0 +1,11 @@
+path,filename,extension,size_bytes,mtime,item_type,is_sensitive,match_type,score
+/Users/test/docs/readme.md,readme.md,md,2048,2024-01-15T10:30:00Z,file,false,exact_name,285.50
+/Users/test/src/main.swift,main.swift,swift,4096,2024-01-14T09:00:00Z,file,false,prefix_name,198.30
+/Users/test/config/settings.yaml,settings.yaml,yaml,1024,2024-01-10T14:20:00Z,file,false,substring_name,142.75
+/Users/test/data/results.csv,results.csv,csv,8192,2023-12-20T08:45:00Z,file,false,content_exact,87.20
+/Users/test/.ssh/config,config,,512,2023-11-01T16:00:00Z,file,true,content_fuzzy,45.10
+/Users/test/notes/meeting-2024-01.md,meeting-2024-01.md,md,3072,2024-01-15T11:00:00Z,file,false,exact_name,280.90
+/Users/test/scripts/deploy.sh,deploy.sh,sh,1536,2024-01-08T13:15:00Z,file,false,prefix_name,175.60
+/Users/test/lib/utils.py,utils.py,py,6144,2024-01-12T17:30:00Z,file,false,substring_name,130.45
+/Users/test/tests/test_search.py,test_search.py,py,5120,2024-01-13T10:00:00Z,file,false,content_exact,92.80
+/Users/test/docs/architecture.md,architecture.md,md,10240,2024-01-11T09:45:00Z,file,false,content_fuzzy,68.35

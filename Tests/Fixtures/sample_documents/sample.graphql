@@ -1,0 +1,89 @@
+# Sample GraphQL fixture for text extraction testing.
+# BetterSpotlight search API schema.
+
+type Query {
+  search(query: String!, options: SearchOptions): SearchResults!
+  indexHealth: IndexHealth!
+  recentFiles(limit: Int = 20): [IndexItem!]!
+}
+
+type Mutation {
+  reindex(path: String!): IndexItem
+  submitFeedback(input: FeedbackInput!): Feedback!
+  updateSettings(input: SettingsInput!): Settings!
+  pinItem(itemId: ID!): IndexItem!
+}
+
+type SearchResults {
+  items: [SearchResult!]!
+  totalCount: Int!
+  queryTimeMs: Float!
+}
+
+type SearchResult {
+  path: String!
+  filename: String!
+  score: Float!
+  matchType: MatchType!
+  snippet: String
+  highlights: [Highlight!]
+}
+
+enum MatchType {
+  EXACT_NAME
+  PREFIX_NAME
+  SUBSTRING_NAME
+  CONTENT_EXACT
+  CONTENT_PREFIX
+  CONTENT_FUZZY
+  PATH_COMPONENT
+}
+
+type IndexItem {
+  id: ID!
+  path: String!
+  filename: String!
+  extension: String
+  sizeBytes: Int!
+  mtime: DateTime!
+  itemType: ItemType!
+  isSensitive: Boolean!
+}
+
+type IndexHealth {
+  totalItems: Int!
+  totalChunks: Int!
+  pendingItems: Int!
+  failedItems: Int!
+  dbSizeBytes: Int!
+  lastFullScan: DateTime
+}
+
+input SearchOptions {
+  limit: Int = 50
+  offset: Int = 0
+  includeContent: Boolean = true
+  fuzzyMatching: Boolean = true
+  extensions: [String!]
+}
+
+input FeedbackInput {
+  itemId: ID!
+  query: String!
+  action: FeedbackAction!
+}
+
+enum FeedbackAction {
+  CLICK
+  PIN
+  HIDE
+  BOOST
+}
+
+enum ItemType {
+  FILE
+  DIRECTORY
+  SYMLINK
+}
+
+scalar DateTime

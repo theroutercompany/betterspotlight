@@ -1,0 +1,14 @@
+This file has spaces in its name to test path handling.
+
+Spaces in filenames are common on macOS, especially in:
+- ~/Library/Application Support/
+- ~/Documents/My Documents/
+- Files saved from web browsers
+- Files created by non-technical users
+
+BetterSpotlight must handle these correctly in:
+- FSEvents callbacks (paths are C strings)
+- SQLite storage and queries
+- FTS5 filename tokenization
+- XPC message serialization
+- Shell command escaping (if any)

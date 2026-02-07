@@ -1,0 +1,62 @@
+# BetterSpotlight test fixture: YAML configuration file
+# Used for testing YAML content extraction and search indexing
+
+application:
+  name: BetterSpotlight
+  version: "0.1.0"
+  platform: macOS
+  minimum_os: "14.0"
+
+indexing:
+  pipeline_stages:
+    - name: fsevents_detection
+      description: Monitor filesystem changes via FSEvents API
+      enabled: true
+    - name: path_validation
+      description: Apply exclusion rules and sensitivity classification
+      enabled: true
+    - name: metadata_extraction
+      description: Extract filesystem metadata via stat()
+      enabled: true
+    - name: content_extraction
+      description: Extract text content from supported file types
+      timeout_seconds: 30
+      max_concurrent: 4
+    - name: text_chunking
+      description: Split content into FTS5-compatible chunks
+      target_size: 1000
+      min_size: 500
+      max_size: 2000
+    - name: fts5_insertion
+      description: Index chunks in SQLite FTS5 virtual table
+      batch_size: 100
+
+scoring:
+  weights:
+    exact_name: 200
+    prefix_name: 150
+    contains_name: 100
+    exact_path: 90
+    prefix_path: 80
+    content_match: 1.0
+    fuzzy_match: 30
+    recency: 30
+    pinned_boost: 200
+    junk_penalty: 50
+
+  recency_decay_days: 7
+  frequency_tiers:
+    tier1: { min_opens: 1, boost: 10 }
+    tier2: { min_opens: 6, boost: 20 }
+    tier3: { min_opens: 21, boost: 30 }
+
+services:
+  indexer:
+    socket: /tmp/betterspotlight-indexer.sock
+    restart_policy: always
+  extractor:
+    socket: /tmp/betterspotlight-extractor.sock
+    restart_policy: always
+  query:
+    socket: /tmp/betterspotlight-query.sock
+    restart_policy: always

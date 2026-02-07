@@ -1,0 +1,11 @@
+THIS FILE HAS AN ALL-CAPS FILENAME AND EXTENSION.
+
+Testing case sensitivity in:
+- Filename matching (case-insensitive by default)
+- Extension classification (.TXT should be treated as .txt)
+- FTS5 search (unicode61 is case-insensitive)
+- Path comparison and deduplication
+
+macOS (APFS) is case-insensitive by default, so ALLCAPS.TXT and allcaps.txt
+would be the same file. BetterSpotlight must handle this correctly to avoid
+duplicate index entries.

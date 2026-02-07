@@ -1,0 +1,38 @@
+diff --git a/Sources/Core/Ranking/Scoring.swift b/Sources/Core/Ranking/Scoring.swift
+index 1a2b3c4..5d6e7f8 100644
+--- a/Sources/Core/Ranking/Scoring.swift
++++ b/Sources/Core/Ranking/Scoring.swift
+@@ -15,6 +15,7 @@ public struct ScoringWeights: Codable, Sendable {
+     public var recencyWeight: Double
+     public var frequencyWeight: Double
+     public var contextWeight: Double
++    public var pinnedBoost: Double
+ 
+     public init(
+         matchWeight: Double = 1.0,
+@@ -22,12 +23,14 @@ public struct ScoringWeights: Codable, Sendable {
+         recencyWeight: Double = 0.3,
+         frequencyWeight: Double = 0.2,
+-        contextWeight: Double = 0.15
++        contextWeight: Double = 0.15,
++        pinnedBoost: Double = 500.0
+     ) {
+         self.matchWeight = matchWeight
+         self.recencyWeight = recencyWeight
+         self.frequencyWeight = frequencyWeight
+         self.contextWeight = contextWeight
++        self.pinnedBoost = pinnedBoost
+     }
+ }
+ 
+@@ -45,6 +48,10 @@ public enum Scoring {
+         var score = matchBoost * weights.matchWeight
+         score += recencyDecay * 100 * weights.recencyWeight
+         score += log(1 + Double(frequency)) * 10 * weights.frequencyWeight
++
++        if item.isPinned {
++            score += weights.pinnedBoost
++        }
+ 
+         return score
+     }

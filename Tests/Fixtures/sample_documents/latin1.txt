@@ -1,0 +1,12 @@
+This file is encoded in ISO-8859-1 (Latin-1).
+
+Characters outside ASCII but within Latin-1:
+  French: résumé, café, naïve, façade
+  German: Straße, über, Größe, ähnlich
+  Spanish: niño, año, jalapeño
+  Currency: £100, ¥50, ©20
+  Symbols: © 2024, ® registered, ±10%
+  Math: ½ + ¼ = ¾, 5² = 25, 20°C
+
+BetterSpotlight must detect or handle non-UTF-8 encodings.
+The TextExtractor should try UTF-8 first, then fall back.

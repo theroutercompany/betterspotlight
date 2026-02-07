@@ -1,0 +1,82 @@
+# BetterSpotlight test fixture: TOML configuration file
+# Used for testing TOML content extraction and search indexing
+
+[package]
+name = "betterspotlight-config"
+version = "0.1.0"
+description = "Configuration for BetterSpotlight file search application"
+license = "MIT"
+
+[indexing]
+max_file_size_bytes = 104857600
+chunk_target_size = 1000
+chunk_min_size = 500
+chunk_max_size = 2000
+concurrent_extractions = 4
+extraction_timeout_ms = 30000
+batch_commit_size = 100
+
+[indexing.fts5]
+tokenizer = "unicode61"
+prefix_lengths = [2, 3, 4]
+content_column_weight = 1.0
+filename_column_weight = 10.0
+path_column_weight = 5.0
+
+[scoring]
+exact_name_weight = 200
+prefix_name_weight = 150
+contains_name_weight = 100
+exact_path_weight = 90
+prefix_path_weight = 80
+content_match_weight = 1.0
+fuzzy_match_weight = 30
+recency_weight = 30
+recency_decay_days = 7
+pinned_boost_weight = 200
+junk_penalty_weight = 50
+
+[scoring.frequency_tiers]
+tier1 = { min_opens = 1, max_opens = 5, boost = 10 }
+tier2 = { min_opens = 6, max_opens = 20, boost = 20 }
+tier3 = { min_opens = 21, boost = 30 }
+
+[database]
+path = "~/.local/share/betterspotlight/index.db"
+wal_mode = true
+vacuum_interval_hours = 24
+busy_timeout_ms = 5000
+
+[exclusions]
+default_patterns = [
+    "node_modules/**",
+    ".git/**",
+    "build/**",
+    "__pycache__/**",
+    "*.pyc",
+    "*.pyo",
+    "DerivedData/**",
+    ".DS_Store",
+]
+
+sensitive_directories = [
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    "Library/Keychains",
+]
+
+[services.indexer]
+socket_path = "/tmp/betterspotlight-indexer.sock"
+restart_policy = "always"
+max_restart_attempts = 5
+
+[services.extractor]
+socket_path = "/tmp/betterspotlight-extractor.sock"
+restart_policy = "always"
+max_restart_attempts = 5
+
+[services.query]
+socket_path = "/tmp/betterspotlight-query.sock"
+restart_policy = "always"
+max_restart_attempts = 5

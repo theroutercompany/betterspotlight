@@ -1,0 +1,13 @@
+This file uses underscores in its name.
+
+Underscores are common in:
+- snake_case naming conventions (Python, Ruby, C)
+- System and configuration files
+- Generated filenames
+- Database exports (table_name_2024_01_15.csv)
+
+Testing considerations:
+- FTS5 unicode61 tokenizer treats underscores as word characters by default
+- This means "file_with_underscores" is one token, not three
+- Important for search: query "file" should NOT match via FTS5
+- But filename substring matching should still find it

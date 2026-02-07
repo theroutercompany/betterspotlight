@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BetterSpotlight Documentation</title>
+    <meta name="description" content="Test fixture HTML file for search indexing">
+</head>
+<body>
+    <header>
+        <nav>
+            <ul>
+                <li><a href="#overview">Overview</a></li>
+                <li><a href="#architecture">Architecture</a></li>
+                <li><a href="#search">Search</a></li>
+                <li><a href="#configuration">Configuration</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="overview">
+            <h1>BetterSpotlight File Search</h1>
+            <p>
+                BetterSpotlight is an offline-first file search application
+                for macOS power users. It provides instant full-text search
+                across your entire filesystem using SQLite FTS5 indexing.
+            </p>
+            <p>
+                Unlike traditional Spotlight, BetterSpotlight focuses
+                exclusively on file search with configurable exclusion rules,
+                multi-signal ranking, and support for over 100 file types.
+            </p>
+        </section>
+
+        <section id="architecture">
+            <h2>System Architecture</h2>
+            <p>
+                The application uses a four-layer architecture with strict
+                dependency direction: App, Core, Services, and Shared.
+            </p>
+            <dl>
+                <dt>App Layer</dt>
+                <dd>SwiftUI/Qt interface with status bar integration</dd>
+                <dt>Core Layer</dt>
+                <dd>FS monitoring, content extraction, indexing, and ranking</dd>
+                <dt>Services Layer</dt>
+                <dd>Process-isolated indexer, extractor, and query services</dd>
+                <dt>Shared Layer</dt>
+                <dd>Codable models and IPC protocol definitions</dd>
+            </dl>
+        </section>
+
+        <section id="search">
+            <h2>Search Capabilities</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Match Type</th>
+                        <th>Base Score</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>ExactName</td>
+                        <td>200</td>
+                        <td>Filename matches query exactly</td>
+                    </tr>
+                    <tr>
+                        <td>PrefixName</td>
+                        <td>150</td>
+                        <td>Filename starts with query</td>
+                    </tr>
+                    <tr>
+                        <td>ContainsName</td>
+                        <td>100</td>
+                        <td>Filename contains query substring</td>
+                    </tr>
+                    <tr>
+                        <td>Content</td>
+                        <td>Variable</td>
+                        <td>FTS5 BM25 content match</td>
+                    </tr>
+                    <tr>
+                        <td>Fuzzy</td>
+                        <td>30</td>
+                        <td>Edit distance within threshold</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section id="configuration">
+            <h2>Configuration</h2>
+            <p>
+                Exclusion patterns use gitignore-style syntax in
+                <code>.bsignore</code> files. Default exclusions include
+                <code>node_modules</code>, <code>.git</code>,
+                <code>build</code>, and other common non-user directories.
+            </p>
+        </section>
+    </main>
+
+    <footer>
+        <p>BetterSpotlight test fixture document for search validation.</p>
+    </footer>
+</body>
+</html>
