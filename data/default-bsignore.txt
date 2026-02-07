@@ -1,0 +1,82 @@
+# BetterSpotlight default exclusion patterns
+# Gitignore-style glob matching (case-sensitive)
+
+# Version control
+.git/objects/**
+.git/hooks/**
+.git/refs/**
+.git/logs/**
+.svn/**
+.hg/**
+
+# Node.js / JavaScript
+node_modules/**
+.yarn/cache/**
+.pnp.*
+.next/**
+.nuxt/**
+dist/**
+
+# Python
+__pycache__/**
+*.pyc
+.tox/**
+.venv/**
+venv/**
+*.egg-info/**
+
+# Rust
+target/release/**
+target/debug/**
+
+# Go
+vendor/**
+
+# Build artifacts
+build/**
+.build/**
+cmake-build-*/**
+*.o
+*.a
+*.dylib
+
+# macOS system
+.DS_Store
+.localized
+._*
+.TemporaryItems/**
+.Trashes/**
+.fseventsd/**
+.Spotlight-V100/**
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# IDE / Editor
+.idea/**
+.vscode/.cache/**
+*.swp
+*.swo
+*~
+
+# Xcode
+DerivedData/**
+*.xcworkspace/xcuserdata/**
+
+# Caches
+Library/Caches/**
+.cache/**
+.cargo/**
+
+# Cloud sync artifacts
+.dropbox.cache/**
+.tmp/**
+.gdoc.tmp
+.gsheet.tmp
+
+# Large binary containers (usually not text-searchable)
+*.iso
+*.dmg
+*.vmdk
+*.qcow2
