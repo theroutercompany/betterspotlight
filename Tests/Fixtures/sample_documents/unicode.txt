@@ -1,0 +1,32 @@
+BetterSpotlight Unicode Test Document
+
+This file contains Unicode characters from various scripts and languages
+to test that the indexing pipeline handles non-ASCII content correctly.
+
+French: Les caracteres accentues comme e avec accent aigu, a grave, u trema
+German: Umlaute und Sonderzeichen: Uberfuhrung, Stra?e, Grundstuck
+Spanish: Caracteres especiales: nino, ano, manana
+
+Japanese: Hiragana and Katakana
+  Hiragana: This text references Japanese writing systems
+  Katakana: Used for foreign loanwords and emphasis
+  Kanji: Complex characters derived from Chinese
+
+Chinese: Simplified and Traditional
+  Search keywords in Chinese script are important for multilingual support
+
+Korean: Hangul syllabic blocks
+  Korean text indexing requires proper Unicode normalization
+
+Arabic: Right-to-left script support
+  Arabic script flows from right to left
+
+Cyrillic: Russian text
+  Russian uses the Cyrillic alphabet
+
+Mathematical symbols: Summation, integral, square root, infinity, pi
+Greek letters: alpha, beta, gamma, delta, epsilon, theta, lambda, omega
+
+Currency symbols: Dollar, Euro, Pound, Yen, Won, Ruble
+
+Distinctive Unicode search terms: chrysanthemum, parallelepiped, onomatopoeia

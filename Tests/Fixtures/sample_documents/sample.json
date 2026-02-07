@@ -1,0 +1,45 @@
+{
+  "project": "BetterSpotlight",
+  "version": "0.1.0",
+  "description": "Test fixture JSON configuration file for search indexing validation",
+  "settings": {
+    "indexing": {
+      "maxFileSize": 104857600,
+      "chunkTargetSize": 1000,
+      "chunkMinSize": 500,
+      "chunkMaxSize": 2000,
+      "concurrentExtractions": 4,
+      "extractionTimeoutMs": 30000
+    },
+    "search": {
+      "maxResults": 50,
+      "bm25Weight": 1.0,
+      "recencyDecayDays": 7,
+      "fuzzyMaxEditDistance": 2
+    },
+    "exclusions": {
+      "defaultPatterns": [
+        "node_modules/**",
+        ".git/**",
+        "build/**",
+        "__pycache__/**",
+        "*.pyc"
+      ],
+      "sensitiveDirectories": [
+        ".ssh",
+        ".gnupg",
+        ".aws"
+      ]
+    }
+  },
+  "watchRoots": [
+    "/Users/testuser/Documents",
+    "/Users/testuser/Projects",
+    "/Users/testuser/Desktop"
+  ],
+  "database": {
+    "path": "~/.local/share/betterspotlight/index.db",
+    "walMode": true,
+    "vacuumIntervalHours": 24
+  }
+}

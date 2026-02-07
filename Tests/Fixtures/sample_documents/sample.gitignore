@@ -1,0 +1,61 @@
+# Sample .gitignore fixture for text extraction testing.
+# BetterSpotlight project gitignore patterns.
+
+# Build artifacts
+.build/
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+
+# Swift Package Manager
+.swiftpm/
+Package.resolved
+Packages/
+
+# Xcode
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+xcuserdata/
+*.playground/timeline.xctimeline
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+credentials.json
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Test artifacts
+Tests/Fixtures/generated/
+coverage/
+*.profdata
+*.profraw
+
+# Documentation build
+docs/api/
+docs/_build/
+
+# Dependencies (for C++ rewrite)
+vcpkg_installed/
+conan/

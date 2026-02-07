@@ -1,0 +1,25 @@
+BetterSpotlight Search Index Test Document
+
+This plain text file contains several distinctive keywords that can be
+used for testing full-text search capabilities. The content covers a
+variety of topics to ensure comprehensive search coverage.
+
+Topic: Quantum Computing
+Quantum entanglement and superposition are fundamental principles of
+quantum mechanics. Researchers at various laboratories are working on
+building fault-tolerant quantum computers using superconducting qubits
+and trapped ion architectures.
+
+Topic: Machine Learning
+Gradient descent optimization and backpropagation algorithms form the
+backbone of modern neural network training. Convolutional neural networks
+excel at image recognition while transformers dominate natural language
+processing tasks.
+
+Topic: Distributed Systems
+Byzantine fault tolerance and consensus protocols like Raft and Paxos
+ensure reliability in distributed computing environments. Consistent
+hashing and replication strategies help maintain data availability.
+
+Keywords for testing: xylophone, zephyr, labyrinth, chrysanthemum,
+onomatopoeia, serendipity, defenestration, quintessential.

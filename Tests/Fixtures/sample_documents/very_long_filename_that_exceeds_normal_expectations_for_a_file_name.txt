@@ -1,0 +1,11 @@
+This file has an unusually long filename to test how BetterSpotlight handles
+edge cases in path processing, display truncation, and filename matching.
+
+The filename is 68 characters long (excluding the extension), which exceeds
+typical filename lengths of 20-30 characters. This tests:
+
+1. Path storage in SQLite (TEXT column, no length limit)
+2. Filename extraction and indexing
+3. FTS5 tokenization of long filenames
+4. UI truncation in search results
+5. FSEvents path handling

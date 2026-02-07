@@ -1,0 +1,12 @@
+This file uses dashes (hyphens) in its name.
+
+Dashes are common in:
+- kebab-case naming conventions
+- Date-stamped files (2024-01-15-meeting-notes.txt)
+- Slug-style web content filenames
+- Package names (sqlite-swift, better-spotlight)
+
+Testing considerations:
+- FTS5 tokenizer behavior with hyphens (word boundary or not?)
+- unicode61 tokenizer treats hyphens as separators by default
+- Filename matching: "file-with" should match prefix search

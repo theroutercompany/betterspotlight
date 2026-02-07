@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample XML fixture for text extraction testing.
+  Represents a hypothetical BetterSpotlight configuration format.
+-->
+<betterspotlight version="1.0" xmlns:bs="https://betterspotlight.dev/schema">
+  <settings>
+    <general>
+      <indexing-enabled>true</indexing-enabled>
+      <max-file-size-mb>10</max-file-size-mb>
+      <concurrent-workers>4</concurrent-workers>
+      <extraction-timeout-seconds>30</extraction-timeout-seconds>
+    </general>
+
+    <search>
+      <default-limit>50</default-limit>
+      <fuzzy-matching>true</fuzzy-matching>
+      <highlight-snippets>true</highlight-snippets>
+      <snippet-length>128</snippet-length>
+    </search>
+
+    <scoring-weights>
+      <match-weight>1.0</match-weight>
+      <recency-weight>0.3</recency-weight>
+      <frequency-weight>0.2</frequency-weight>
+      <context-weight>0.15</context-weight>
+    </scoring-weights>
+
+    <exclusions>
+      <pattern>.git/**</pattern>
+      <pattern>node_modules/**</pattern>
+      <pattern>*.o</pattern>
+      <pattern>*.pyc</pattern>
+      <pattern>__pycache__/**</pattern>
+      <pattern>.DS_Store</pattern>
+      <pattern>build/**</pattern>
+    </exclusions>
+
+    <sensitive-paths>
+      <path>.ssh</path>
+      <path>.gnupg</path>
+      <path>.aws</path>
+      <path>Library/Preferences</path>
+    </sensitive-paths>
+  </settings>
+
+  <watched-directories>
+    <directory path="~/Documents" recursive="true" />
+    <directory path="~/Desktop" recursive="true" />
+    <directory path="~/Projects" recursive="true" />
+    <directory path="~/Downloads" recursive="false" />
+  </watched-directories>
+</betterspotlight>
