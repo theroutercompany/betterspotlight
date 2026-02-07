@@ -2,16 +2,22 @@
 
 namespace bs {
 
-// Schema v1 pragmas — must be set on every database open (doc 04 Section 2.1)
-constexpr const char* kSchemaPragmas = R"(
-PRAGMA journal_mode = WAL;
-PRAGMA busy_timeout = 5000;
+// Per-connection pragmas — no write lock required, safe on every open.
+// busy_timeout is set high (30 s) so a second process (e.g. QueryService)
+// waits out any long batch transaction held by the indexer.
+constexpr const char* kConnectionPragmas = R"(
+PRAGMA busy_timeout = 30000;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA wal_autocheckpoint = 10000;
 PRAGMA cache_size = -65536;
 PRAGMA journal_size_limit = 33554432;
 PRAGMA mmap_size = 30000000;
+)";
+
+// Database-level pragmas — require write lock, run once when creating the DB.
+constexpr const char* kDatabasePragmas = R"(
+PRAGMA journal_mode = WAL;
 PRAGMA application_id = 0x425354;
 PRAGMA user_version = 1;
 )";

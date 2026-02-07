@@ -35,41 +35,70 @@ bool SQLiteStore::init(const QString& dbPath)
         return false;
     }
 
-    // Apply pragmas
-    if (!execSql(kSchemaPragmas)) {
-        LOG_ERROR(bsIndex, "Failed to set pragmas");
+    // Set busy_timeout FIRST via C API, before running any SQL.
+    // This ensures the busy handler is active for all subsequent operations.
+    sqlite3_busy_timeout(m_db, 30000);
+
+    // Apply per-connection pragmas (no write lock required)
+    if (!execSql(kConnectionPragmas)) {
+        LOG_ERROR(bsIndex, "Failed to set connection pragmas");
         return false;
     }
 
-    // Verify WAL mode is active
+    // Check if schema already exists (read-only query on sqlite_master).
+    // When a second process (e.g. QueryService) opens the database while the
+    // indexer has a batch transaction open, skipping the write-heavy schema
+    // creation avoids contending for the WAL write lock entirely.
+    bool schemaExists = false;
     {
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, "PRAGMA journal_mode", -1, &stmt, nullptr);
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* mode = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            if (mode && QString::fromUtf8(mode) != QLatin1String("wal")) {
-                LOG_WARN(bsIndex, "Expected WAL journal mode, got: %s", mode);
-            }
+        rc = sqlite3_prepare_v2(m_db,
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='items'",
+            -1, &stmt, nullptr);
+        if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            schemaExists = (sqlite3_column_int(stmt, 0) > 0);
         }
         sqlite3_finalize(stmt);
     }
 
-    // Create schema
-    if (!execSql(kSchemaV1)) {
-        LOG_ERROR(bsIndex, "Failed to create schema");
-        return false;
+    if (!schemaExists) {
+        // First open: set database-level pragmas (requires write lock)
+        if (!execSql(kDatabasePragmas)) {
+            LOG_ERROR(bsIndex, "Failed to set database pragmas");
+            return false;
+        }
+
+        // Verify WAL mode is active
+        {
+            sqlite3_stmt* stmt = nullptr;
+            sqlite3_prepare_v2(m_db, "PRAGMA journal_mode", -1, &stmt, nullptr);
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* mode = reinterpret_cast<const char*>(
+                    sqlite3_column_text(stmt, 0));
+                if (mode && QString::fromUtf8(mode) != QLatin1String("wal")) {
+                    LOG_WARN(bsIndex, "Expected WAL journal mode, got: %s", mode);
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        // Create schema
+        if (!execSql(kSchemaV1)) {
+            LOG_ERROR(bsIndex, "Failed to create schema");
+            return false;
+        }
+
+        // Set BM25 weights
+        sqlite3_exec(m_db, kFts5WeightConfig, nullptr, nullptr, nullptr);
+
+        // Insert default settings
+        if (!execSql(kDefaultSettings)) {
+            LOG_ERROR(bsIndex, "Failed to insert default settings");
+            return false;
+        }
     }
 
-    // Set BM25 weights — ignore error if already set
-    sqlite3_exec(m_db, kFts5WeightConfig, nullptr, nullptr, nullptr);
-
-    // Insert default settings
-    if (!execSql(kDefaultSettings)) {
-        LOG_ERROR(bsIndex, "Failed to insert default settings");
-        return false;
-    }
-
-    // Apply any pending migrations
+    // Apply any pending migrations (read-only when schema version is current)
     if (!applyMigrations(m_db, kCurrentSchemaVersion)) {
         LOG_ERROR(bsIndex, "Migration failed");
         return false;
