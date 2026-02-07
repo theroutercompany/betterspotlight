@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 #include <QDateTime>
 #include <QFile>
+#include <QThread>
 
 #include <cstring>
 
@@ -198,7 +199,18 @@ std::optional<int64_t> SQLiteStore::upsertItem(
         sqlite3_bind_text(stmt, 11, parentUtf8.constData(), -1, SQLITE_STATIC);
     }
 
-    int rc = sqlite3_step(stmt);
+    // Retry loop: sqlite3_busy_timeout's handler is NOT invoked when SQLite
+    // detects a potential WAL deadlock (e.g. reader snapshot + writer conflict
+    // during auto-checkpoint).  In that case sqlite3_step() returns SQLITE_BUSY
+    // immediately, so we retry at the application level.
+    int rc = SQLITE_BUSY;
+    for (int attempt = 0; attempt < 5 && rc == SQLITE_BUSY; ++attempt) {
+        if (attempt > 0) {
+            sqlite3_reset(stmt);
+            QThread::msleep(50 * attempt);  // 50, 100, 150, 200 ms
+        }
+        rc = sqlite3_step(stmt);
+    }
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
