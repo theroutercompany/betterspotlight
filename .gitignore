@@ -1,5 +1,6 @@
 # Build artifacts
 .build/
+.cache/
 DerivedData/
 Build/
 build/
