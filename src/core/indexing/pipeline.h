@@ -95,7 +95,7 @@ private:
     std::vector<std::string> m_scanRoots;
     int m_processedCount = 0;
 
-    static constexpr int kBatchCommitSize = 100;
+    static constexpr int kBatchCommitSize = 50;
     static constexpr int kThrottleIdleMs = 5;    // sleep between items when idle
     static constexpr int kThrottleActiveMs = 50;  // sleep between items when user is active
     std::atomic<bool> m_userActive{false};
