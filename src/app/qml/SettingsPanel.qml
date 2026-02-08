@@ -208,16 +208,78 @@ Window {
                                         }
                                     }
 
-                                    RowLayout {
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label { text: qsTr("5"); font.pixelSize: 11; color: "#999999" }
+                                    Item { Layout.fillWidth: true }
+                                    Label { text: qsTr("50"); font.pixelSize: 11; color: "#999999" }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Appearance")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 12
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Theme")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
                                         Layout.fillWidth: true
-                                        Label { text: qsTr("5"); font.pixelSize: 11; color: "#999999" }
-                                        Item { Layout.fillWidth: true }
-                                        Label { text: qsTr("50"); font.pixelSize: 11; color: "#999999" }
+                                    }
+                                    ComboBox {
+                                        id: themeCombo
+                                        model: [qsTr("System"), qsTr("Light"), qsTr("Dark")]
+                                        property var themeValues: ["system", "light", "dark"]
+                                        currentIndex: {
+                                            if (!settingsController) return 0
+                                            var idx = themeValues.indexOf(settingsController.theme)
+                                            return idx >= 0 ? idx : 0
+                                        }
+                                        onActivated: function(index) {
+                                            if (settingsController) settingsController.theme = themeValues[index]
+                                        }
+                                    }
+                                }
+
+                                Rectangle { Layout.fillWidth: true; height: 1; color: "#C0C0C0" }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Language")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    ComboBox {
+                                        id: languageCombo
+                                        model: [qsTr("English"), qsTr("中文"), qsTr("日本語"), qsTr("한국어"), qsTr("Español"), qsTr("Deutsch"), qsTr("Français")]
+                                        property var langValues: ["en", "zh", "ja", "ko", "es", "de", "fr"]
+                                        currentIndex: {
+                                            if (!settingsController) return 0
+                                            var idx = langValues.indexOf(settingsController.language)
+                                            return idx >= 0 ? idx : 0
+                                        }
+                                        onActivated: function(index) {
+                                            if (settingsController) settingsController.language = langValues[index]
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                }
                 }
 
                 // ==========================================
@@ -591,16 +653,56 @@ Window {
                                 }
 
                                 Repeater {
-                                    model: settingsController ? settingsController.sensitivePaths : [
-                                        "~/.ssh", "~/.gnupg", "~/.aws",
-                                        "~/Library/Preferences", "~/Library/Keychains"
-                                    ]
+                                    id: sensitiveRepeater
+                                    model: settingsController ? settingsController.sensitivePaths : []
 
                                     delegate: RowLayout {
+                                        required property int index
+                                        required property string modelData
                                         spacing: 8
                                         Layout.fillWidth: true
                                         Rectangle { width: 6; height: 6; radius: 3; color: "#C62828" }
-                                        Label { text: modelData; font.pixelSize: 12; font.family: "Menlo"; color: "#1A1A1A" }
+                                        Label { text: modelData; font.pixelSize: 12; font.family: "Menlo"; color: "#1A1A1A"; Layout.fillWidth: true }
+                                        Button {
+                                            text: qsTr("Remove")
+                                            font.pixelSize: 11
+                                            palette.buttonText: "#C62828"
+                                            onClicked: {
+                                                if (settingsController) {
+                                                    var paths = settingsController.sensitivePaths
+                                                    paths.splice(index, 1)
+                                                    settingsController.sensitivePaths = paths
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 8
+                                    Layout.fillWidth: true
+
+                                    TextField {
+                                        id: newSensitivePathField
+                                        Layout.fillWidth: true
+                                        placeholderText: qsTr("e.g. ~/.config/secrets")
+                                        font.pixelSize: 12
+                                        font.family: "Menlo"
+                                    }
+                                    Button {
+                                        text: qsTr("Add")
+                                        enabled: newSensitivePathField.text.trim().length > 0
+                                        onClicked: {
+                                            if (settingsController) {
+                                                var paths = settingsController.sensitivePaths
+                                                var newPath = newSensitivePathField.text.trim()
+                                                if (paths.indexOf(newPath) === -1) {
+                                                    paths.push(newPath)
+                                                    settingsController.sensitivePaths = paths
+                                                }
+                                                newSensitivePathField.text = ""
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -907,7 +1009,7 @@ Window {
         title: qsTr("Rebuild Index")
         text: qsTr("Are you sure you want to rebuild the entire index? This may take a while depending on the number of files.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { console.log("Rebuild all requested") }
+        onAccepted: { if (settingsController) settingsController.rebuildIndex() }
     }
 
     MessageDialog {
@@ -915,7 +1017,7 @@ Window {
         title: qsTr("Rebuild Vector Index")
         text: qsTr("Are you sure you want to rebuild the vector index? All embeddings will be regenerated.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { console.log("Rebuild vector index requested") }
+        onAccepted: { if (settingsController) settingsController.rebuildVectorIndex() }
     }
 
     MessageDialog {
@@ -923,13 +1025,13 @@ Window {
         title: qsTr("Clear Cache")
         text: qsTr("Are you sure you want to clear the extraction cache? Cached content will need to be re-extracted on next scan.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { console.log("Clear cache requested") }
+        onAccepted: { if (settingsController) settingsController.clearExtractionCache() }
     }
 
     FolderDialog {
         id: reindexFolderDialog
         title: qsTr("Select Folder to Reindex")
-        onAccepted: { console.log("Reindex folder:", selectedFolder) }
+        onAccepted: { if (settingsController) settingsController.reindexFolder(selectedFolder.toString()) }
     }
 
     // ---- Helper functions ----

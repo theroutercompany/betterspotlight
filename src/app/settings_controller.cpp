@@ -10,6 +10,8 @@
 #include <QStandardPaths>
 #include <QVariantMap>
 
+#include <sqlite3.h>
+
 #include <algorithm>
 
 namespace bs {
@@ -168,6 +170,16 @@ int SettingsController::feedbackRetentionDays() const
 QStringList SettingsController::sensitivePaths() const
 {
     return jsonArrayToStringList(m_settings.value(QStringLiteral("sensitivePaths")).toArray());
+}
+
+QString SettingsController::theme() const
+{
+    return m_settings.value(QStringLiteral("theme")).toString(QStringLiteral("system"));
+}
+
+QString SettingsController::language() const
+{
+    return m_settings.value(QStringLiteral("language")).toString(QStringLiteral("en"));
 }
 
 void SettingsController::setHotkey(const QString& value)
@@ -339,8 +351,40 @@ void SettingsController::setSensitivePaths(const QStringList& paths)
     emit settingsChanged(QStringLiteral("sensitivePaths"));
 }
 
+void SettingsController::setTheme(const QString& value)
+{
+    if (theme() == value) {
+        return;
+    }
+    m_settings[QStringLiteral("theme")] = value;
+    saveSettings();
+    emit themeChanged();
+    emit settingsChanged(QStringLiteral("theme"));
+}
+
+void SettingsController::setLanguage(const QString& value)
+{
+    if (language() == value) {
+        return;
+    }
+    m_settings[QStringLiteral("language")] = value;
+    saveSettings();
+    emit languageChanged();
+    emit settingsChanged(QStringLiteral("language"));
+}
+
 void SettingsController::clearFeedbackData()
 {
+    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                           + QStringLiteral("/betterspotlight/index.db");
+    sqlite3* db = nullptr;
+    if (sqlite3_open(dbPath.toUtf8().constData(), &db) == SQLITE_OK && db) {
+        sqlite3_exec(db, "DELETE FROM feedback", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "DELETE FROM interactions", nullptr, nullptr, nullptr);
+        sqlite3_exec(db, "DELETE FROM frequencies", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+    }
+
     m_settings[QStringLiteral("lastFeedbackAggregation")] = QStringLiteral("");
     saveSettings();
     emit feedbackDataCleared();
@@ -356,6 +400,43 @@ void SettingsController::exportData()
     QJsonObject payload;
     payload[QStringLiteral("exportedAt")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
     payload[QStringLiteral("settings")] = m_settings;
+
+    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                           + QStringLiteral("/betterspotlight/index.db");
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK && db) {
+        auto exportTable = [&](const char* tableName) -> QJsonArray {
+            QJsonArray rows;
+            const QString sql = QStringLiteral("SELECT * FROM %1").arg(QString::fromUtf8(tableName));
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, sql.toUtf8().constData(), -1, &stmt, nullptr) == SQLITE_OK) {
+                const int colCount = sqlite3_column_count(stmt);
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    QJsonObject row;
+                    for (int c = 0; c < colCount; ++c) {
+                        const QString colName = QString::fromUtf8(sqlite3_column_name(stmt, c));
+                        const int colType = sqlite3_column_type(stmt, c);
+                        if (colType == SQLITE_INTEGER) {
+                            row[colName] = static_cast<qint64>(sqlite3_column_int64(stmt, c));
+                        } else if (colType == SQLITE_FLOAT) {
+                            row[colName] = sqlite3_column_double(stmt, c);
+                        } else if (colType == SQLITE_TEXT) {
+                            row[colName] = QString::fromUtf8(
+                                reinterpret_cast<const char*>(sqlite3_column_text(stmt, c)));
+                        }
+                    }
+                    rows.append(row);
+                }
+                sqlite3_finalize(stmt);
+            }
+            return rows;
+        };
+
+        payload[QStringLiteral("feedback")] = exportTable("feedback");
+        payload[QStringLiteral("interactions")] = exportTable("interactions");
+        payload[QStringLiteral("frequencies")] = exportTable("frequencies");
+        sqlite3_close(db);
+    }
 
     QSaveFile file(downloads + QStringLiteral("/betterspotlight-data-export.json"));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -374,6 +455,26 @@ void SettingsController::pauseIndexing()
 void SettingsController::resumeIndexing()
 {
     emit indexingResumed();
+}
+
+void SettingsController::rebuildIndex()
+{
+    emit rebuildIndexRequested();
+}
+
+void SettingsController::rebuildVectorIndex()
+{
+    emit rebuildVectorIndexRequested();
+}
+
+void SettingsController::clearExtractionCache()
+{
+    emit clearExtractionCacheRequested();
+}
+
+void SettingsController::reindexFolder(const QString& folderPath)
+{
+    emit reindexFolderRequested(folderPath);
 }
 
 void SettingsController::loadSettings()
@@ -396,17 +497,20 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("indexRoots"), defaultIndexRoots());
     ensureDefault(m_settings, QStringLiteral("enablePdf"), true);
     ensureDefault(m_settings, QStringLiteral("enableOcr"), false);
-    ensureDefault(m_settings, QStringLiteral("embeddingEnabled"), false);
+    ensureDefault(m_settings, QStringLiteral("embeddingEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("maxFileSizeMB"), 50);
     ensureDefault(m_settings, QStringLiteral("userPatterns"), QJsonArray{});
     ensureDefault(m_settings, QStringLiteral("enableFeedbackLogging"), true);
-    ensureDefault(m_settings, QStringLiteral("enableInteractionTracking"), false);
+    ensureDefault(m_settings, QStringLiteral("enableInteractionTracking"), true);
     ensureDefault(m_settings, QStringLiteral("feedbackRetentionDays"), 90);
+    ensureDefault(m_settings, QStringLiteral("theme"), QStringLiteral("system"));
+    ensureDefault(m_settings, QStringLiteral("language"), QStringLiteral("en"));
     ensureDefault(m_settings, QStringLiteral("sensitivePaths"), QJsonArray{
         home + QStringLiteral("/.ssh"),
         home + QStringLiteral("/.gnupg"),
         home + QStringLiteral("/.aws"),
         home + QStringLiteral("/Library/Keychains"),
+        home + QStringLiteral("/Library/Preferences"),
     });
 
     saveSettings();
