@@ -10,8 +10,17 @@ namespace bs {
 
 namespace {
 
+constexpr const char* kCreateTableSql = R"(
+    CREATE TABLE IF NOT EXISTS vector_map (
+        item_id INTEGER PRIMARY KEY,
+        hnsw_label INTEGER UNIQUE NOT NULL,
+        model_version TEXT NOT NULL,
+        embedded_at REAL NOT NULL
+    )
+)";
+
 constexpr const char* kAddSql = R"(
-    INSERT INTO vector_map (item_id, hnsw_label, model_version, embedded_at)
+    INSERT OR REPLACE INTO vector_map (item_id, hnsw_label, model_version, embedded_at)
     VALUES (?1, ?2, ?3, ?4)
 )";
 constexpr const char* kRemoveSql = "DELETE FROM vector_map WHERE item_id = ?1";
@@ -159,6 +168,14 @@ bool VectorStore::clearAll()
 bool VectorStore::prepareStatements()
 {
     if (!m_db) {
+        return false;
+    }
+
+    char* errMsg = nullptr;
+    if (sqlite3_exec(m_db, kCreateTableSql, nullptr, nullptr, &errMsg) != SQLITE_OK) {
+        if (errMsg) {
+            sqlite3_free(errMsg);
+        }
         return false;
     }
 

@@ -1,4 +1,5 @@
 #include <QDebug>
+#include <QFile>
 
 #include <cmath>
 
@@ -70,8 +71,8 @@ bool EmbeddingManager::initialize()
         return false;
     }
 
-    if (m_modelPath.isEmpty()) {
-        qWarning() << "EmbeddingManager initialize failed: model path is empty";
+    if (m_modelPath.isEmpty() || !QFile::exists(m_modelPath)) {
+        qWarning() << "EmbeddingManager initialize failed: model file missing at" << m_modelPath;
         m_available = false;
         return false;
     }

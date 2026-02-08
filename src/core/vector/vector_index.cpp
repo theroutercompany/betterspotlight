@@ -202,6 +202,7 @@ std::vector<VectorIndex::KnnResult> VectorIndex::search(const float* queryVector
         return results;
     }
 
+    std::lock_guard<std::mutex> lock(m_writeMutex);
     try {
         m_index->setEf(static_cast<size_t>(kEfSearch));
         auto queue = m_index->searchKnn(queryVector, static_cast<size_t>(k));
