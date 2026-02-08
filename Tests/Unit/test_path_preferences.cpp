@@ -15,6 +15,8 @@ private slots:
     void testBoostCalculation();
     void testCacheInvalidation();
     void testGetTopDirectories();
+    void testTopDirectoriesLimit();
+    void testBoostFormula();
 
 private:
     sqlite3* m_db = nullptr;
@@ -118,6 +120,33 @@ void TestPathPreferences::testGetTopDirectories()
     const QVector<bs::PathPreferences::DirPreference> dirs = preferences.getTopDirectories(10);
     QVERIFY(!dirs.isEmpty());
     QVERIFY(dirs[0].selectionCount >= dirs.last().selectionCount);
+}
+
+void TestPathPreferences::testTopDirectoriesLimit()
+{
+    for (int d = 0; d < 20; ++d) {
+        const QString sql = QString("INSERT INTO interactions (path, timestamp) VALUES ('/dir%1/file.txt', datetime('now'));").arg(d);
+        QCOMPARE(sqlite3_exec(m_db, sql.toUtf8().constData(), nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    bs::PathPreferences preferences(m_db);
+    const QVector<bs::PathPreferences::DirPreference> limited = preferences.getTopDirectories(5);
+    QVERIFY(limited.size() <= 5);
+}
+
+void TestPathPreferences::testBoostFormula()
+{
+    for (int i = 0; i < 100; ++i) {
+        QCOMPARE(sqlite3_exec(
+            m_db,
+            "INSERT INTO interactions (path, timestamp) VALUES ('/heavy/dir/file.cpp', datetime('now'));",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    bs::PathPreferences preferences(m_db);
+    const double boost = preferences.getBoost(QStringLiteral("/heavy/dir/other.cpp"));
+    QVERIFY(boost > 0.0);
+    QVERIFY(boost <= 15.0);
 }
 
 QTEST_MAIN(TestPathPreferences)

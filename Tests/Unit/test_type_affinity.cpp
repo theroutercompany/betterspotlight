@@ -13,8 +13,12 @@ private slots:
 
     void testDefaultNoAffinity();
     void testCodeAffinity();
+    void testDocumentAffinity();
+    void testBoostForMismatchedType();
     void testCacheRefresh();
+    void testCacheInvalidation();
     void testExtensionMatching();
+    void testFileExtensionClassification();
 
 private:
     sqlite3* m_db = nullptr;
@@ -78,6 +82,33 @@ void TestTypeAffinity::testCodeAffinity()
     QCOMPARE(affinity.getBoost(QStringLiteral("/another/path/thing.cpp")), 5.0);
 }
 
+void TestTypeAffinity::testDocumentAffinity()
+{
+    for (int i = 0; i < 30; ++i) {
+        QCOMPARE(sqlite3_exec(
+            m_db,
+            "INSERT INTO interactions (path, timestamp) VALUES ('/docs/report.pdf', datetime('now'));",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    bs::TypeAffinity affinity(m_db);
+    const bs::TypeAffinity::AffinityStats stats = affinity.getAffinityStats();
+    QCOMPARE(stats.primaryAffinity, QStringLiteral("document"));
+}
+
+void TestTypeAffinity::testBoostForMismatchedType()
+{
+    for (int i = 0; i < 30; ++i) {
+        QCOMPARE(sqlite3_exec(
+            m_db,
+            "INSERT INTO interactions (path, timestamp) VALUES ('/proj/src/file.cpp', datetime('now'));",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    bs::TypeAffinity affinity(m_db);
+    QCOMPARE(affinity.getBoost(QStringLiteral("/docs/readme.pdf")), 0.0);
+}
+
 void TestTypeAffinity::testCacheRefresh()
 {
     bs::TypeAffinity affinity(m_db);
@@ -96,6 +127,23 @@ void TestTypeAffinity::testCacheRefresh()
     QCOMPARE(affinity.getBoost(QStringLiteral("/cache/test/new.cpp")), 0.0);
     affinity.invalidateCache();
     QVERIFY(affinity.getBoost(QStringLiteral("/cache/test/new.cpp")) > 0.0);
+}
+
+void TestTypeAffinity::testCacheInvalidation()
+{
+    bs::TypeAffinity affinity(m_db);
+    QCOMPARE(affinity.getBoost(QStringLiteral("/a/test.cpp")), 0.0);
+
+    for (int i = 0; i < 20; ++i) {
+        QCOMPARE(sqlite3_exec(
+            m_db,
+            "INSERT INTO interactions (path, timestamp) VALUES ('/inv/code.cpp', datetime('now'));",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    QCOMPARE(affinity.getBoost(QStringLiteral("/a/test.cpp")), 0.0);
+    affinity.invalidateCache();
+    QVERIFY(affinity.getBoost(QStringLiteral("/a/test.cpp")) > 0.0);
 }
 
 void TestTypeAffinity::testExtensionMatching()
@@ -126,6 +174,25 @@ void TestTypeAffinity::testExtensionMatching()
     for (const QString& file : codeFiles) {
         QCOMPARE(affinity.getBoost(file), 5.0);
     }
+}
+
+void TestTypeAffinity::testFileExtensionClassification()
+{
+    for (int i = 0; i < 30; ++i) {
+        QCOMPARE(sqlite3_exec(
+            m_db,
+            "INSERT INTO interactions (path, timestamp) VALUES ('/proj/src/app.ts', datetime('now'));",
+            nullptr, nullptr, nullptr), SQLITE_OK);
+    }
+
+    bs::TypeAffinity affinity(m_db);
+    affinity.invalidateCache();
+
+    QVERIFY(affinity.getBoost(QStringLiteral("/a/main.cpp")) > 0.0);
+    QVERIFY(affinity.getBoost(QStringLiteral("/a/app.js")) > 0.0);
+    QVERIFY(affinity.getBoost(QStringLiteral("/a/lib.rs")) > 0.0);
+    QCOMPARE(affinity.getBoost(QStringLiteral("/a/photo.jpg")), 0.0);
+    QCOMPARE(affinity.getBoost(QStringLiteral("/a/doc.pdf")), 0.0);
 }
 
 QTEST_MAIN(TestTypeAffinity)
