@@ -29,3 +29,21 @@ bs_add_test(test-full-pipeline      Integration/test_full_pipeline.cpp)
 bs_add_test(test-index-persistence  Integration/test_index_persistence.cpp)
 bs_add_test(test-incremental-update Integration/test_incremental_update.cpp)
 bs_add_test(test-crash-isolation    Integration/test_crash_isolation.cpp)
+
+# ── M2 Unit tests ────────────────────────────────────────────────
+bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
+bs_add_test(test-embedding           Unit/test_embedding.cpp)
+bs_add_test(test-quantizer           Unit/test_quantizer.cpp)
+bs_add_test(test-vector-index        Unit/test_vector_index.cpp)
+bs_add_test(test-search-merger       Unit/test_search_merger.cpp)
+bs_add_test(test-interaction-tracker Unit/test_interaction_tracker.cpp)
+bs_add_test(test-feedback-aggregator Unit/test_feedback_aggregator.cpp)
+bs_add_test(test-path-preferences    Unit/test_path_preferences.cpp)
+bs_add_test(test-type-affinity       Unit/test_type_affinity.cpp)
+
+# ── M2 Integration tests ────────────────────────────────────────
+bs_add_test(test-semantic-search     Integration/test_semantic_search.cpp)
+bs_add_test(test-embedding-fallback  Integration/test_embedding_fallback.cpp)
+bs_add_test(test-boost-verification  Integration/test_boost_verification.cpp)
+bs_add_test(test-context-boost       Integration/test_context_boost.cpp)
+bs_add_test(test-embedding-recovery  Integration/test_embedding_recovery.cpp)

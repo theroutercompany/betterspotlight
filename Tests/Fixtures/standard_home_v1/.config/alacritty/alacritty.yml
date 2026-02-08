@@ -1,0 +1,20 @@
+window:
+  opacity: 0.96
+  padding:
+    x: 8
+    y: 8
+
+font:
+  size: 13.0
+  normal:
+    family: "JetBrainsMono Nerd Font"
+
+colors:
+  primary:
+    background: "0x101419"
+    foreground: "0xd6deeb"
+# note line 1
+# note line 2
+# note line 3
+# note line 4
+# note line 5

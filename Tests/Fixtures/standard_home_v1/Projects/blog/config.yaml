@@ -1,0 +1,20 @@
+site_name: BetterSpotlight Blog
+base_url: https://blog.betterspotlight.dev
+author: Rex Liu
+theme: minimal
+posts_per_page: 10
+enable_search: true
+enable_rss: true
+navigation:
+  - title: Home
+    path: /
+  - title: Posts
+    path: /posts
+  - title: About
+    path: /about
+# note line 1
+# note line 2
+# note line 3
+# note line 4
+# note line 5
+# note line 6

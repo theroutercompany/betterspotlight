@@ -1,0 +1,26 @@
+%PDF-FAKE-1.0
+Title: BetterSpotlight Expansion Proposal
+Author: Product Strategy
+
+Executive summary
+This proposal outlines a phased rollout for semantic relevance improvements.
+The focus is reliability, maintainability, and measurable user outcomes.
+
+Section 1: Problem Statement
+Users can find exact filenames quickly, but conceptual search lags.
+Current ranking fails on intent-heavy queries.
+
+Section 2: Scope and timeline
+- Phase A: corpus and fixture setup
+- Phase B: merge tuning and offline eval
+- Phase C: rollout and monitor
+Estimated timeline is eight weeks.
+
+Section 3: Resourcing
+Engineering: 3 FTE
+Design: 1 FTE
+QA: 1 FTE
+
+Section 4: budget allocation
+Budget allocation prioritizes infra test coverage and onboarding analytics.
+Contingency reserved for extraction edge cases.

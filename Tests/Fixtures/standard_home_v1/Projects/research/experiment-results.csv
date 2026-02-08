@@ -1,0 +1,20 @@
+run_id,model,precision,recall,f1,latency_ms
+1,fts5,0.91,0.76,0.83,34
+2,semantic,0.78,0.84,0.81,52
+3,hybrid,0.89,0.87,0.88,46
+4,hybrid+tuned,0.92,0.88,0.90,45
+5,hybrid+tuned-v2,0.93,0.89,0.91,44
+6,hybrid+tuned-v3,0.94,0.90,0.92,43
+# note line 1
+# note line 2
+# note line 3
+# note line 4
+# note line 5
+# note line 6
+# note line 7
+# note line 8
+# note line 9
+# note line 10
+# note line 11
+# note line 12
+# note line 13
