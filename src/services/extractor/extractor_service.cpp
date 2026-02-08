@@ -216,10 +216,11 @@ QJsonObject ExtractorService::handleCancelExtraction(uint64_t id, const QJsonObj
 {
     Q_UNUSED(params)
 
-    // Extraction is synchronous for now; cancellation is not supported.
-    return IpcMessage::makeError(id, IpcErrorCode::Unsupported,
-                                 QStringLiteral("Cancellation is not yet implemented; "
-                                                "extraction is synchronous"));
+    m_extractor.requestCancel();
+
+    QJsonObject result;
+    result[QStringLiteral("cancelled")] = true;
+    return IpcMessage::makeResponse(id, result);
 }
 
 } // namespace bs
