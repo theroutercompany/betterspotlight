@@ -51,6 +51,7 @@ struct SearchResult {
     QString kind;
     MatchType matchType = MatchType::Content;
     double score = 0.0;
+    double bm25RawScore = 0.0;
     QString snippet;
     std::vector<Highlight> highlights;
     int64_t fileSize = 0;

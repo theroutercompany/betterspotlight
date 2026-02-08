@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QStringConverter>
 
 namespace bs {
@@ -12,6 +13,17 @@ namespace {
 
 // 50 MB — files beyond this are too large for full-text indexing
 constexpr int64_t kMaxFileSizeBytes = 50 * 1024 * 1024;
+
+const QSet<QString>& officeExtensions()
+{
+    static const QSet<QString> exts = {
+        QStringLiteral("doc"),
+        QStringLiteral("docx"),
+        QStringLiteral("rtf"),
+        QStringLiteral("odt"),
+    };
+    return exts;
+}
 
 } // anonymous namespace
 
@@ -42,6 +54,10 @@ const QSet<QString>& TextExtractor::supportedExtensions()
         QStringLiteral("tex"),
         QStringLiteral("latex"),
         QStringLiteral("bib"),
+        QStringLiteral("doc"),
+        QStringLiteral("docx"),
+        QStringLiteral("rtf"),
+        QStringLiteral("odt"),
 
         // Web / markup
         QStringLiteral("html"),
@@ -239,6 +255,52 @@ ExtractionResult TextExtractor::extract(const QString& filePath)
         result.durationMs = static_cast<int>(timer.elapsed());
         LOG_INFO(bsExtraction, "Skipping oversized file: %s (%lld bytes)",
                  qUtf8Printable(filePath), static_cast<long long>(info.size()));
+        return result;
+    }
+
+    const QString extension = info.suffix().toLower();
+    if (officeExtensions().contains(extension)) {
+        // macOS-native Office/RTF/ODT conversion path.
+        QProcess textutil;
+        QStringList args = {
+            QStringLiteral("-convert"),
+            QStringLiteral("txt"),
+            QStringLiteral("-stdout"),
+            filePath,
+        };
+        textutil.start(QStringLiteral("/usr/bin/textutil"), args);
+
+        if (!textutil.waitForFinished(30000)) {
+            textutil.kill();
+            textutil.waitForFinished();
+            result.status = ExtractionResult::Status::Timeout;
+            result.errorMessage = QStringLiteral("textutil conversion timed out");
+            result.durationMs = static_cast<int>(timer.elapsed());
+            return result;
+        }
+
+        const int exitCode = textutil.exitCode();
+        const bool ok = (textutil.exitStatus() == QProcess::NormalExit && exitCode == 0);
+        if (!ok) {
+            const QString stderrText = QString::fromUtf8(textutil.readAllStandardError()).trimmed();
+            result.status = ExtractionResult::Status::UnsupportedFormat;
+            result.errorMessage = stderrText.isEmpty()
+                                      ? QStringLiteral("textutil conversion failed")
+                                      : QStringLiteral("textutil conversion failed: %1")
+                                            .arg(stderrText.left(200));
+            result.durationMs = static_cast<int>(timer.elapsed());
+            return result;
+        }
+
+        QByteArray rawBytes = textutil.readAllStandardOutput();
+        QString decoded = QString::fromUtf8(rawBytes);
+        if (decoded.isNull()) {
+            decoded = QString::fromLatin1(rawBytes);
+        }
+
+        result.status = ExtractionResult::Status::Success;
+        result.content = std::move(decoded);
+        result.durationMs = static_cast<int>(timer.elapsed());
         return result;
     }
 

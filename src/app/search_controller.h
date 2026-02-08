@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QTimer>
 #include <QVariantList>
+#include <QVariantMap>
 
 namespace bs {
 
@@ -59,6 +60,7 @@ private:
     QVariantList m_results;
     bool m_isSearching = false;
     int m_selectedIndex = -1;
+    QVariantMap m_lastHealthSnapshot;
 
     QTimer m_debounceTimer;
     static constexpr int kDebounceMs = 100;

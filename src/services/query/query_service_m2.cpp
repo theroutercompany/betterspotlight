@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QStandardPaths>
 #include <QJsonArray>
 
@@ -25,6 +26,7 @@ namespace bs {
 
 namespace {
 constexpr const char* kVectorModelVersion = "bge-small-en-v1.5";
+constexpr int kVectorRebuildProgressUpdateStride = 128;
 } // namespace
 
 QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject& params)
@@ -184,7 +186,8 @@ QJsonObject QueryService::handleExportInteractionData(uint64_t id, const QJsonOb
     return IpcMessage::makeResponse(id, result);
 }
 
-QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id)
+QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
+                                                   const QJsonObject& params)
 {
     if (!ensureStoreOpen()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
@@ -201,161 +204,419 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id)
                                      QStringLiteral("Vector store is not initialized"));
     }
 
-    sqlite3* db = m_store->rawDb();
-    if (!db) {
+    if (m_dbPath.isEmpty() || m_embeddingModelPath.isEmpty() || m_embeddingVocabPath.isEmpty()) {
         return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to access database handle"));
+                                     QStringLiteral("Vector rebuild is not configured"));
     }
 
-    auto rebuiltIndex = std::make_unique<VectorIndex>();
-    if (!rebuiltIndex->create()) {
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to initialize vector index"));
+    QStringList includePaths;
+    if (params.contains(QStringLiteral("includePaths"))) {
+        const QJsonArray includePathsArray = params.value(QStringLiteral("includePaths")).toArray();
+        for (const QJsonValue& value : includePathsArray) {
+            QString path = QDir::cleanPath(value.toString().trimmed());
+            if (path.isEmpty()) {
+                continue;
+            }
+            while (path.size() > 1 && path.endsWith(QLatin1Char('/'))) {
+                path.chop(1);
+            }
+            if (!includePaths.contains(path)) {
+                includePaths.append(path);
+            }
+        }
     }
 
-    auto execSql = [db](const char* sql) -> bool {
+    uint64_t runId = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.status == VectorRebuildState::Status::Running) {
+            QJsonObject result;
+            result[QStringLiteral("started")] = false;
+            result[QStringLiteral("alreadyRunning")] = true;
+            result[QStringLiteral("runId")] = static_cast<qint64>(m_vectorRebuildState.runId);
+            result[QStringLiteral("status")] = vectorRebuildStatusToString(m_vectorRebuildState.status);
+            return IpcMessage::makeResponse(id, result);
+        }
+
+        m_stopRebuildRequested.store(false);
+        runId = m_vectorRebuildState.runId + 1;
+        m_vectorRebuildState = VectorRebuildState{};
+        m_vectorRebuildState.status = VectorRebuildState::Status::Running;
+        m_vectorRebuildState.runId = runId;
+        m_vectorRebuildState.startedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        m_vectorRebuildState.scopeRoots = includePaths;
+    }
+
+    joinVectorRebuildThread();
+    m_vectorRebuildThread = std::thread(
+        &QueryService::runVectorRebuildWorker, this, runId, m_dbPath, m_dataDir,
+        m_embeddingModelPath, m_embeddingVocabPath, m_vectorIndexPath, m_vectorMetaPath,
+        includePaths);
+
+    QJsonObject result;
+    result[QStringLiteral("started")] = true;
+    result[QStringLiteral("alreadyRunning")] = false;
+    result[QStringLiteral("runId")] = static_cast<qint64>(runId);
+    result[QStringLiteral("status")] = QStringLiteral("running");
+    return IpcMessage::makeResponse(id, result);
+}
+
+void QueryService::runVectorRebuildWorker(uint64_t runId,
+                                          QString dbPath,
+                                          QString dataDir,
+                                          QString modelPath,
+                                          QString vocabPath,
+                                          QString indexPath,
+                                          QString metaPath,
+                                          QStringList includePaths)
+{
+    sqlite3* db = nullptr;
+    sqlite3_stmt* stmt = nullptr;
+    bool inTransaction = false;
+
+    auto updateFailedState = [&](const QString& error) {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId != runId) {
+            return;
+        }
+        m_vectorRebuildState.status = VectorRebuildState::Status::Failed;
+        m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        m_vectorRebuildState.lastError = error;
+    };
+
+    auto updateSucceededState = [&](int totalCandidates, int processed,
+                                    int embedded, int skipped, int failed,
+                                    const QString& lastError = QString()) {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId != runId) {
+            return;
+        }
+        m_vectorRebuildState.status = lastError.isEmpty()
+                                          ? VectorRebuildState::Status::Succeeded
+                                          : VectorRebuildState::Status::Failed;
+        m_vectorRebuildState.totalCandidates = totalCandidates;
+        m_vectorRebuildState.processed = processed;
+        m_vectorRebuildState.embedded = embedded;
+        m_vectorRebuildState.skipped = skipped;
+        m_vectorRebuildState.failed = failed;
+        m_vectorRebuildState.scopeCandidates = totalCandidates;
+        m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        m_vectorRebuildState.lastError = lastError;
+    };
+
+    auto closeResources = [&]() {
+        if (stmt) {
+            sqlite3_finalize(stmt);
+            stmt = nullptr;
+        }
+        if (db) {
+            sqlite3_close(db);
+            db = nullptr;
+        }
+    };
+
+    auto execSql = [&](const char* sql) -> bool {
         char* errMsg = nullptr;
         const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
         if (rc != SQLITE_OK) {
-            LOG_ERROR(bsIpc, "QueryService SQL failed: %s", errMsg ? errMsg : "unknown");
+            LOG_ERROR(bsIpc, "QueryService vector rebuild SQL failed: %s",
+                      errMsg ? errMsg : "unknown");
             sqlite3_free(errMsg);
             return false;
         }
         return true;
     };
 
-    QElapsedTimer timer;
-    timer.start();
-
-    bool inTransaction = false;
-    if (!execSql("BEGIN IMMEDIATE TRANSACTION;")) {
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to start rebuild transaction"));
-    }
-    inTransaction = true;
-
-    auto rollback = [&]() {
+    auto rollbackIfNeeded = [&]() {
         if (inTransaction) {
             execSql("ROLLBACK;");
             inTransaction = false;
         }
     };
 
-    if (!m_vectorStore->clearAll()) {
-        rollback();
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to clear vector mappings"));
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        nullptr) != SQLITE_OK) {
+        updateFailedState(
+            QStringLiteral("Failed to open rebuild database: %1")
+                .arg(QString::fromUtf8(db ? sqlite3_errmsg(db) : "unknown")));
+        closeResources();
+        return;
+    }
+    sqlite3_busy_timeout(db, 5000);
+
+    EmbeddingManager workerEmbeddingManager(modelPath, vocabPath);
+    if (!workerEmbeddingManager.initialize()) {
+        updateFailedState(QStringLiteral("Embedding model is unavailable"));
+        closeResources();
+        return;
     }
 
-    const char* fetchSql = R"(
-        SELECT item_id, chunk_text
-        FROM content
-        WHERE chunk_index = 0
-        ORDER BY item_id
-    )";
-
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, fetchSql, -1, &stmt, nullptr) != SQLITE_OK) {
-        rollback();
-        return IpcMessage::makeError(
-            id, IpcErrorCode::InternalError,
-            QStringLiteral("Failed to prepare rebuild query: %1")
-                .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+    auto rebuiltIndex = std::make_unique<VectorIndex>();
+    if (!rebuiltIndex->create()) {
+        updateFailedState(QStringLiteral("Failed to initialize vector index"));
+        closeResources();
+        return;
     }
+
+    VectorStore workerVectorStore(db);
+
+    QString whereClause = QStringLiteral("c.chunk_index = 0");
+    if (!includePaths.isEmpty()) {
+        QStringList pathPredicates;
+        pathPredicates.reserve(includePaths.size());
+        for (int i = 0; i < includePaths.size(); ++i) {
+            pathPredicates.append(
+                QStringLiteral("(i.path = ?%1 OR i.path LIKE ?%2)")
+                    .arg((i * 2) + 1)
+                    .arg((i * 2) + 2));
+        }
+        whereClause += QStringLiteral(" AND (") + pathPredicates.join(QStringLiteral(" OR "))
+                       + QStringLiteral(")");
+    }
+
+    auto bindScopeParams = [&](sqlite3_stmt* boundStmt) {
+        if (!boundStmt || includePaths.isEmpty()) {
+            return;
+        }
+        int bindIndex = 1;
+        for (const QString& root : includePaths) {
+            const QByteArray rootUtf8 = root.toUtf8();
+            QString prefix = root;
+            if (prefix == QStringLiteral("/")) {
+                prefix = QStringLiteral("/%");
+            } else {
+                prefix += QStringLiteral("/%");
+            }
+            const QByteArray prefixUtf8 = prefix.toUtf8();
+            sqlite3_bind_text(boundStmt, bindIndex++, rootUtf8.constData(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(boundStmt, bindIndex++, prefixUtf8.constData(), -1, SQLITE_TRANSIENT);
+        }
+    };
+
+    const QString countSql = includePaths.isEmpty()
+                                 ? QStringLiteral(
+                                       "SELECT COUNT(*) FROM content c WHERE c.chunk_index = 0")
+                                 : QStringLiteral(
+                                       "SELECT COUNT(*) "
+                                       "FROM content c "
+                                       "JOIN items i ON i.id = c.item_id "
+                                       "WHERE %1")
+                                       .arg(whereClause);
+    sqlite3_stmt* countStmt = nullptr;
+    if (sqlite3_prepare_v2(db, countSql.toUtf8().constData(), -1, &countStmt, nullptr)
+        != SQLITE_OK) {
+        updateFailedState(QStringLiteral("Failed to prepare rebuild count query: %1")
+                              .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+        closeResources();
+        return;
+    }
+    bindScopeParams(countStmt);
 
     int totalCandidates = 0;
+    if (sqlite3_step(countStmt) == SQLITE_ROW) {
+        totalCandidates = sqlite3_column_int(countStmt, 0);
+    } else {
+        sqlite3_finalize(countStmt);
+        updateFailedState(QStringLiteral("Failed to evaluate rebuild scope: %1")
+                              .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+        closeResources();
+        return;
+    }
+    sqlite3_finalize(countStmt);
+
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId == runId
+            && m_vectorRebuildState.status == VectorRebuildState::Status::Running) {
+            m_vectorRebuildState.scopeCandidates = totalCandidates;
+            m_vectorRebuildState.totalCandidates = totalCandidates;
+        }
+    }
+
+    if (!execSql("BEGIN IMMEDIATE TRANSACTION;")) {
+        updateFailedState(QStringLiteral("Failed to start rebuild transaction"));
+        closeResources();
+        return;
+    }
+    inTransaction = true;
+
+    if (!workerVectorStore.clearAll()) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Failed to clear vector mappings"));
+        closeResources();
+        return;
+    }
+
+    const QString fetchSql = includePaths.isEmpty()
+                                 ? QStringLiteral(
+                                       "SELECT c.item_id, c.chunk_text "
+                                       "FROM content c "
+                                       "WHERE c.chunk_index = 0 "
+                                       "ORDER BY c.item_id")
+                                 : QStringLiteral(
+                                       "SELECT c.item_id, c.chunk_text "
+                                       "FROM content c "
+                                       "JOIN items i ON i.id = c.item_id "
+                                       "WHERE %1 "
+                                       "ORDER BY c.item_id")
+                                       .arg(whereClause);
+    if (sqlite3_prepare_v2(db, fetchSql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        rollbackIfNeeded();
+        updateFailedState(
+            QStringLiteral("Failed to prepare rebuild query: %1")
+                .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+        closeResources();
+        return;
+    }
+    bindScopeParams(stmt);
+
+    int processed = 0;
     int embeddedCount = 0;
     int skippedCount = 0;
     int failedCount = 0;
 
     while (true) {
+        if (m_stopRebuildRequested.load()) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Vector rebuild cancelled"));
+            closeResources();
+            return;
+        }
+
         const int rc = sqlite3_step(stmt);
         if (rc == SQLITE_DONE) {
             break;
         }
         if (rc != SQLITE_ROW) {
-            sqlite3_finalize(stmt);
-            rollback();
-            return IpcMessage::makeError(
-                id, IpcErrorCode::InternalError,
+            rollbackIfNeeded();
+            updateFailedState(
                 QStringLiteral("Failed during rebuild scan: %1")
                     .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+            closeResources();
+            return;
         }
-
-        ++totalCandidates;
 
         const int64_t itemId = sqlite3_column_int64(stmt, 0);
         const char* rawText = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         const QString text = rawText ? QString::fromUtf8(rawText) : QString();
+
         if (text.trimmed().isEmpty()) {
             ++skippedCount;
-            continue;
+            ++processed;
+        } else {
+            std::vector<float> embedding = workerEmbeddingManager.embed(text);
+            if (embedding.size() != static_cast<size_t>(VectorIndex::kDimensions)) {
+                ++failedCount;
+                ++processed;
+            } else {
+                const uint64_t label = rebuiltIndex->addVector(embedding.data());
+                if (label == std::numeric_limits<uint64_t>::max()) {
+                    ++failedCount;
+                    ++processed;
+                } else if (!workerVectorStore.addMapping(itemId, label, kVectorModelVersion)) {
+                    rebuiltIndex->deleteVector(label);
+                    ++failedCount;
+                    ++processed;
+                } else {
+                    ++embeddedCount;
+                    ++processed;
+                }
+            }
         }
 
-        std::vector<float> embedding = m_embeddingManager->embed(text);
-        if (embedding.size() != static_cast<size_t>(VectorIndex::kDimensions)) {
-            ++failedCount;
-            continue;
+        if (processed % kVectorRebuildProgressUpdateStride == 0) {
+            updateVectorRebuildProgress(runId, totalCandidates, processed,
+                                        embeddedCount, skippedCount, failedCount);
         }
-
-        const uint64_t label = rebuiltIndex->addVector(embedding.data());
-        if (label == std::numeric_limits<uint64_t>::max()) {
-            ++failedCount;
-            continue;
-        }
-
-        if (!m_vectorStore->addMapping(itemId, label, kVectorModelVersion)) {
-            rebuiltIndex->deleteVector(label);
-            ++failedCount;
-            continue;
-        }
-
-        ++embeddedCount;
     }
 
     sqlite3_finalize(stmt);
+    stmt = nullptr;
+    updateVectorRebuildProgress(runId, totalCandidates, processed,
+                                embeddedCount, skippedCount, failedCount);
 
-    const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                            + QStringLiteral("/betterspotlight");
     QDir().mkpath(dataDir);
+    const QString tmpIndexPath = indexPath + QStringLiteral(".tmp");
+    const QString tmpMetaPath = metaPath + QStringLiteral(".tmp");
+    QFile::remove(tmpIndexPath);
+    QFile::remove(tmpMetaPath);
 
-    const QString indexPath = dataDir + QStringLiteral("/vectors.hnsw");
-    const QString metaPath = dataDir + QStringLiteral("/vectors.meta");
-    if (!rebuiltIndex->save(indexPath.toStdString(), metaPath.toStdString())) {
-        rollback();
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to save rebuilt vector index"));
+    if (!rebuiltIndex->save(tmpIndexPath.toStdString(), tmpMetaPath.toStdString())) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Failed to save rebuilt vector index"));
+        closeResources();
+        return;
     }
 
-    if (!m_store->setSetting(QStringLiteral("nextHnswLabel"),
-                             QString::number(rebuiltIndex->nextLabel()))
-        || !m_store->setSetting(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))) {
-        rollback();
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to persist vector index settings"));
+    auto setSettingWorker = [&](const QString& key, const QString& value) -> bool {
+        const char* sql = R"(
+            INSERT INTO settings (key, value) VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        )";
+
+        sqlite3_stmt* settingStmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &settingStmt, nullptr) != SQLITE_OK) {
+            return false;
+        }
+        const QByteArray keyUtf8 = key.toUtf8();
+        const QByteArray valUtf8 = value.toUtf8();
+        sqlite3_bind_text(settingStmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(settingStmt, 2, valUtf8.constData(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(settingStmt);
+        sqlite3_finalize(settingStmt);
+        return rc == SQLITE_DONE;
+    };
+
+    if (!setSettingWorker(QStringLiteral("nextHnswLabel"),
+                          QString::number(rebuiltIndex->nextLabel()))
+        || !setSettingWorker(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Failed to persist vector index settings"));
+        closeResources();
+        return;
     }
 
-    if (!execSql("COMMIT;")) {
-        rollback();
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                     QStringLiteral("Failed to commit vector index rebuild"));
+    {
+        std::unique_lock<std::shared_mutex> lock(m_vectorIndexMutex);
+        if (!execSql("COMMIT;")) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to commit vector index rebuild"));
+            closeResources();
+            return;
+        }
+        inTransaction = false;
+        m_vectorIndex = std::move(rebuiltIndex);
     }
-    inTransaction = false;
 
-    m_vectorIndex = std::move(rebuiltIndex);
+    QString persistError;
+    if (QFile::exists(indexPath) && !QFile::remove(indexPath)) {
+        persistError = QStringLiteral("Failed to replace %1").arg(indexPath);
+    } else if (!QFile::rename(tmpIndexPath, indexPath)) {
+        persistError = QStringLiteral("Failed to persist %1").arg(indexPath);
+    }
 
-    LOG_INFO(bsIpc, "Vector index rebuilt: embedded=%d failed=%d skipped=%d",
-             embeddedCount, failedCount, skippedCount);
+    if (persistError.isEmpty()) {
+        if (QFile::exists(metaPath) && !QFile::remove(metaPath)) {
+            persistError = QStringLiteral("Failed to replace %1").arg(metaPath);
+        } else if (!QFile::rename(tmpMetaPath, metaPath)) {
+            persistError = QStringLiteral("Failed to persist %1").arg(metaPath);
+        }
+    }
 
-    QJsonObject result;
-    result[QStringLiteral("rebuilt")] = true;
-    result[QStringLiteral("totalCandidates")] = totalCandidates;
-    result[QStringLiteral("embedded")] = embeddedCount;
-    result[QStringLiteral("failed")] = failedCount;
-    result[QStringLiteral("skipped")] = skippedCount;
-    result[QStringLiteral("totalVectors")] = m_vectorIndex ? m_vectorIndex->totalElements() : 0;
-    result[QStringLiteral("durationMs")] = timer.elapsed();
-    return IpcMessage::makeResponse(id, result);
+    if (!persistError.isEmpty()) {
+        LOG_ERROR(bsIpc, "Vector rebuild run %llu completed but failed to persist index files: %s",
+                  static_cast<unsigned long long>(runId), qUtf8Printable(persistError));
+    } else {
+        LOG_INFO(bsIpc,
+                 "Vector index rebuild complete (runId=%llu, total=%d, embedded=%d, skipped=%d, failed=%d)",
+                 static_cast<unsigned long long>(runId),
+                 totalCandidates, embeddedCount, skippedCount, failedCount);
+    }
+
+    updateSucceededState(totalCandidates, processed, embeddedCount, skippedCount,
+                         failedCount, persistError);
+    closeResources();
 }
 
 } // namespace bs

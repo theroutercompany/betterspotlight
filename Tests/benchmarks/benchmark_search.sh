@@ -94,6 +94,7 @@ if not wait_socket(query_sock):
 
 latencies = []
 result_counts = []
+duplicate_rates = []
 rid = 1
 
 for _ in range(5):
@@ -107,6 +108,20 @@ for _ in range(5):
             latencies.append(dt)
             results = resp.get("result", {}).get("results", [])
             result_counts.append(len(results))
+            top10 = results[:10]
+            paths = [r.get("path", "") for r in top10 if r.get("path")]
+            unique = len(set(paths))
+            dup_rate = 0.0 if not paths else (1.0 - (unique / len(paths)))
+            duplicate_rates.append(dup_rate)
+
+health = {}
+try:
+    health_resp = rpc(query_sock, "getHealth", {}, rid=rid, timeout=10.0)
+    rid += 1
+    if health_resp.get("type") == "response":
+        health = health_resp.get("result", {}).get("indexHealth", {})
+except Exception:
+    health = {}
 
 if latencies:
     p50 = statistics.median(latencies)
@@ -117,6 +132,27 @@ if latencies:
     print(f"  p95 latency: {p95:.2f} ms")
     print(f"  max latency: {max(latencies):.2f} ms")
     print(f"  avg results: {statistics.mean(result_counts):.2f}")
+    print(f"  avg top-10 duplicate rate: {statistics.mean(duplicate_rates) * 100.0:.2f}%")
+
+    report = {
+        "queryCount": len(latencies),
+        "p50Ms": round(p50, 2),
+        "p95Ms": round(p95, 2),
+        "maxMs": round(max(latencies), 2),
+        "avgResults": round(statistics.mean(result_counts), 2),
+        "avgTop10DuplicateRatePct": round(statistics.mean(duplicate_rates) * 100.0, 2),
+        "indexHealth": {
+            "totalIndexedItems": health.get("totalIndexedItems"),
+            "totalChunks": health.get("totalChunks"),
+            "totalEmbeddedVectors": health.get("totalEmbeddedVectors"),
+            "contentCoveragePct": health.get("contentCoveragePct"),
+            "overallStatus": health.get("overallStatus"),
+        },
+    }
+    report_path = "/tmp/bs_search_benchmark_report.json"
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    print(f"  report: {report_path}")
 else:
     print("No successful query responses received.")
 

@@ -200,6 +200,13 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
 
     if (extraction.status != ExtractionResult::Status::Success
         || !extraction.content.has_value()) {
+        if (extraction.status == ExtractionResult::Status::UnsupportedFormat) {
+            // Optional extractor backend not available (e.g., Poppler/Tesseract):
+            // keep metadata indexed without recording a hard failure.
+            prepared.nonExtractable = true;
+            return;
+        }
+
         prepared.failure = PreparedFailure{
             QStringLiteral("extraction"),
             extraction.errorMessage.value_or(
@@ -302,6 +309,7 @@ IndexResult Indexer::applyNewOrModified(const PreparedWork& prepared)
     }
 
     if (prepared.nonExtractable) {
+        m_store.clearFailures(itemId.value());
         result.status = IndexResult::Status::Indexed;
         result.durationMs = static_cast<int>(timer.elapsed());
         return result;

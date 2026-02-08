@@ -188,6 +188,7 @@ std::unordered_map<std::string, ItemKind> FileScanner::buildExtensionMap()
         "css", "scss", "sass", "less", "styl",
         "svg",
         "rtf",
+        "doc", "docx", "odt",
         "tex", "bib", "sty", "cls",
         "env", "envrc",
         "editorconfig", "gitignore", "gitattributes", "gitmodules",

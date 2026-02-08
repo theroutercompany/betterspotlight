@@ -146,6 +146,19 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
                      static_cast<long long>(m_maxFileSize));
             return result;
         }
+
+        // Honor extractor-specific extension support to avoid routing formats
+        // (e.g. .icns) into extractors that cannot decode them.
+        const QString extension = info.suffix().toLower();
+        if (!extractor->supports(extension)) {
+            result.status = ExtractionResult::Status::UnsupportedFormat;
+            result.errorMessage = QString("Extension '%1' is not supported by extractor")
+                                      .arg(extension.isEmpty()
+                                           ? QStringLiteral("<none>")
+                                           : extension);
+            result.durationMs = 0;
+            return result;
+        }
     }
 
     // Check for cancellation before acquiring semaphore

@@ -4,8 +4,11 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 
-#ifdef POPPLER_FOUND
+#if defined(BS_POPPLER_QT6)
 #include <poppler/qt6/poppler-qt6.h>
+#elif defined(BS_POPPLER_CPP)
+#include <poppler-document.h>
+#include <poppler-page.h>
 #endif
 
 namespace bs {
@@ -38,12 +41,17 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
         return result;
     }
 
-#ifdef POPPLER_FOUND
+#if defined(BS_POPPLER_QT6) || defined(BS_POPPLER_CPP)
     constexpr int kMaxPages = 1000;
     constexpr int64_t kMaxExtractedTextBytes = 10LL * 1024 * 1024;
 
+#if defined(BS_POPPLER_QT6)
     // Load the PDF document
     std::unique_ptr<Poppler::Document> doc(Poppler::Document::load(filePath));
+#elif defined(BS_POPPLER_CPP)
+    std::unique_ptr<poppler::document> doc(
+        poppler::document::load_from_file(filePath.toStdString()));
+#endif
     if (!doc) {
         result.status = ExtractionResult::Status::CorruptedFile;
         result.errorMessage = QStringLiteral("Failed to load PDF document");
@@ -53,7 +61,11 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
     }
 
     // Reject encrypted/locked PDFs
+#if defined(BS_POPPLER_QT6)
     if (doc->isLocked()) {
+#elif defined(BS_POPPLER_CPP)
+    if (doc->is_locked()) {
+#endif
         result.status = ExtractionResult::Status::CorruptedFile;
         result.errorMessage = QStringLiteral("PDF is encrypted or password-protected");
         result.durationMs = static_cast<int>(timer.elapsed());
@@ -61,7 +73,12 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
         return result;
     }
 
-    const int pageCount = doc->numPages();
+    const int pageCount =
+#if defined(BS_POPPLER_QT6)
+        doc->numPages();
+#elif defined(BS_POPPLER_CPP)
+        doc->pages();
+#endif
     const int pagesToProcess = std::min(pageCount, kMaxPages);
 
     if (pageCount > kMaxPages) {
@@ -73,7 +90,11 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
     fullText.reserve(4096);  // reasonable starting estimate
 
     for (int i = 0; i < pagesToProcess; ++i) {
+#if defined(BS_POPPLER_QT6)
         std::unique_ptr<Poppler::Page> page(doc->page(i));
+#elif defined(BS_POPPLER_CPP)
+        std::unique_ptr<poppler::page> page(doc->create_page(i));
+#endif
         if (!page) {
             LOG_DEBUG(bsExtraction, "Null page %d in %s", i, qUtf8Printable(filePath));
             continue;
@@ -85,7 +106,13 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
         }
         fullText += QString("--- Page %1 ---\n").arg(i + 1);
 
+#if defined(BS_POPPLER_QT6)
         QString pageText = page->text(QRectF());
+#elif defined(BS_POPPLER_CPP)
+        const poppler::byte_array utf8Page = page->text().to_utf8();
+        QString pageText = QString::fromUtf8(utf8Page.data(),
+                                             static_cast<int>(utf8Page.size()));
+#endif
         if (!pageText.isEmpty()) {
             fullText += pageText;
         }

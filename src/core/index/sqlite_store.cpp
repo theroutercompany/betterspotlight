@@ -840,10 +840,32 @@ IndexHealth SQLiteStore::getHealth()
         sqlite3_finalize(stmt);
     }
 
-    // Total failures
+    // Total actionable failures.
+    // NOTE: Missing optional extractor backends (Poppler/Tesseract) should
+    // not force global index health to "degraded". Those rows are still kept
+    // in the failures table for troubleshooting, but excluded from health.
     {
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM failures", -1, &stmt, nullptr);
+        sqlite3_prepare_v2(
+            m_db,
+            R"(
+                SELECT COUNT(*)
+                FROM failures
+                WHERE NOT (
+                    stage = 'extraction'
+                    AND (
+                        error_message LIKE 'PDF extraction unavailable (%'
+                        OR error_message LIKE 'OCR extraction unavailable (%'
+                        OR error_message LIKE 'Leptonica failed to read image%'
+                        OR error_message LIKE 'File size % exceeds configured limit %'
+                        OR error_message = 'File does not exist or is not a regular file'
+                        OR error_message = 'File is not readable'
+                        OR error_message = 'Failed to load PDF document'
+                        OR error_message = 'PDF is encrypted or password-protected'
+                    )
+                )
+            )",
+            -1, &stmt, nullptr);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             health.totalFailures = sqlite3_column_int64(stmt, 0);
         }

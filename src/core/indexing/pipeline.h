@@ -112,6 +112,8 @@ private:
     size_t pendingMergedCount() const;
     size_t totalPendingDepth() const;
     static WorkItem::Type mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs);
+    bool waitForScanBackpressureWindow() const;
+    bool enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts = 1200);
 
     // Concurrency policy helpers.
     void updatePrepConcurrencyPolicy();
@@ -171,6 +173,9 @@ private:
 
     static constexpr int kBatchCommitSize = 50;
     static constexpr int kBatchCommitIntervalMs = 250;
+    static constexpr size_t kScanHighWatermark = 8000;
+    static constexpr size_t kScanResumeWatermark = 5000;
+    static constexpr int kEnqueueRetrySleepMs = 25;
 };
 
 } // namespace bs
