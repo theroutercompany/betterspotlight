@@ -1,10 +1,10 @@
 # BetterSpotlight: Indexing Pipeline Design
 
-**Document ID:** 03-indexing-pipeline
+**Document ID:** indexing-pipeline
 **Status:** Final
 **Last Updated:** 2026-02-06
 **Audience:** Backend engineers, architecture reviewers
-**Related Docs:** [11-milestone-acceptance-criteria.md](./11-milestone-acceptance-criteria.md), [02-database-schema.md](./02-database-schema.md)
+**Related Docs:** [Acceptance Criteria](../milestones/acceptance-criteria.md), [Storage Schema](./storage-schema.md)
 
 ## Executive Summary
 
@@ -709,7 +709,7 @@ This is the step that **was not wired in the original Swift scaffold**, resultin
 
 ### FTS5 Table Schema
 
-> **Canonical FTS5 schema is defined in [04-storage-schema.md, Section 3.9](#). This section summarizes the design for pipeline context.**
+> **Canonical FTS5 schema is defined in [Storage Schema](./storage-schema.md), Section 3.9. This section summarizes the design for pipeline context.**
 
 ```sql
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
@@ -1293,8 +1293,8 @@ And 50+ more...
 - **Review**: Approved by Architecture Review Board
 - **Implementation Priority**: Critical (Stage 7 is a blocker)
 - **Related Documents**:
-  - [02-database-schema.md](./02-database-schema.md)
-  - [11-performance-targets.md](./11-performance-targets.md)
+  - [Storage Schema](./storage-schema.md)
+  - [Performance Targets](../milestones/performance-targets.md)
   - C++ Style Guide
   - FSEvents Documentation (macOS)
 

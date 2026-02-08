@@ -1567,9 +1567,9 @@ spctl -a -t exec -vvv build/src/app/betterspotlight.app
 
 ## Related Documents
 
-- [Architecture Overview](01-architecture-overview.md)
-- [Dependency Audit](07-dependency-audit.md)
-- [Milestone Acceptance Criteria](11-milestone-acceptance-criteria.md)
+- [Architecture Overview](./architecture-overview.md)
+- [Dependency Audit](../operations/dependency-audit.md)
+- [Acceptance Criteria](../milestones/acceptance-criteria.md)
 - ADR-006: Dependency Packaging for Tesseract & Poppler
 - ADR-007: CI/CD Platform Selection
 
