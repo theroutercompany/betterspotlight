@@ -6,10 +6,11 @@ class TestEmbeddingFallback : public QObject {
     Q_OBJECT
 
 private slots:
-    void testFallbackToLexicalOnly();
+    void testNoModelGracefulFallback();
+    void testEmbedFailureReturnsFTS5();
 };
 
-void TestEmbeddingFallback::testFallbackToLexicalOnly()
+void TestEmbeddingFallback::testNoModelGracefulFallback()
 {
     bs::EmbeddingManager manager(QStringLiteral("missing_model.onnx"),
                                  QStringLiteral("missing_vocab.txt"));
@@ -28,6 +29,37 @@ void TestEmbeddingFallback::testFallbackToLexicalOnly()
     const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, {});
     QCOMPARE(static_cast<int>(merged.size()), 1);
     QCOMPARE(merged[0].itemId, static_cast<int64_t>(1));
+}
+
+void TestEmbeddingFallback::testEmbedFailureReturnsFTS5()
+{
+    bs::EmbeddingManager manager(QStringLiteral("bad.onnx"),
+                                 QStringLiteral("bad_vocab.txt"));
+
+    const std::vector<float> embedding = manager.embed(QStringLiteral("test"));
+    QVERIFY(embedding.empty());
+
+    std::vector<bs::SearchResult> lexical;
+    bs::SearchResult r1;
+    r1.itemId = 10;
+    r1.path = QStringLiteral("/src/main.cpp");
+    r1.name = QStringLiteral("main.cpp");
+    r1.score = 200.0;
+    r1.matchType = bs::MatchType::ExactName;
+    lexical.push_back(r1);
+
+    bs::SearchResult r2;
+    r2.itemId = 20;
+    r2.path = QStringLiteral("/src/utils.h");
+    r2.name = QStringLiteral("utils.h");
+    r2.score = 100.0;
+    r2.matchType = bs::MatchType::ContainsName;
+    lexical.push_back(r2);
+
+    const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, {});
+    QCOMPARE(static_cast<int>(merged.size()), 2);
+    QCOMPARE(merged[0].itemId, static_cast<int64_t>(10));
+    QCOMPARE(merged[1].itemId, static_cast<int64_t>(20));
 }
 
 QTEST_MAIN(TestEmbeddingFallback)
