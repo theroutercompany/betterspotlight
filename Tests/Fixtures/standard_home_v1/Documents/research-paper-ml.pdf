@@ -1,0 +1,20 @@
+%PDF-FAKE-1.0
+Paper: Efficient Retrieval Augmentation for Desktop Search
+Authors: Internal Research Group
+
+Abstract
+We evaluate retrieval quality under constrained local compute.
+The study compares lexical retrieval, semantic retrieval, and hybrid scoring.
+
+Method
+A controlled corpus with deterministic content is indexed in SQLite FTS5.
+Semantic vectors are generated with quantized embedding models.
+
+Results
+Hybrid retrieval outperforms lexical-only systems on conceptual tasks.
+Latency remains acceptable with bounded candidate expansion.
+
+Conclusion
+High-precision lexical matching should be preserved.
+Semantic scoring should augment, not replace, deterministic ranking.
+# note line 1

@@ -1,0 +1,23 @@
+DOCX-TEXT-EXPORT
+Name: Rex Liu
+Role: Senior Software Engineer
+Location: San Francisco, CA
+Email: rex@example.com
+
+Summary
+Engineer focused on search systems, local-first indexing, and ranking quality.
+Delivered production desktop apps with privacy-first design.
+
+Experience
+- BetterSpotlight, Lead Engineer, 2024-2026
+  Built indexing pipeline with FSEvents and SQLite FTS5.
+  Improved relevance through score fusion and feedback loops.
+- Atlas Systems, Staff Engineer, 2021-2024
+  Led platform migration with zero-downtime deploy patterns.
+
+Skills
+Swift, TypeScript, Python, SQL, Go, Rust
+macOS internals, IPC, profiling, CI/CD
+
+Education
+B.S. in Computer Science

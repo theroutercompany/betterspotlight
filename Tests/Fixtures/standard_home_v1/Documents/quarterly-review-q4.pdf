@@ -1,0 +1,22 @@
+%PDF-FAKE-1.0
+Quarterly Business Review Q4 2025
+Prepared by: Operations
+
+Highlights
+- On-time roadmap delivery improved from 78% to 91%.
+- Uptime reached 99.95%.
+- Support ticket backlog dropped by 32%.
+
+KPI Deep Dive
+The report tracks performance metrics across search latency and quality.
+Team execution met quarterly targets for indexing stability.
+Revenue analysis showed sustained revenue growth in enterprise accounts.
+
+Risks
+- Model drift for semantic ranking on rare intents.
+- Single maintainer risk in extraction subsystem.
+
+Next Steps
+- Add targeted tests for edge-case query handling.
+- Expand fixture diversity with legal and research documents.
+- Review scoring weights with product analytics.

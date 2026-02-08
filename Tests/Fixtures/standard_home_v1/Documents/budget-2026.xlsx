@@ -1,0 +1,24 @@
+# Mock XLSX Export: budget-2026.xlsx
+# This text fixture stands in for spreadsheet cell content.
+Sheet: FY2026 Budget Plan
+Owner: Finance Team
+Last Updated: 2026-01-12
+
+Month,Revenue,Expenses,Profit
+Jan,120000,76000,44000
+Feb,125500,79000,46500
+Mar,131000,81200,49800
+Apr,129000,80100,48900
+May,133200,82300,50900
+Jun,137100,84000,53100
+Jul,140500,86000,54500
+Aug,142900,87700,55200
+Sep,145200,89100,56100
+Oct,149000,91000,58000
+Nov,152700,93500,59200
+Dec,158100,97000,61100
+
+Notes:
+- Revenue assumptions include subscription renewals.
+- Expenses include payroll, cloud, and marketing.
+- Profit target for Q4 is above 58k per month.

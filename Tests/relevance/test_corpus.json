@@ -1,0 +1,477 @@
+{
+  "version": "1.0",
+  "fixture_id": "standard_home_v1",
+  "created": "2026-02-07",
+  "queries": [
+    {
+      "id": "q001",
+      "query": "budget",
+      "category": "exact_filename",
+      "expected_files": ["Documents/budget-2026.xlsx"],
+      "pass_rank": 3,
+      "rationale": "Exact substring in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q002",
+      "query": "resume",
+      "category": "exact_filename",
+      "expected_files": ["Documents/resume-rex-2026.docx"],
+      "pass_rank": 3,
+      "rationale": "Exact substring in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q003",
+      "query": "todo",
+      "category": "exact_filename",
+      "expected_files": ["Desktop/todo-list.md"],
+      "pass_rank": 3,
+      "rationale": "Exact substring in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q004",
+      "query": "backup.sh",
+      "category": "exact_filename",
+      "expected_files": ["Developer/scripts/backup.sh"],
+      "pass_rank": 3,
+      "rationale": "Exact filename.",
+      "notes": ""
+    },
+    {
+      "id": "q005",
+      "query": "Makefile",
+      "category": "exact_filename",
+      "expected_files": ["Developer/myapp/Makefile"],
+      "pass_rank": 3,
+      "rationale": "Exact filename (case-sensitive).",
+      "notes": ""
+    },
+    {
+      "id": "q006",
+      "query": "docker-compose",
+      "category": "exact_filename",
+      "expected_files": ["Developer/myapp/docker-compose.yml"],
+      "pass_rank": 3,
+      "rationale": "Exact substring, hyphenated.",
+      "notes": ""
+    },
+    {
+      "id": "q007",
+      "query": ".zshrc",
+      "category": "exact_filename",
+      "expected_files": [".zshrc"],
+      "pass_rank": 3,
+      "rationale": "Dotfile, exact name.",
+      "notes": ""
+    },
+    {
+      "id": "q008",
+      "query": "README",
+      "category": "exact_filename",
+      "expected_files": ["Developer/myapp/README.md"],
+      "pass_rank": 3,
+      "rationale": "Exact substring, common filename.",
+      "notes": ""
+    },
+    {
+      "id": "q009",
+      "query": "invoice",
+      "category": "exact_filename",
+      "expected_files": ["Downloads/invoice-january-2026.pdf"],
+      "pass_rank": 3,
+      "rationale": "Exact substring in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q010",
+      "query": "alacritty",
+      "category": "exact_filename",
+      "expected_files": [".config/alacritty/alacritty.yml"],
+      "pass_rank": 3,
+      "rationale": "Nested config, exact name match.",
+      "notes": ""
+    },
+    {
+      "id": "q011",
+      "query": "bud",
+      "category": "partial_filename",
+      "expected_files": ["Documents/budget-2026.xlsx"],
+      "pass_rank": 3,
+      "rationale": "Prefix of budget.",
+      "notes": ""
+    },
+    {
+      "id": "q012",
+      "query": "quar",
+      "category": "partial_filename",
+      "expected_files": ["Documents/quarterly-review-q4.pdf"],
+      "pass_rank": 3,
+      "rationale": "Prefix of quarterly.",
+      "notes": ""
+    },
+    {
+      "id": "q013",
+      "query": "deploy",
+      "category": "partial_filename",
+      "expected_files": [
+        "Developer/scripts/deploy.sh",
+        "Developer/myapp/docs/deployment-guide.md"
+      ],
+      "pass_rank": 3,
+      "rationale": "Prefix matches both deploy files.",
+      "notes": ""
+    },
+    {
+      "id": "q014",
+      "query": "auth",
+      "category": "partial_filename",
+      "expected_files": ["Developer/myapp/src/auth_handler.ts"],
+      "pass_rank": 3,
+      "rationale": "Prefix of auth_handler.",
+      "notes": ""
+    },
+    {
+      "id": "q015",
+      "query": "test_",
+      "category": "partial_filename",
+      "expected_files": [
+        "Developer/myapp/tests/test_config.py",
+        "Developer/myapp/tests/test_auth.spec.ts"
+      ],
+      "pass_rank": 3,
+      "rationale": "Prefix pattern common in test files.",
+      "notes": ""
+    },
+    {
+      "id": "q016",
+      "query": "log",
+      "category": "partial_filename",
+      "expected_files": [
+        "Developer/tools/log_analyzer.rb",
+        "Developer/myapp/src/logger.rs"
+      ],
+      "pass_rank": 3,
+      "rationale": "Prefix and substring in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q017",
+      "query": "react",
+      "category": "partial_filename",
+      "expected_files": ["Projects/blog/posts/react-hooks-guide.md"],
+      "pass_rank": 3,
+      "rationale": "Prefix in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q018",
+      "query": "init",
+      "category": "partial_filename",
+      "expected_files": [".config/nvim/init.lua"],
+      "pass_rank": 3,
+      "rationale": "Exact stem in filename.",
+      "notes": ""
+    },
+    {
+      "id": "q019",
+      "query": "sync",
+      "category": "partial_filename",
+      "expected_files": ["Developer/scripts/sync_database.py"],
+      "pass_rank": 3,
+      "rationale": "Prefix of sync_database.",
+      "notes": ""
+    },
+    {
+      "id": "q020",
+      "query": "perf",
+      "category": "partial_filename",
+      "expected_files": ["Developer/tools/performance_profiler.py"],
+      "pass_rank": 3,
+      "rationale": "Prefix of performance.",
+      "notes": ""
+    },
+    {
+      "id": "q021",
+      "query": "ALTER TABLE",
+      "category": "content_search",
+      "expected_files": ["Developer/myapp/src/database_migration.py"],
+      "pass_rank": 3,
+      "rationale": "SQL keyword in file content.",
+      "notes": ""
+    },
+    {
+      "id": "q022",
+      "query": "JWT",
+      "category": "content_search",
+      "expected_files": ["Developer/myapp/src/auth_handler.ts"],
+      "pass_rank": 3,
+      "rationale": "Authentication token in content.",
+      "notes": ""
+    },
+    {
+      "id": "q023",
+      "query": "rsync",
+      "category": "content_search",
+      "expected_files": ["Developer/scripts/backup.sh"],
+      "pass_rank": 3,
+      "rationale": "Command in shell script.",
+      "notes": ""
+    },
+    {
+      "id": "q024",
+      "query": "gradient descent",
+      "category": "content_search",
+      "expected_files": ["Projects/blog/posts/machine-learning-basics.md"],
+      "pass_rank": 3,
+      "rationale": "ML concept in blog post.",
+      "notes": ""
+    },
+    {
+      "id": "q025",
+      "query": "kubectl apply",
+      "category": "content_search",
+      "expected_files": ["Developer/myapp/docs/deployment-guide.md"],
+      "pass_rank": 3,
+      "rationale": "Kubernetes command in guide.",
+      "notes": ""
+    },
+    {
+      "id": "q026",
+      "query": "useEffect",
+      "category": "content_search",
+      "expected_files": ["Projects/blog/posts/react-hooks-guide.md"],
+      "pass_rank": 3,
+      "rationale": "React hook in blog post.",
+      "notes": ""
+    },
+    {
+      "id": "q027",
+      "query": "export PATH",
+      "category": "content_search",
+      "expected_files": [".zshrc"],
+      "pass_rank": 3,
+      "rationale": "Shell variable in config.",
+      "notes": ""
+    },
+    {
+      "id": "q028",
+      "query": "revenue growth",
+      "category": "content_search",
+      "expected_files": ["Documents/quarterly-review-q4.pdf"],
+      "pass_rank": 3,
+      "rationale": "Business term in PDF content.",
+      "notes": ""
+    },
+    {
+      "id": "q029",
+      "query": "ownership borrowing",
+      "category": "content_search",
+      "expected_files": ["Projects/blog/posts/intro-to-rust.md"],
+      "pass_rank": 3,
+      "rationale": "Rust concepts in blog post.",
+      "notes": ""
+    },
+    {
+      "id": "q030",
+      "query": "microservices",
+      "category": "content_search",
+      "expected_files": ["Developer/myapp/docs/architecture.md"],
+      "pass_rank": 3,
+      "rationale": "Architecture term in design doc.",
+      "notes": ""
+    },
+    {
+      "id": "q031",
+      "query": "follow up marketing",
+      "category": "content_search",
+      "expected_files": ["Documents/meeting-notes-jan.md"],
+      "pass_rank": 3,
+      "rationale": "Action item phrase in notes.",
+      "notes": ""
+    },
+    {
+      "id": "q032",
+      "query": "http.HandleFunc",
+      "category": "content_search",
+      "expected_files": ["Developer/myapp/src/api_routes.go"],
+      "pass_rank": 3,
+      "rationale": "Go HTTP handler in source code.",
+      "notes": ""
+    },
+    {
+      "id": "q033",
+      "query": "executive summary",
+      "category": "content_search",
+      "expected_files": ["Documents/project-proposal.pdf"],
+      "pass_rank": 3,
+      "rationale": "Formal phrase in PDF.",
+      "notes": ""
+    },
+    {
+      "id": "q034",
+      "query": "prior work methodology",
+      "category": "content_search",
+      "expected_files": ["Projects/research/literature-review.md"],
+      "pass_rank": 3,
+      "rationale": "Academic phrases in review doc.",
+      "notes": ""
+    },
+    {
+      "id": "q035",
+      "query": "cargo build",
+      "category": "content_search",
+      "expected_files": ["Projects/blog/posts/intro-to-rust.md"],
+      "pass_rank": 3,
+      "rationale": "Rust build command in blog.",
+      "notes": ""
+    },
+    {
+      "id": "q036",
+      "query": "settings",
+      "category": "semantic",
+      "expected_files": [
+        "Developer/myapp/src/config_parser.cpp",
+        ".config/alacritty/alacritty.yml"
+      ],
+      "pass_rank": 3,
+      "rationale": "Settings is semantically close to config.",
+      "notes": ""
+    },
+    {
+      "id": "q037",
+      "query": "credentials",
+      "category": "semantic",
+      "expected_files": ["Developer/myapp/.env.example"],
+      "pass_rank": 3,
+      "rationale": "Env templates store credentials.",
+      "notes": ""
+    },
+    {
+      "id": "q038",
+      "query": "server deployment",
+      "category": "semantic",
+      "expected_files": [
+        "Developer/myapp/docs/deployment-guide.md",
+        "Developer/scripts/deploy.sh"
+      ],
+      "pass_rank": 3,
+      "rationale": "Semantically related to deploy docs and scripts.",
+      "notes": ""
+    },
+    {
+      "id": "q039",
+      "query": "database schema",
+      "category": "semantic",
+      "expected_files": ["Developer/myapp/src/database_migration.py"],
+      "pass_rank": 3,
+      "rationale": "Schema concept maps to migration code.",
+      "notes": ""
+    },
+    {
+      "id": "q040",
+      "query": "performance optimization",
+      "category": "semantic",
+      "expected_files": ["Developer/tools/performance_profiler.py"],
+      "pass_rank": 3,
+      "rationale": "Optimization intent maps to profiling tooling.",
+      "notes": ""
+    },
+    {
+      "id": "q041",
+      "query": "money expenses",
+      "category": "semantic",
+      "expected_files": ["Documents/budget-2026.xlsx"],
+      "pass_rank": 3,
+      "rationale": "Finance intent maps to budget table terms.",
+      "notes": ""
+    },
+    {
+      "id": "q042",
+      "query": "deep learning",
+      "category": "semantic",
+      "expected_files": ["Projects/blog/posts/machine-learning-basics.md"],
+      "pass_rank": 3,
+      "rationale": "Deep learning aligns with neural network content.",
+      "notes": ""
+    },
+    {
+      "id": "q043",
+      "query": "API endpoints",
+      "category": "semantic",
+      "expected_files": ["Developer/myapp/src/api_routes.go"],
+      "pass_rank": 3,
+      "rationale": "Endpoint intent maps to router and handlers.",
+      "notes": ""
+    },
+    {
+      "id": "q044",
+      "query": "shell configuration",
+      "category": "semantic",
+      "expected_files": [".zshrc"],
+      "pass_rank": 3,
+      "rationale": "Shell configuration maps to zsh config file.",
+      "notes": ""
+    },
+    {
+      "id": "q045",
+      "query": "version control",
+      "category": "semantic",
+      "expected_files": [".gitconfig", ".config/git/config"],
+      "pass_rank": 3,
+      "rationale": "Version control maps to git config files.",
+      "notes": ""
+    },
+    {
+      "id": "q046",
+      "query": "r",
+      "category": "edge_case",
+      "expected_files": [],
+      "pass_rank": 3,
+      "rationale": "Single-character query should be handled gracefully.",
+      "notes": "Pass if any result is returned without error."
+    },
+    {
+      "id": "q047",
+      "query": "meeting notes jan",
+      "category": "edge_case",
+      "expected_files": ["Documents/meeting-notes-jan.md"],
+      "pass_rank": 3,
+      "rationale": "Multi-word query with abbreviated month.",
+      "notes": ""
+    },
+    {
+      "id": "q048",
+      "query": "\"project proposal\"",
+      "category": "edge_case",
+      "expected_files": ["Documents/project-proposal.pdf"],
+      "pass_rank": 3,
+      "rationale": "Quoted phrase for phrase matching.",
+      "notes": ""
+    },
+    {
+      "id": "q049",
+      "query": "*.py",
+      "category": "edge_case",
+      "expected_files": [
+        "Developer/myapp/src/database_migration.py",
+        "Developer/myapp/tests/test_config.py",
+        "Developer/scripts/sync_database.py",
+        "Developer/tools/performance_profiler.py"
+      ],
+      "pass_rank": 5,
+      "rationale": "Glob-like pattern should surface Python files if supported.",
+      "notes": "Pass if any .py file appears in top 5."
+    },
+    {
+      "id": "q050",
+      "query": "config -test",
+      "category": "edge_case",
+      "expected_files": ["Developer/myapp/src/config_parser.cpp"],
+      "pass_rank": 3,
+      "rationale": "Negation intent should prioritize non-test config file.",
+      "notes": "Pass when config_parser.cpp ranks above test_config.py."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+Travel Itinerary 2026
+Traveler: Rex Liu
+Booking Ref: BS-4421
+
+2026-03-02  SFO -> SEA  Flight AZ113
+Hotel: Pine Street Suites
+Check-in: 2026-03-02
+Check-out: 2026-03-05
+
+2026-03-05  SEA -> DEN  Flight AZ227
+Hotel: Riverpoint Downtown
+Check-in: 2026-03-05
+Check-out: 2026-03-07
+
+2026-03-07  DEN -> SFO  Flight AZ090
+
+Packing reminders:
+- Laptop charger
+- Badge and ID
+- External SSD
+- Power adapter
