@@ -44,12 +44,11 @@ private:
     uint64_t m_nextRequestId = 1;
     NotificationHandler m_notificationHandler;
 
-    // Pending request tracking for synchronous send
     struct PendingRequest {
         QJsonObject response;
         bool completed = false;
     };
-    QMap<uint64_t, PendingRequest*> m_pending;
+    QMap<uint64_t, std::shared_ptr<PendingRequest>> m_pending;
 };
 
 } // namespace bs
