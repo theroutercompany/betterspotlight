@@ -17,6 +17,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QStandardPaths>
 
@@ -84,6 +86,10 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
     if (method == QLatin1String("get_file_type_affinity"))   return handleGetFileTypeAffinity(id);
     if (method == QLatin1String("run_aggregation"))          return handleRunAggregation(id);
     if (method == QLatin1String("export_interaction_data"))  return handleExportInteractionData(id, params);
+    if (method == QLatin1String("rebuildVectorIndex")
+        || method == QLatin1String("rebuild_vector_index")) {
+        return handleRebuildVectorIndex(id);
+    }
 
     return ServiceBase::handleRequest(request);
 }
@@ -147,10 +153,31 @@ void QueryService::initM2Modules()
         }
     }
 
-    QString modelDir = QCoreApplication::applicationDirPath()
-                       + QStringLiteral("/../Resources/models");
-    QString modelPath = modelDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-    QString vocabPath = modelDir + QStringLiteral("/vocab.txt");
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList modelDirs = {
+        appDir + QStringLiteral("/../Resources/models"),
+        appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"),
+        appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"),
+    };
+
+    QString modelPath;
+    QString vocabPath;
+    for (const QString& dir : modelDirs) {
+        const QString onnx = dir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
+        const QString vocab = dir + QStringLiteral("/vocab.txt");
+        if (QFile::exists(onnx) && QFile::exists(vocab)) {
+            modelPath = onnx;
+            vocabPath = vocab;
+            break;
+        }
+    }
+
+    if (modelPath.isEmpty()) {
+        // Preserve previous behavior (single canonical path) for logging clarity.
+        const QString fallbackDir = appDir + QStringLiteral("/../Resources/models");
+        modelPath = fallbackDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
+        vocabPath = fallbackDir + QStringLiteral("/vocab.txt");
+    }
 
     m_embeddingManager = std::make_unique<EmbeddingManager>(modelPath, vocabPath);
     if (!m_embeddingManager->initialize()) {
@@ -398,16 +425,68 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     }
 
     IndexHealth health = m_store->getHealth();
+    const QString dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                            + QStringLiteral("/betterspotlight");
+
+    const int totalEmbeddedVectors = m_vectorStore ? m_vectorStore->countMappings() : 0;
+    const qint64 vectorIndexSize = QFileInfo(dataDir + QStringLiteral("/vectors.hnsw")).size();
+
+    QString lastScanTimeIso;
+    if (health.lastIndexTime > 0.0) {
+        lastScanTimeIso = QDateTime::fromSecsSinceEpoch(
+                              static_cast<qint64>(health.lastIndexTime))
+                              .toUTC()
+                              .toString(Qt::ISODate);
+    }
+
+    QJsonArray recentErrors;
+    if (sqlite3* db = m_store->rawDb()) {
+        const char* sql = R"(
+            SELECT i.path, f.error_message
+            FROM failures f
+            JOIN items i ON i.id = f.item_id
+            ORDER BY f.last_failed_at DESC
+            LIMIT 25
+        )";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                const char* error = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                QJsonObject entry;
+                entry[QStringLiteral("path")] = path ? QString::fromUtf8(path) : QString();
+                entry[QStringLiteral("error")] = error ? QString::fromUtf8(error) : QString();
+                recentErrors.append(entry);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    QString overallStatus = QStringLiteral("healthy");
+    if (!health.isHealthy) {
+        overallStatus = QStringLiteral("degraded");
+    } else if (health.totalIndexedItems == 0) {
+        overallStatus = QStringLiteral("rebuilding");
+    }
 
     QJsonObject indexHealth;
+    indexHealth[QStringLiteral("overallStatus")] = overallStatus;
     indexHealth[QStringLiteral("isHealthy")] = health.isHealthy;
     indexHealth[QStringLiteral("totalIndexedItems")] = static_cast<qint64>(health.totalIndexedItems);
     indexHealth[QStringLiteral("totalChunks")] = static_cast<qint64>(health.totalChunks);
+    indexHealth[QStringLiteral("totalEmbeddedVectors")] = totalEmbeddedVectors;
     indexHealth[QStringLiteral("totalFailures")] = static_cast<qint64>(health.totalFailures);
     indexHealth[QStringLiteral("lastIndexTime")] = health.lastIndexTime;
+    indexHealth[QStringLiteral("lastScanTime")] = lastScanTimeIso;
     indexHealth[QStringLiteral("indexAge")] = health.indexAge;
     indexHealth[QStringLiteral("ftsIndexSize")] = static_cast<qint64>(health.ftsIndexSize);
+    indexHealth[QStringLiteral("vectorIndexSize")] = vectorIndexSize;
     indexHealth[QStringLiteral("itemsWithoutContent")] = static_cast<qint64>(health.itemsWithoutContent);
+    indexHealth[QStringLiteral("queuePending")] = 0;
+    indexHealth[QStringLiteral("queueInProgress")] = 0;
+    indexHealth[QStringLiteral("queueEmbedding")] = 0;
+    indexHealth[QStringLiteral("recentErrors")] = recentErrors;
+    indexHealth[QStringLiteral("indexRoots")] = QJsonArray();
 
     QJsonObject serviceHealth;
     serviceHealth[QStringLiteral("indexerRunning")] = true;

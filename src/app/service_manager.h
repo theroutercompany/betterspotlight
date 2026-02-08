@@ -3,6 +3,8 @@
 #include "core/ipc/supervisor.h"
 #include <QObject>
 #include <QString>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <memory>
 
 namespace bs {
@@ -29,6 +31,12 @@ public:
 
     Q_INVOKABLE void start();
     Q_INVOKABLE void stop();
+    Q_INVOKABLE void pauseIndexing();
+    Q_INVOKABLE void resumeIndexing();
+    Q_INVOKABLE void rebuildAll();
+    Q_INVOKABLE void rebuildVectorIndex();
+    Q_INVOKABLE void clearExtractionCache();
+    Q_INVOKABLE void reindexPath(const QString& path);
 
 signals:
     void serviceStatusChanged();
@@ -45,6 +53,11 @@ private:
     QString findServiceBinary(const QString& name) const;
     void updateServiceStatus(const QString& name, const QString& status);
     void startIndexing();
+    bool sendServiceRequest(const QString& serviceName,
+                            const QString& method,
+                            const QJsonObject& params = {});
+    bool sendIndexerRequest(const QString& method, const QJsonObject& params = {});
+    QJsonArray loadIndexRoots() const;
 
     std::unique_ptr<Supervisor> m_supervisor;
 

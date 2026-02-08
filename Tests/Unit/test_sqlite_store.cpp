@@ -2,6 +2,7 @@
 #include <QTemporaryDir>
 #include <sqlite3.h>
 #include "core/index/sqlite_store.h"
+#include "core/index/schema.h"
 #include "core/shared/chunk.h"
 
 class TestSQLiteStore : public QObject {
@@ -63,7 +64,7 @@ void TestSQLiteStore::testSchemaVersionSet()
 
     auto version = store->getSetting(QStringLiteral("schema_version"));
     QVERIFY(version.has_value());
-    QCOMPARE(*version, QStringLiteral("1"));
+    QCOMPARE(*version, QString::number(bs::kCurrentSchemaVersion));
 }
 
 void TestSQLiteStore::testInsertAndRetrieveItem()

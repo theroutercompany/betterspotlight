@@ -4,9 +4,13 @@
 #include "core/shared/types.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QStringList>
+#include <QStandardPaths>
 
 #include <sys/stat.h>
 #include <pwd.h>
@@ -29,6 +33,10 @@ QJsonObject ExtractorService::handleRequest(const QJsonObject& request)
     if (method == QLatin1String("extractMetadata"))   return handleExtractMetadata(id, params);
     if (method == QLatin1String("isSupported"))       return handleIsSupported(id, params);
     if (method == QLatin1String("cancelExtraction"))  return handleCancelExtraction(id, params);
+    if (method == QLatin1String("clearExtractionCache")
+        || method == QLatin1String("clearCache")) {
+        return handleClearExtractionCache(id);
+    }
 
     // Fall through to base (ping, shutdown, unknown)
     return ServiceBase::handleRequest(request);
@@ -220,6 +228,63 @@ QJsonObject ExtractorService::handleCancelExtraction(uint64_t id, const QJsonObj
 
     QJsonObject result;
     result[QStringLiteral("cancelled")] = true;
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject ExtractorService::handleClearExtractionCache(uint64_t id)
+{
+    const QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    const QString genericCacheRoot =
+        QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    const QString tempRoot = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+
+    const QStringList candidates = {
+        cacheRoot + QStringLiteral("/extractor"),
+        cacheRoot + QStringLiteral("/betterspotlight/extractor"),
+        genericCacheRoot + QStringLiteral("/betterspotlight/extractor"),
+        genericCacheRoot + QStringLiteral("/betterspotlight/ocr"),
+        tempRoot + QStringLiteral("/betterspotlight-extractor-cache"),
+    };
+
+    int removedCount = 0;
+    QJsonArray removedPaths;
+    QJsonArray failedPaths;
+
+    for (const QString& candidate : candidates) {
+        if (candidate.isEmpty()) {
+            continue;
+        }
+        QFileInfo info(candidate);
+        if (!info.exists()) {
+            continue;
+        }
+
+        bool ok = false;
+        if (info.isDir()) {
+            QDir dir(candidate);
+            ok = dir.removeRecursively();
+        } else {
+            ok = QFile::remove(candidate);
+        }
+
+        if (ok) {
+            ++removedCount;
+            removedPaths.append(candidate);
+        } else {
+            failedPaths.append(candidate);
+        }
+    }
+
+    m_extractor.clearCancel();
+
+    LOG_INFO(bsIpc, "Extraction cache clear requested: removed=%d failed=%d",
+             removedCount, static_cast<int>(failedPaths.size()));
+
+    QJsonObject result;
+    result[QStringLiteral("cleared")] = failedPaths.isEmpty();
+    result[QStringLiteral("removedCount")] = removedCount;
+    result[QStringLiteral("removedPaths")] = removedPaths;
+    result[QStringLiteral("failedPaths")] = failedPaths;
     return IpcMessage::makeResponse(id, result);
 }
 

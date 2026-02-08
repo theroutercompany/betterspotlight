@@ -18,6 +18,7 @@ private:
     QJsonObject handleExtractMetadata(uint64_t id, const QJsonObject& params);
     QJsonObject handleIsSupported(uint64_t id, const QJsonObject& params);
     QJsonObject handleCancelExtraction(uint64_t id, const QJsonObject& params);
+    QJsonObject handleClearExtractionCache(uint64_t id);
 
     ExtractionManager m_extractor;
 };

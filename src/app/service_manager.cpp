@@ -3,9 +3,13 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
+#include <QStandardPaths>
+#include <QUrl>
 
 namespace bs {
 
@@ -136,35 +140,122 @@ void ServiceManager::onAllServicesReady()
 
 void ServiceManager::startIndexing()
 {
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("indexer"));
+    QJsonObject params;
+    params[QStringLiteral("roots")] = loadIndexRoots();
+
+    LOG_INFO(bsCore, "ServiceManager: sending startIndexing (%d root(s))",
+             static_cast<int>(params.value(QStringLiteral("roots")).toArray().size()));
+    sendIndexerRequest(QStringLiteral("startIndexing"), params);
+}
+
+void ServiceManager::pauseIndexing()
+{
+    sendIndexerRequest(QStringLiteral("pauseIndexing"));
+}
+
+void ServiceManager::resumeIndexing()
+{
+    sendIndexerRequest(QStringLiteral("resumeIndexing"));
+}
+
+void ServiceManager::rebuildAll()
+{
+    sendIndexerRequest(QStringLiteral("rebuildAll"));
+}
+
+void ServiceManager::rebuildVectorIndex()
+{
+    sendServiceRequest(QStringLiteral("query"), QStringLiteral("rebuildVectorIndex"));
+}
+
+void ServiceManager::clearExtractionCache()
+{
+    sendServiceRequest(QStringLiteral("extractor"), QStringLiteral("clearExtractionCache"));
+}
+
+void ServiceManager::reindexPath(const QString& path)
+{
+    QString normalizedPath = path;
+    if (normalizedPath.startsWith(QStringLiteral("file://"))) {
+        normalizedPath = QUrl(normalizedPath).toLocalFile();
+    }
+    QJsonObject params;
+    params[QStringLiteral("path")] = normalizedPath;
+    sendIndexerRequest(QStringLiteral("reindexPath"), params);
+}
+
+bool ServiceManager::sendIndexerRequest(const QString& method, const QJsonObject& params)
+{
+    return sendServiceRequest(QStringLiteral("indexer"), method, params);
+}
+
+bool ServiceManager::sendServiceRequest(const QString& serviceName,
+                                        const QString& method,
+                                        const QJsonObject& params)
+{
+    SocketClient* client = m_supervisor->clientFor(serviceName);
     if (!client || !client->isConnected()) {
-        LOG_WARN(bsCore, "ServiceManager: indexer not connected, can't start indexing");
-        return;
+        LOG_WARN(bsCore, "ServiceManager: %s not connected, can't send '%s'",
+                 qPrintable(serviceName), qPrintable(method));
+        return false;
     }
 
-    QJsonArray roots;
-    roots.append(QDir::homePath());
-
-    QJsonObject params;
-    params[QStringLiteral("roots")] = roots;
-
-    LOG_INFO(bsCore, "ServiceManager: sending startIndexing with root: %s",
-             qPrintable(QDir::homePath()));
-
-    auto response = client->sendRequest(QStringLiteral("startIndexing"), params, 10000);
+    auto response = client->sendRequest(method, params, 10000);
     if (!response) {
-        LOG_ERROR(bsCore, "ServiceManager: startIndexing request failed");
-        return;
+        LOG_ERROR(bsCore, "ServiceManager: %s request failed: %s",
+                  qPrintable(serviceName), qPrintable(method));
+        return false;
     }
 
     QString type = response->value(QStringLiteral("type")).toString();
     if (type == QLatin1String("error")) {
         QString msg = response->value(QStringLiteral("error")).toObject()
                           .value(QStringLiteral("message")).toString();
-        LOG_ERROR(bsCore, "ServiceManager: startIndexing error: %s", qPrintable(msg));
-    } else {
-        LOG_INFO(bsCore, "ServiceManager: indexing started successfully");
+        LOG_ERROR(bsCore, "ServiceManager: %s '%s' error: %s",
+                  qPrintable(serviceName), qPrintable(method), qPrintable(msg));
+        emit serviceError(serviceName, msg);
+        return false;
     }
+
+    return true;
+}
+
+QJsonArray ServiceManager::loadIndexRoots() const
+{
+    QJsonArray roots;
+
+    const QString settingsPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/settings.json");
+    QFile settingsFile(settingsPath);
+    if (settingsFile.open(QIODevice::ReadOnly)) {
+        QJsonParseError parseError;
+        const QJsonDocument doc =
+            QJsonDocument::fromJson(settingsFile.readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+            const QJsonArray indexRoots =
+                doc.object().value(QStringLiteral("indexRoots")).toArray();
+            for (const QJsonValue& value : indexRoots) {
+                if (!value.isObject()) {
+                    continue;
+                }
+                const QJsonObject obj = value.toObject();
+                const QString mode = obj.value(QStringLiteral("mode")).toString();
+                if (mode == QLatin1String("skip")) {
+                    continue;
+                }
+                const QString path = obj.value(QStringLiteral("path")).toString();
+                if (!path.isEmpty()) {
+                    roots.append(path);
+                }
+            }
+        }
+    }
+
+    if (roots.isEmpty()) {
+        roots.append(QDir::homePath());
+    }
+    return roots;
 }
 
 QString ServiceManager::findServiceBinary(const QString& name) const

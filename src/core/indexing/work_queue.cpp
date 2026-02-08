@@ -68,6 +68,14 @@ std::optional<WorkItem> WorkQueue::dequeue()
     return item;
 }
 
+void WorkQueue::markItemComplete()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_activeItems > 0) {
+        --m_activeItems;
+    }
+}
+
 // ── Pause / resume ──────────────────────────────────────────
 
 void WorkQueue::pause()
