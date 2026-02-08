@@ -10,10 +10,11 @@
 namespace bs {
 
 struct ServiceInfo {
-    QString name;           // e.g. "indexer"
-    QString executablePath; // path to service binary
+    QString name;
+    QString executablePath;
     int crashCount = 0;
     int64_t lastCrashTime = 0;
+    int64_t firstCrashTime = 0;
 };
 
 class Supervisor : public QObject {
