@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace bs {
@@ -437,20 +438,6 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         }
     }
 
-    if (!execSql("BEGIN IMMEDIATE TRANSACTION;")) {
-        updateFailedState(QStringLiteral("Failed to start rebuild transaction"));
-        closeResources();
-        return;
-    }
-    inTransaction = true;
-
-    if (!workerVectorStore.clearAll()) {
-        rollbackIfNeeded();
-        updateFailedState(QStringLiteral("Failed to clear vector mappings"));
-        closeResources();
-        return;
-    }
-
     const QString fetchSql = includePaths.isEmpty()
                                  ? QStringLiteral(
                                        "SELECT c.item_id, c.chunk_text "
@@ -478,6 +465,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     int embeddedCount = 0;
     int skippedCount = 0;
     int failedCount = 0;
+    std::vector<std::pair<int64_t, uint64_t>> pendingMappings;
+    if (totalCandidates > 0) {
+        pendingMappings.reserve(static_cast<size_t>(totalCandidates));
+    }
     int64_t currentItemId = -1;
     QStringList currentChunks;
 
@@ -546,11 +537,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             ++failedCount;
             return;
         }
-        if (!workerVectorStore.addMapping(currentItemId, label, kVectorModelVersion)) {
-            rebuiltIndex->deleteVector(label);
-            ++failedCount;
-            return;
-        }
+        pendingMappings.emplace_back(currentItemId, label);
         ++embeddedCount;
     };
 
@@ -617,6 +604,30 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         updateFailedState(QStringLiteral("Failed to save rebuilt vector index"));
         closeResources();
         return;
+    }
+
+    // Keep lock scope short: expensive embedding work happens before this transaction.
+    if (!execSql("BEGIN IMMEDIATE TRANSACTION;")) {
+        updateFailedState(QStringLiteral("Failed to start rebuild transaction"));
+        closeResources();
+        return;
+    }
+    inTransaction = true;
+
+    if (!workerVectorStore.clearAll()) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Failed to clear vector mappings"));
+        closeResources();
+        return;
+    }
+
+    for (const auto& mapping : pendingMappings) {
+        if (!workerVectorStore.addMapping(mapping.first, mapping.second, kVectorModelVersion)) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to persist vector mappings"));
+            closeResources();
+            return;
+        }
     }
 
     auto setSettingWorker = [&](const QString& key, const QString& value) -> bool {
