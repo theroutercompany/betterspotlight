@@ -12,6 +12,7 @@ private slots:
     void cleanup();
 
     void testRecordAndRetrieve();
+    void testGetInteractionCount();
     void testBoostCalculation();
     void testBoostCapAt25();
     void testZeroBoostForUnknown();
@@ -83,6 +84,25 @@ void TestInteractionTracker::testRecordAndRetrieve()
 
     QVERIFY(tracker.recordInteraction(interaction));
     QCOMPARE(tracker.getInteractionCount(QStringLiteral("hello world"), 77), 1);
+}
+
+void TestInteractionTracker::testGetInteractionCount()
+{
+    bs::InteractionTracker tracker(m_db);
+
+    bs::InteractionTracker::Interaction interaction;
+    interaction.query = QStringLiteral("count test");
+    interaction.selectedItemId = 33;
+    interaction.selectedPath = QStringLiteral("/tmp/count.txt");
+    interaction.matchType = QStringLiteral("exact_name");
+    interaction.resultPosition = 0;
+    interaction.timestamp = QDateTime::currentDateTimeUtc();
+
+    QVERIFY(tracker.recordInteraction(interaction));
+    QVERIFY(tracker.recordInteraction(interaction));
+    QVERIFY(tracker.recordInteraction(interaction));
+
+    QCOMPARE(tracker.getInteractionCount(QStringLiteral("count test"), 33), 3);
 }
 
 void TestInteractionTracker::testBoostCalculation()

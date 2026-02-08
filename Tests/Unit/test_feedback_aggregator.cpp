@@ -14,6 +14,7 @@ private slots:
     void testRunAggregation();
     void testCleanup();
     void testLastAggregationTime();
+    void testEmptyDatabase();
 
 private:
     void resetTables();
@@ -144,6 +145,18 @@ void TestFeedbackAggregator::testLastAggregationTime()
     const QDateTime last = aggregator.lastAggregationTime();
     QVERIFY(last.isValid());
     QVERIFY(last.secsTo(QDateTime::currentDateTimeUtc()) < 60);
+}
+
+void TestFeedbackAggregator::testEmptyDatabase()
+{
+    bs::FeedbackAggregator aggregator(m_db);
+    QVERIFY(aggregator.runAggregation());
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(m_db, "SELECT COUNT(*) FROM frequencies;", -1, &stmt, nullptr), SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 0);
+    sqlite3_finalize(stmt);
 }
 
 QTEST_MAIN(TestFeedbackAggregator)

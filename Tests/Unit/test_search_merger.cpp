@@ -8,6 +8,7 @@ class TestSearchMerger : public QObject {
     Q_OBJECT
 
 private slots:
+    void testEmptyInputs();
     void testMergeLexicalOnly();
     void testMergeSemanticOnly();
     void testMergeBothSources();
@@ -15,6 +16,9 @@ private slots:
     void testSimilarityThreshold();
     void testMaxResultsRespected();
     void testNormalization();
+    void testNormalizeLexicalScore();
+    void testNormalizeSemanticScore();
+    void testCategoryBoth();
 
 private:
     static bs::SearchResult makeLexicalResult(int64_t itemId, double score);
@@ -29,6 +33,15 @@ bs::SearchResult TestSearchMerger::makeLexicalResult(int64_t itemId, double scor
     result.matchType = bs::MatchType::Content;
     result.score = score;
     return result;
+}
+
+void TestSearchMerger::testEmptyInputs()
+{
+    const std::vector<bs::SearchResult> lexical;
+    const std::vector<bs::SemanticResult> semantic;
+
+    const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, semantic);
+    QVERIFY(merged.empty());
 }
 
 void TestSearchMerger::testMergeLexicalOnly()
@@ -140,6 +153,41 @@ void TestSearchMerger::testNormalization()
 
     QVERIFY(lexical >= 0.0F && lexical <= 1.0F);
     QVERIFY(semantic >= 0.0F && semantic <= 1.0F);
+}
+
+void TestSearchMerger::testNormalizeLexicalScore()
+{
+    QCOMPARE(bs::SearchMerger::normalizeLexicalScore(100.0F, 200.0F), 0.5F);
+    QCOMPARE(bs::SearchMerger::normalizeLexicalScore(200.0F, 200.0F), 1.0F);
+    QCOMPARE(bs::SearchMerger::normalizeLexicalScore(0.0F, 200.0F), 0.0F);
+}
+
+void TestSearchMerger::testNormalizeSemanticScore()
+{
+    const float above = bs::SearchMerger::normalizeSemanticScore(0.9F, 0.7F);
+    QVERIFY(above > 0.0F);
+    QVERIFY(above <= 1.0F);
+
+    const float atThreshold = bs::SearchMerger::normalizeSemanticScore(0.7F, 0.7F);
+    QVERIFY(atThreshold >= 0.0F);
+
+    const float below = bs::SearchMerger::normalizeSemanticScore(0.5F, 0.7F);
+    QCOMPARE(below, 0.0F);
+}
+
+void TestSearchMerger::testCategoryBoth()
+{
+    const std::vector<bs::SearchResult> lexical = {
+        makeLexicalResult(42, 100.0),
+    };
+    const std::vector<bs::SemanticResult> semantic = {
+        {42, 0.95F},
+    };
+
+    const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, semantic);
+    QCOMPARE(static_cast<int>(merged.size()), 1);
+    QCOMPARE(merged[0].itemId, static_cast<int64_t>(42));
+    QVERIFY(merged[0].score > 0.0);
 }
 
 QTEST_MAIN(TestSearchMerger)
