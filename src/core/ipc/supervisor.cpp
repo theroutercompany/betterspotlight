@@ -77,7 +77,7 @@ void Supervisor::stopAll()
 
         if (svc->process->state() != QProcess::NotRunning) {
             // Wait briefly for graceful exit
-            if (!svc->process->waitForFinished(3000)) {
+            if (!svc->process->waitForFinished(5000)) {
                 qCWarning(bsIpc, "Service '%s' did not exit gracefully, terminating",
                           qPrintable(svc->info.name));
                 svc->process->terminate();
@@ -132,9 +132,9 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
     if (status == QProcess::CrashExit || exitCode != 0) {
         int64_t now = QDateTime::currentSecsSinceEpoch();
 
-        // Reset crash count if outside the crash window
-        if (now - svc->info.lastCrashTime > kCrashWindowSeconds) {
+        if (svc->info.crashCount == 0 || now - svc->info.firstCrashTime > kCrashWindowSeconds) {
             svc->info.crashCount = 0;
+            svc->info.firstCrashTime = now;
         }
 
         svc->info.crashCount++;
