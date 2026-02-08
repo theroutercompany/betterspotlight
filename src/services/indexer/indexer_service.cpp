@@ -81,6 +81,9 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
     }
     m_store.emplace(std::move(store.value()));
 
+    // Load user-defined exclusion patterns from ~/.bsignore
+    m_pathRules.loadBsignore(QDir::homePath().toStdString() + "/.bsignore");
+
     // Create ExtractionManager and Pipeline
     m_extractor = std::make_unique<ExtractionManager>();
     m_pipeline = std::make_unique<Pipeline>(m_store.value(), *m_extractor, m_pathRules);
