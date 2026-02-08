@@ -179,7 +179,11 @@ QVariantMap SearchController::getHealthSync()
     }
 
     QJsonObject result = response->value(QStringLiteral("result")).toObject();
-    return result.toVariantMap();
+
+    // The query service nests health stats under "indexHealth".
+    // Flatten it so QML can access keys like healthData["totalIndexedItems"] directly.
+    QJsonObject indexHealth = result.value(QStringLiteral("indexHealth")).toObject();
+    return indexHealth.toVariantMap();
 }
 
 void SearchController::executeSearch()
