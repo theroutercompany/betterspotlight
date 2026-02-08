@@ -56,6 +56,7 @@ public:
         const QString& parentPath = {});
 
     bool deleteItemByPath(const QString& path);
+    bool updateContentHash(int64_t itemId, const QString& contentHash);
 
     struct ItemRow {
         int64_t id = 0;
