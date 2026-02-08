@@ -47,3 +47,6 @@ Icon?
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Downloaded embedding assets
+data/models/

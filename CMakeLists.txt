@@ -42,6 +42,25 @@ target_compile_options(sqlite3 PRIVATE -w)
 
 # ---------- Optional Dependencies ----------
 option(BETTERSPOTLIGHT_WITH_ONNX "Enable ONNX Runtime for semantic search" ON)
+option(BETTERSPOTLIGHT_FETCH_MODELS
+       "Fetch embedding model assets into data/models when missing"
+       ON)
+
+set(BETTERSPOTLIGHT_MODELS_DIR "${CMAKE_SOURCE_DIR}/data/models")
+set(BETTERSPOTLIGHT_MODEL_ONNX "${BETTERSPOTLIGHT_MODELS_DIR}/bge-small-en-v1.5-int8.onnx")
+set(BETTERSPOTLIGHT_MODEL_VOCAB "${BETTERSPOTLIGHT_MODELS_DIR}/vocab.txt")
+
+if(BETTERSPOTLIGHT_FETCH_MODELS)
+    add_custom_target(betterspotlight-fetch-models
+        COMMAND ${CMAKE_SOURCE_DIR}/tools/fetch_embedding_models.sh
+        BYPRODUCTS
+            ${BETTERSPOTLIGHT_MODEL_ONNX}
+            ${BETTERSPOTLIGHT_MODEL_VOCAB}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Ensuring embedding model assets are available in data/models"
+        VERBATIM
+    )
+endif()
 
 find_package(Tesseract QUIET)
 find_package(PkgConfig QUIET)
