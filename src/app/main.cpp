@@ -1,6 +1,8 @@
 #include "hotkey_manager.h"
+#include "onboarding_controller.h"
 #include "search_controller.h"
 #include "service_manager.h"
+#include "settings_controller.h"
 #include "status_bar_bridge.h"
 #include "core/shared/logging.h"
 
@@ -40,6 +42,8 @@ int main(int argc, char* argv[])
     bs::ServiceManager serviceManager;
     bs::HotkeyManager hotkeyManager;
     bs::SearchController searchController;
+    bs::OnboardingController onboardingController;
+    bs::SettingsController settingsController;
 
     // Wire the search controller to the supervisor for IPC
     searchController.setSupervisor(serviceManager.supervisor());
@@ -68,6 +72,8 @@ int main(int argc, char* argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("serviceManagerObj"), &serviceManager);
     engine.rootContext()->setContextProperty(QStringLiteral("hotkeyManagerObj"), &hotkeyManager);
     engine.rootContext()->setContextProperty(QStringLiteral("searchControllerObj"), &searchController);
+    engine.rootContext()->setContextProperty(QStringLiteral("onboardingControllerObj"), &onboardingController);
+    engine.rootContext()->setContextProperty(QStringLiteral("settingsControllerObj"), &settingsController);
 
     // StatusBarBridge has proper Q_OBJECT signals that QML Connections can bind to
     bs::StatusBarBridge statusBarBridge;

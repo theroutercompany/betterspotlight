@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import "onboarding"
 
 // Root is a non-visual object — BetterSpotlight is a status-bar app
 // with no main window. Using QtObject avoids the macOS issue where
@@ -16,6 +17,12 @@ QtObject {
     property var settingsPanel: SettingsPanel {
         searchController: searchControllerObj
         serviceManager: serviceManagerObj
+        settingsController: settingsControllerObj
+    }
+
+    // The onboarding window — shown only on first run
+    property var onboardingWindow: OnboardingWindow {
+        visible: onboardingControllerObj ? onboardingControllerObj.needsOnboarding : false
     }
 
     // Connect the global hotkey to toggle the search panel
