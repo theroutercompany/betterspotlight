@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          brew install qt@6 poppler tesseract leptonica pkg-config
+      
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+      
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+      
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
