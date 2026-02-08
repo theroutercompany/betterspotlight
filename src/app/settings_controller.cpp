@@ -68,7 +68,6 @@ QVariantList jsonArrayToVariantList(const QJsonArray& arr)
 QJsonArray variantListToJsonArray(const QVariantList& values)
 {
     QJsonArray out;
-    out.reserve(values.size());
 
     for (const QVariant& v : values) {
         const QVariantMap map = v.toMap();
