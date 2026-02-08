@@ -35,22 +35,22 @@ Every sub-agent MUST read its referenced docs before writing any code. The docs 
 
 | Doc | Path | Summary |
 |-----|------|---------|
-| Architecture Overview | `docs/01-architecture-overview.md` | System layers, data flows, resolved decisions |
+| Architecture Overview | `../../foundation/architecture-overview.md` | System layers, data flows, resolved decisions |
 | ADR-001: Qt/C++ | `docs/adrs/adr-001-qt-cpp-over-swift.md` | Why Qt 6/C++ over Swift |
 | ADR-002: FTS5 | `docs/adrs/adr-002-fts5-lexical-search.md` | Why FTS5 over Xapian/Tantivy |
 | ADR-003: FSEvents | `docs/adrs/adr-003-fsevents-file-watching.md` | Why FSEvents over kqueue/polling |
 | ADR-004: Process Isolation | `docs/adrs/adr-004-process-isolation.md` | Why Unix sockets over XPC/gRPC |
 | ADR-005: Tesseract | `docs/adrs/adr-005-tesseract-ocr.md` | Why Tesseract over Vision framework |
 | ADR-006: PDF Library | `docs/adrs/adr-006-pdf-library-selection.md` | Poppler (dev) / PDFium (release) |
-| Indexing Pipeline | `docs/03-indexing-pipeline.md` | 8-stage pipeline with C++ code samples |
-| Storage Schema | `docs/04-storage-schema.md` | 8 tables + FTS5, canonical SQL, migrations |
-| IPC Boundaries | `docs/05-ipc-service-boundaries.md` | Service protocols, message format, lifecycle |
-| Ranking & Scoring | `docs/06-ranking-scoring.md` | Formula, weights, match types, context signals |
-| Dependency Audit | `docs/07-dependency-audit.md` | All deps with licensing analysis |
-| Build System | `docs/08-build-system.md` | CMake config, targets, packaging |
-| Security | `docs/09-security-data-handling.md` | Data scope, threat model, sensitive paths |
-| Migration Mapping | `docs/10-migration-mapping.md` | Swift scaffold to Qt/C++ module map |
-| Milestone Criteria | `docs/11-milestone-acceptance-criteria.md` | M1 pass/fail gates |
+| Indexing Pipeline | `../../foundation/indexing-pipeline.md` | 8-stage pipeline with C++ code samples |
+| Storage Schema | `../../foundation/storage-schema.md` | 8 tables + FTS5, canonical SQL, migrations |
+| IPC Boundaries | `../../foundation/ipc-service-boundaries.md` | Service protocols, message format, lifecycle |
+| Ranking & Scoring | `../../foundation/ranking-scoring.md` | Formula, weights, match types, context signals |
+| Dependency Audit | `../../operations/dependency-audit.md` | All deps with licensing analysis |
+| Build System | `../../foundation/build-system.md` | CMake config, targets, packaging |
+| Security | `../../foundation/security-data-handling.md` | Data scope, threat model, sensitive paths |
+| Migration Mapping | `../../operations/migration-mapping.md` | Swift scaffold to Qt/C++ module map |
+| Milestone Criteria | `../acceptance-criteria.md` | M1 pass/fail gates |
 
 ---
 
@@ -89,7 +89,7 @@ betterspotlight-tests          (test binary)  Tier 4  - unit + integration tests
 
 ### Sub-Agent 0A: Project Scaffold + CMake Build System
 
-**Read:** `docs/08-build-system.md`, `docs/07-dependency-audit.md`
+**Read:** `../../foundation/build-system.md`, `../../operations/dependency-audit.md`
 
 **Deliverables:**
 - Complete directory structure matching doc 08's project layout
@@ -115,7 +115,7 @@ betterspotlight-tests          (test binary)  Tier 4  - unit + integration tests
 
 ### Sub-Agent 0B: Shared Types & Models Library
 
-**Read:** `docs/03-indexing-pipeline.md` (Stage data types), `docs/05-ipc-service-boundaries.md` (protocol messages), `docs/06-ranking-scoring.md` (scoring types), `docs/04-storage-schema.md` (table row types)
+**Read:** `../../foundation/indexing-pipeline.md` (Stage data types), `../../foundation/ipc-service-boundaries.md` (protocol messages), `../../foundation/ranking-scoring.md` (scoring types), `../../foundation/storage-schema.md` (table row types)
 
 **Deliverables:** `src/core/shared/` static library containing:
 
@@ -146,7 +146,7 @@ src/core/shared/
 
 ### Sub-Agent 0C: SQLite Integration + Schema Bootstrap
 
-**Read:** `docs/04-storage-schema.md` (canonical, entire document), `docs/03-indexing-pipeline.md` (Stage 7 FTS5 section)
+**Read:** `../../foundation/storage-schema.md` (canonical, entire document), `../../foundation/indexing-pipeline.md` (Stage 7 FTS5 section)
 
 **Deliverables:** `src/core/index/` module containing:
 
@@ -214,7 +214,7 @@ public:
 
 ### Sub-Agent 1A: FSEvents + FileScanner + PathRules + .bsignore
 
-**Read:** `docs/03-indexing-pipeline.md` (Stages 1-3), `docs/09-security-data-handling.md` (exclusion rules), ADR-003
+**Read:** `../../foundation/indexing-pipeline.md` (Stages 1-3), `../../foundation/security-data-handling.md` (exclusion rules), ADR-003
 
 **Deliverables:**
 ```
@@ -241,7 +241,7 @@ src/core/fs/
 
 ### Sub-Agent 1B: Content Extraction (Text + PDF + OCR)
 
-**Read:** `docs/03-indexing-pipeline.md` (Stages 4-5), `docs/05-ipc-service-boundaries.md` (ExtractorService protocol), ADR-005, ADR-006
+**Read:** `../../foundation/indexing-pipeline.md` (Stages 4-5), `../../foundation/ipc-service-boundaries.md` (ExtractorService protocol), ADR-005, ADR-006
 
 **Deliverables:**
 ```
@@ -267,7 +267,7 @@ src/core/extraction/
 
 ### Sub-Agent 1C: IPC Socket Layer
 
-**Read:** `docs/05-ipc-service-boundaries.md` (entire document), ADR-004
+**Read:** `../../foundation/ipc-service-boundaries.md` (entire document), ADR-004
 
 **Deliverables:**
 ```
@@ -295,7 +295,7 @@ src/core/ipc/
 
 ### Sub-Agent 1D: Ranking & Scoring Engine
 
-**Read:** `docs/06-ranking-scoring.md` (entire document), `docs/04-storage-schema.md` (frequencies table, settings table)
+**Read:** `../../foundation/ranking-scoring.md` (entire document), `../../foundation/storage-schema.md` (frequencies table, settings table)
 
 **Deliverables:**
 ```
@@ -324,7 +324,7 @@ src/core/ranking/
 
 ### Sub-Agent 2A: Indexing Pipeline Orchestrator
 
-**Read:** `docs/03-indexing-pipeline.md` (entire document, especially Stages 6-7 and the CRITICAL STAGE warning)
+**Read:** `../../foundation/indexing-pipeline.md` (entire document, especially Stages 6-7 and the CRITICAL STAGE warning)
 
 **Deliverables:**
 ```
@@ -356,7 +356,7 @@ src/core/indexing/
 
 ### Sub-Agent 2B: Service Binaries (Indexer + Extractor + Query)
 
-**Read:** `docs/05-ipc-service-boundaries.md` (service protocols), `docs/03-indexing-pipeline.md` (IndexerService responsibilities), `docs/06-ranking-scoring.md` (QueryService responsibilities)
+**Read:** `../../foundation/ipc-service-boundaries.md` (service protocols), `../../foundation/indexing-pipeline.md` (IndexerService responsibilities), `../../foundation/ranking-scoring.md` (QueryService responsibilities)
 
 **Deliverables:**
 ```
@@ -399,7 +399,7 @@ Each service binary:
 
 ### Sub-Agent 3A: Qt UI Application
 
-**Read:** `docs/01-architecture-overview.md` (UI layer), `docs/08-build-system.md` (app bundle), `docs/10-migration-mapping.md` (UI module mapping), `docs/11-milestone-acceptance-criteria.md` (M1 functional criteria)
+**Read:** `../../foundation/architecture-overview.md` (UI layer), `../../foundation/build-system.md` (app bundle), `../../operations/migration-mapping.md` (UI module mapping), `../acceptance-criteria.md` (M1 functional criteria)
 
 **Deliverables:**
 ```
@@ -436,7 +436,7 @@ src/app/
 
 ### Sub-Agent 3B: Test Infrastructure + Integration Tests
 
-**Read:** `docs/03-indexing-pipeline.md` (Testing Strategy section), `docs/11-milestone-acceptance-criteria.md` (Testing Criteria)
+**Read:** `../../foundation/indexing-pipeline.md` (Testing Strategy section), `../acceptance-criteria.md` (Testing Criteria)
 
 **Deliverables:**
 ```
@@ -562,4 +562,4 @@ Estimated wall-clock with full parallelization: 4-6 days
 
 4. **Do not optimize prematurely.** Get the pipeline working end-to-end first, then profile. The performance gates are generous for M1.
 
-5. **When in doubt, the doc wins.** If two pieces of code disagree, check the doc. If two docs disagree, check `docs/04-storage-schema.md` (canonical for data) or `docs/03-indexing-pipeline.md` (canonical for pipeline logic).
+5. **When in doubt, the doc wins.** If two pieces of code disagree, check the doc. If two docs disagree, check `../../foundation/storage-schema.md` (canonical for data) or `../../foundation/indexing-pipeline.md` (canonical for pipeline logic).

@@ -160,7 +160,7 @@ CREATE INDEX idx_content_chunk_hash ON content(chunk_hash);
 | `id` | INTEGER | PRIMARY KEY | Unique row identifier (not used for FK, but helpful for pagination) |
 | `item_id` | INTEGER | FOREIGN KEY → items(id) ON DELETE CASCADE | Parent file item |
 | `chunk_index` | INTEGER | NOT NULL | 0-based chunk sequence number within file |
-| `chunk_text` | TEXT | NOT NULL | Extracted text for this chunk (target 500-2000 chars, 1000 default; see [03-indexing-pipeline.md, Stage 6]) |
+| `chunk_text` | TEXT | NOT NULL | Extracted text for this chunk (target 500-2000 chars, 1000 default; see [Indexing Pipeline](./indexing-pipeline.md), Stage 6) |
 | `chunk_hash` | TEXT | NOT NULL | SHA-256 of `path + "#" + chunk_index` for stable IDs (must match pipeline computation) |
 
 **Rationale for Chunking:**
@@ -425,7 +425,7 @@ VALUES('fts5', 'bm25(10.0, 5.0, 1.0)');
 - `content=1.0`: Lower weight for content matches (reduce noise from large text files)
 
 **Index Population:**
-- Populated by C++ extraction pipeline when `content` rows are inserted (see [03-indexing-pipeline.md, Stage 7])
+- Populated by C++ extraction pipeline when `content` rows are inserted (see [Indexing Pipeline](./indexing-pipeline.md), Stage 7)
 - Triggered via INSERT/REPLACE after chunking completes
 - Queries use MATCH with Porter stemmer: `MATCH 'python* AND code*'`
 

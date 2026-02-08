@@ -451,7 +451,7 @@ For each queued path:
 
 **Behavior:**
 - Extracts text from file at path
-- Returns full extracted text; chunking is handled by IndexerService per pipeline spec (500-2000 chars, 1000 default, no overlap for FTS5; see [03-indexing-pipeline.md, Stage 6])
+- Returns full extracted text; chunking is handled by IndexerService per pipeline spec (500-2000 chars, 1000 default, no overlap for FTS5; see [Indexing Pipeline](./indexing-pipeline.md), Stage 6)
 - Extracts metadata if available in file format
 - Enforces 30-second timeout (IndexerService enforces)
 
