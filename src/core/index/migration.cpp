@@ -37,12 +37,56 @@ bool applyMigrations(sqlite3* db, int targetVersion)
         return true;
     }
 
-    // Future migrations go here as sequential if-blocks:
-    // if (current < 2) { ... apply migration 1→2 ... }
-    // if (current < 3) { ... apply migration 2→3 ... }
+    auto exec = [db](const char* sql) -> bool {
+        char* errMsg = nullptr;
+        const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            LOG_ERROR(bsIndex, "Migration SQL failed: %s", errMsg ? errMsg : "unknown");
+            sqlite3_free(errMsg);
+            return false;
+        }
+        return true;
+    };
 
-    LOG_INFO(bsIndex, "Schema is at version %d (target %d), no pending migrations",
-             current, targetVersion);
+    if (current < 2 && targetVersion >= 2) {
+        LOG_INFO(bsIndex, "Applying schema migration 1 -> 2");
+
+        if (!exec(R"(
+            CREATE TABLE IF NOT EXISTS interactions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                query         TEXT NOT NULL,
+                query_normalized TEXT NOT NULL,
+                item_id       INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                path          TEXT NOT NULL,
+                match_type    TEXT NOT NULL,
+                result_position INTEGER NOT NULL,
+                app_context   TEXT,
+                timestamp     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        )")) {
+            return false;
+        }
+
+        if (!exec("CREATE INDEX IF NOT EXISTS idx_interactions_query ON interactions(query_normalized);")
+            || !exec("CREATE INDEX IF NOT EXISTS idx_interactions_item ON interactions(item_id);")
+            || !exec("CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp);")) {
+            return false;
+        }
+
+        if (!exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', '2');")) {
+            return false;
+        }
+
+        current = 2;
+    }
+
+    if (current != targetVersion) {
+        LOG_ERROR(bsIndex, "Schema migration incomplete: current=%d target=%d",
+                  current, targetVersion);
+        return false;
+    }
+
+    LOG_INFO(bsIndex, "Schema migrations complete: version %d", current);
     return true;
 }
 

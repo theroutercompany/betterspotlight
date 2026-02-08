@@ -231,6 +231,7 @@ void Pipeline::processingLoop()
 
         // Process the work item
         IndexResult result = m_indexer->processWorkItem(item.value());
+        m_workQueue.markItemComplete();
 
         ++m_processedCount;
         ++batchCount;
@@ -253,6 +254,14 @@ void Pipeline::processingLoop()
 
             emit progressUpdated(m_processedCount,
                                  m_processedCount + static_cast<int>(m_workQueue.size()));
+        } else if (inTransaction && m_workQueue.size() == 0) {
+            // Flush small/idle batches so health/search can observe fresh data
+            // without waiting for the next batch boundary or shutdown.
+            m_store.commitTransaction();
+            inTransaction = false;
+            batchCount = 0;
+
+            emit progressUpdated(m_processedCount, m_processedCount);
         }
     }
 

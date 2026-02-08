@@ -205,6 +205,11 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
 
 QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
 {
+    QJsonArray roots;
+    for (const std::string& root : m_currentRoots) {
+        roots.append(QString::fromStdString(root));
+    }
+
     if (!m_pipeline) {
         // Return zeroed stats when pipeline is not yet created
         QJsonObject lastProgress;
@@ -216,6 +221,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("processing")] = 0;
         result[QStringLiteral("failed")] = 0;
         result[QStringLiteral("paused")] = false;
+        result[QStringLiteral("roots")] = roots;
         result[QStringLiteral("lastProgressReport")] = lastProgress;
         return IpcMessage::makeResponse(id, result);
     }
@@ -232,6 +238,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     result[QStringLiteral("processing")] = static_cast<qint64>(stats.activeItems);
     result[QStringLiteral("failed")] = static_cast<qint64>(stats.droppedItems);
     result[QStringLiteral("paused")] = stats.isPaused;
+    result[QStringLiteral("roots")] = roots;
     result[QStringLiteral("lastProgressReport")] = lastProgress;
     return IpcMessage::makeResponse(id, result);
 }

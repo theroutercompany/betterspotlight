@@ -48,6 +48,25 @@ int main(int argc, char* argv[])
     // Wire the search controller to the supervisor for IPC
     searchController.setSupervisor(serviceManager.supervisor());
 
+    // Load and keep global hotkey in sync with persisted settings.
+    hotkeyManager.setHotkey(settingsController.hotkey());
+    QObject::connect(&settingsController, &bs::SettingsController::hotkeyChanged,
+                     [&]() { hotkeyManager.setHotkey(settingsController.hotkey()); });
+
+    // Wire settings actions to indexer IPC commands.
+    QObject::connect(&settingsController, &bs::SettingsController::indexingPaused,
+                     &serviceManager, &bs::ServiceManager::pauseIndexing);
+    QObject::connect(&settingsController, &bs::SettingsController::indexingResumed,
+                     &serviceManager, &bs::ServiceManager::resumeIndexing);
+    QObject::connect(&settingsController, &bs::SettingsController::rebuildIndexRequested,
+                     &serviceManager, &bs::ServiceManager::rebuildAll);
+    QObject::connect(&settingsController, &bs::SettingsController::rebuildVectorIndexRequested,
+                     &serviceManager, &bs::ServiceManager::rebuildVectorIndex);
+    QObject::connect(&settingsController, &bs::SettingsController::clearExtractionCacheRequested,
+                     &serviceManager, &bs::ServiceManager::clearExtractionCache);
+    QObject::connect(&settingsController, &bs::SettingsController::reindexFolderRequested,
+                     &serviceManager, &bs::ServiceManager::reindexPath);
+
     // --- Set up the system tray icon (C++ for reliability on macOS) ---
 
     QSystemTrayIcon trayIcon;

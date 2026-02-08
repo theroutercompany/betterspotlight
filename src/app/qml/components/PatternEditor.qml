@@ -8,8 +8,6 @@ Item {
     property var patterns: []
     property var readOnlyPatterns: []
 
-    signal patternsChanged()
-
     implicitHeight: mainLayout.implicitHeight
 
     ColumnLayout {
@@ -123,7 +121,6 @@ Item {
                                     var newPatterns = root.patterns.slice()
                                     newPatterns.splice(index, 1)
                                     root.patterns = newPatterns
-                                    root.patternsChanged()
                                 }
                             }
                         }
@@ -206,7 +203,6 @@ Item {
         var newPatterns = root.patterns.slice()
         newPatterns.push(pattern)
         root.patterns = newPatterns
-        root.patternsChanged()
         newPatternField.text = ""
     }
 

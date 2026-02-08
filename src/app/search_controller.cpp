@@ -183,6 +183,40 @@ QVariantMap SearchController::getHealthSync()
     // The query service nests health stats under "indexHealth".
     // Flatten it so QML can access keys like healthData["totalIndexedItems"] directly.
     QJsonObject indexHealth = result.value(QStringLiteral("indexHealth")).toObject();
+
+    // Merge queue/runtime stats from the indexer service.
+    SocketClient* indexerClient = m_supervisor->clientFor(QStringLiteral("indexer"));
+    if (indexerClient && indexerClient->isConnected()) {
+        auto queueResponse = indexerClient->sendRequest(QStringLiteral("getQueueStatus"), {},
+                                                        kSearchTimeoutMs);
+        if (queueResponse
+            && queueResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
+            const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
+            const int pending = queueResult.value(QStringLiteral("pending")).toInt();
+            const int processing = queueResult.value(QStringLiteral("processing")).toInt();
+            const bool paused = queueResult.value(QStringLiteral("paused")).toBool();
+
+            indexHealth[QStringLiteral("queuePending")] = pending;
+            indexHealth[QStringLiteral("queueInProgress")] = processing;
+
+            const QJsonArray roots = queueResult.value(QStringLiteral("roots")).toArray();
+            if (!roots.isEmpty()) {
+                QJsonArray rootStatus;
+                const QString status = paused
+                                           ? QStringLiteral("active")
+                                           : (processing > 0 ? QStringLiteral("scanning")
+                                                             : QStringLiteral("active"));
+                for (const QJsonValue& root : roots) {
+                    QJsonObject rootEntry;
+                    rootEntry[QStringLiteral("path")] = root.toString();
+                    rootEntry[QStringLiteral("status")] = status;
+                    rootStatus.append(rootEntry);
+                }
+                indexHealth[QStringLiteral("indexRoots")] = rootStatus;
+            }
+        }
+    }
+
     return indexHealth.toVariantMap();
 }
 

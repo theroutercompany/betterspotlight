@@ -157,7 +157,7 @@ constexpr const char* kFts5WeightConfig =
 
 // Default settings rows (doc 04 Section 10.1)
 constexpr const char* kDefaultSettings = R"(
-INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '2');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_full_index_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_vacuum_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('max_file_size', '104857600');
@@ -198,6 +198,6 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('onboardingCompleted', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('lastFeedbackAggregation', '0');
 )";
 
-constexpr int kCurrentSchemaVersion = 1;
+constexpr int kCurrentSchemaVersion = 2;
 
 } // namespace bs

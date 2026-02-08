@@ -50,6 +50,9 @@ public:
     // when shutdown() has been called.
     std::optional<WorkItem> dequeue();
 
+    // Marks one dequeued item as fully processed.
+    void markItemComplete();
+
     // Pause processing: dequeue() will block until resume() or shutdown().
     void pause();
 

@@ -10,8 +10,6 @@ Item {
     // mode values: "index_embed", "index_only", "skip"
     property var model: []
 
-    signal modelChanged()
-
     implicitHeight: mainLayout.implicitHeight
 
     ColumnLayout {
@@ -68,7 +66,6 @@ Item {
                             entry.mode = modeValues[comboIndex]
                             newModel[index] = entry
                             root.model = newModel
-                            root.modelChanged()
                         }
                     }
 
@@ -83,7 +80,6 @@ Item {
                             var newModel = root.model.slice()
                             newModel.splice(index, 1)
                             root.model = newModel
-                            root.modelChanged()
                         }
                     }
                 }
@@ -137,7 +133,6 @@ Item {
             var newModel = root.model.slice()
             newModel.push({ path: folderPath, mode: "index_embed" })
             root.model = newModel
-            root.modelChanged()
         }
     }
 }

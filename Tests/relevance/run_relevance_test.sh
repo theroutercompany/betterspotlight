@@ -17,7 +17,7 @@ set -euo pipefail
 
 MODE="both"
 CORPUS="tests/relevance/test_corpus.json"
-FIXTURE="tests/fixtures/standard_home_v1"
+FIXTURE="tests/Fixtures/standard_home_v1"
 OUTPUT="tests/relevance/results.csv"
 
 usage() {
@@ -29,7 +29,7 @@ Options:
   --mode semantic   Run FTS5+semantic
   --mode both       Run both and produce comparison (default)
   --corpus          Path to test_corpus.json (default: tests/relevance/test_corpus.json)
-  --fixture         Path to fixture directory (default: tests/fixtures/standard_home_v1)
+  --fixture         Path to fixture directory (default: tests/Fixtures/standard_home_v1)
   --output          Path to results CSV (default: tests/relevance/results.csv)
 EOF
 }
@@ -112,6 +112,20 @@ QUERY_BIN="$(resolve_bin "betterspotlight-query")" || {
 	echo "Missing binary: betterspotlight-query (expected in build/bin or PATH)" >&2
 	exit 2
 }
+
+# This runner expects legacy one-shot CLI options. The current project binaries are
+# daemon-style services; fail fast with guidance instead of hanging indefinitely.
+if ! strings "$INDEXER_BIN" | rg -q -- "--wait-for-complete"; then
+	echo "Unsupported indexer binary mode: '$INDEXER_BIN' is daemon-style (no --wait-for-complete)." >&2
+	echo "Use ctest and docs/operations/manual-inspection-m1-m2.md for IPC-driven relevance checks." >&2
+	exit 2
+fi
+
+if ! strings "$QUERY_BIN" | rg -q -- "--query"; then
+	echo "Unsupported query binary mode: '$QUERY_BIN' is daemon-style (no --query)." >&2
+	echo "Use ctest and docs/operations/manual-inspection-m1-m2.md for IPC-driven relevance checks." >&2
+	exit 2
+fi
 
 required_fixture_files=(
 	"Documents/budget-2026.xlsx"

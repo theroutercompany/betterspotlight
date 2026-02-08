@@ -42,6 +42,7 @@ private:
     QJsonObject handleGetFileTypeAffinity(uint64_t id);
     QJsonObject handleRunAggregation(uint64_t id);
     QJsonObject handleExportInteractionData(uint64_t id, const QJsonObject& params);
+    QJsonObject handleRebuildVectorIndex(uint64_t id);
 
     // ── Store + services ──
     std::optional<SQLiteStore> m_store;
