@@ -89,8 +89,10 @@ bool SQLiteStore::init(const QString& dbPath)
             return false;
         }
 
-        // Set BM25 weights
-        sqlite3_exec(m_db, kFts5WeightConfig, nullptr, nullptr, nullptr);
+        // Set BM25 weights — non-fatal, falls back to equal weights (1,1,1)
+        if (!execSql(kFts5WeightConfig)) {
+            LOG_WARN(bsIndex, "Failed to set BM25 weights; falling back to defaults");
+        }
 
         // Insert default settings
         if (!execSql(kDefaultSettings)) {
@@ -631,7 +633,7 @@ bool SQLiteStore::recordFeedback(int64_t itemId, const QString& action,
 {
     const char* sql = R"(
         INSERT INTO feedback (item_id, action, query, result_position, timestamp)
-        VALUES (?1, ?2, ?3, ?4, datetime('now'))
+        VALUES (?1, ?2, ?3, ?4, ?5)
     )";
 
     sqlite3_stmt* stmt = nullptr;
@@ -642,11 +644,13 @@ bool SQLiteStore::recordFeedback(int64_t itemId, const QString& action,
 
     const QByteArray actionUtf8 = action.toUtf8();
     const QByteArray queryUtf8 = query.toUtf8();
+    const double now = static_cast<double>(QDateTime::currentSecsSinceEpoch());
 
     sqlite3_bind_int64(stmt, 1, itemId);
     sqlite3_bind_text(stmt, 2, actionUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, queryUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 4, position);
+    sqlite3_bind_double(stmt, 5, now);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -741,8 +745,9 @@ bool SQLiteStore::cleanupOldFeedback(int retentionDays)
 {
     if (!m_db) return false;
 
-    QString sql = QStringLiteral("DELETE FROM feedback WHERE timestamp < datetime('now', '-%1 days');")
-                      .arg(retentionDays);
+    const double cutoff = static_cast<double>(QDateTime::currentSecsSinceEpoch()) - (retentionDays * 86400.0);
+    QString sql = QStringLiteral("DELETE FROM feedback WHERE timestamp < %1;")
+                      .arg(cutoff, 0, 'f', 0);
 
     char* errMsg = nullptr;
     int rc = sqlite3_exec(m_db, sql.toUtf8().constData(), nullptr, nullptr, &errMsg);

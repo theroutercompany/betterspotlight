@@ -140,19 +140,29 @@ void TypeAffinity::refreshCacheIfNeeded()
     }
     sqlite3_finalize(stmt);
 
+    const int totalOpens = m_cachedStats.codeOpens + m_cachedStats.documentOpens
+                         + m_cachedStats.mediaOpens + m_cachedStats.otherOpens;
+
     int bestCount = m_cachedStats.otherOpens;
-    m_cachedStats.primaryAffinity = QStringLiteral("other");
+    QString bestCategory = QStringLiteral("other");
 
     if (m_cachedStats.codeOpens > bestCount) {
         bestCount = m_cachedStats.codeOpens;
-        m_cachedStats.primaryAffinity = QStringLiteral("code");
+        bestCategory = QStringLiteral("code");
     }
     if (m_cachedStats.documentOpens > bestCount) {
         bestCount = m_cachedStats.documentOpens;
-        m_cachedStats.primaryAffinity = QStringLiteral("document");
+        bestCategory = QStringLiteral("document");
     }
     if (m_cachedStats.mediaOpens > bestCount) {
-        m_cachedStats.primaryAffinity = QStringLiteral("media");
+        bestCount = m_cachedStats.mediaOpens;
+        bestCategory = QStringLiteral("media");
+    }
+
+    if (totalOpens > 0 && (static_cast<double>(bestCount) / static_cast<double>(totalOpens)) > 0.6) {
+        m_cachedStats.primaryAffinity = bestCategory;
+    } else {
+        m_cachedStats.primaryAffinity.clear();
     }
 
     m_lastRefresh = QDateTime::currentDateTimeUtc();

@@ -110,6 +110,9 @@ std::vector<SearchResult> SearchMerger::merge(
         }
 
         if (category == MergeCategory::SemanticOnly) {
+            if (mergedScore <= 0.0f) {
+                continue;
+            }
             SearchResult result;
             result.itemId = itemId;
             result.matchType = MatchType::Content;
@@ -125,11 +128,8 @@ std::vector<SearchResult> SearchMerger::merge(
 
     std::stable_sort(mergedResults.begin(), mergedResults.end(),
                      [](const SearchResult& lhs, const SearchResult& rhs) {
-                         const double lhsScore = getLexicalRawScore(lhs);
-                         const double rhsScore = getLexicalRawScore(rhs);
-
-                         if (std::fabs(lhsScore - rhsScore) > 0.0) {
-                             return lhsScore > rhsScore;
+                         if (lhs.score != rhs.score) {
+                             return lhs.score > rhs.score;
                          }
                          return lhs.itemId < rhs.itemId;
                      });

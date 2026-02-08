@@ -293,6 +293,25 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             if (!semanticResults.empty()) {
                 MergeConfig mergeConfig;
                 results = SearchMerger::merge(results, semanticResults, mergeConfig);
+
+                for (auto& sr : results) {
+                    if (sr.path.isEmpty()) {
+                        auto itemOpt = m_store->getItemById(sr.itemId);
+                        if (itemOpt.has_value()) {
+                            const auto& item = itemOpt.value();
+                            sr.path = item.path;
+                            sr.name = item.name;
+                            sr.kind = item.kind;
+                            sr.fileSize = item.size;
+                            sr.isPinned = item.isPinned;
+                            if (item.modifiedAt > 0.0) {
+                                sr.modificationDate = QDateTime::fromMSecsSinceEpoch(
+                                    static_cast<qint64>(item.modifiedAt * 1000.0))
+                                    .toUTC().toString(Qt::ISODate);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
