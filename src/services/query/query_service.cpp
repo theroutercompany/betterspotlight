@@ -21,9 +21,12 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -65,6 +68,133 @@ static std::vector<Highlight> parseHighlights(const QString& snippet)
     }
 
     return highlights;
+}
+
+enum class SearchQueryMode {
+    Auto,
+    Strict,
+    Relaxed,
+};
+
+SearchQueryMode parseSearchQueryMode(const QJsonObject& params)
+{
+    const QString mode = params.value(QStringLiteral("queryMode"))
+                             .toString(QStringLiteral("auto"))
+                             .trimmed()
+                             .toLower();
+    if (mode == QLatin1String("strict")) {
+        return SearchQueryMode::Strict;
+    }
+    if (mode == QLatin1String("relaxed")) {
+        return SearchQueryMode::Relaxed;
+    }
+    return SearchQueryMode::Auto;
+}
+
+const QSet<QString>& queryStopwords()
+{
+    static const QSet<QString> stopwords = {
+        QStringLiteral("a"),
+        QStringLiteral("an"),
+        QStringLiteral("any"),
+        QStringLiteral("and"),
+        QStringLiteral("are"),
+        QStringLiteral("at"),
+        QStringLiteral("for"),
+        QStringLiteral("from"),
+        QStringLiteral("how"),
+        QStringLiteral("in"),
+        QStringLiteral("is"),
+        QStringLiteral("it"),
+        QStringLiteral("my"),
+        QStringLiteral("of"),
+        QStringLiteral("on"),
+        QStringLiteral("or"),
+        QStringLiteral("that"),
+        QStringLiteral("there"),
+        QStringLiteral("the"),
+        QStringLiteral("to"),
+        QStringLiteral("what"),
+        QStringLiteral("when"),
+        QStringLiteral("where"),
+        QStringLiteral("which"),
+        QStringLiteral("who"),
+        QStringLiteral("why"),
+        QStringLiteral("with"),
+    };
+    return stopwords;
+}
+
+QStringList tokenizeWords(const QString& text)
+{
+    static const QRegularExpression tokenRegex(QStringLiteral(R"([A-Za-z0-9_]+)"));
+    QStringList tokens;
+    auto it = tokenRegex.globalMatch(text.toLower());
+    while (it.hasNext()) {
+        const QString token = it.next().captured(0);
+        if (!token.isEmpty()) {
+            tokens.append(token);
+        }
+    }
+    return tokens;
+}
+
+struct QueryHints {
+    bool downloadsHint = false;
+    bool documentsHint = false;
+    bool desktopHint = false;
+    QString extensionHint;
+    int monthHint = 0;
+    int yearHint = 0;
+};
+
+QueryHints parseQueryHints(const QString& queryLower)
+{
+    QueryHints hints;
+    hints.downloadsHint = queryLower.contains(QStringLiteral(" downloads"))
+        || queryLower.endsWith(QStringLiteral("downloads"));
+    hints.documentsHint = queryLower.contains(QStringLiteral(" documents"))
+        || queryLower.endsWith(QStringLiteral("documents"));
+    hints.desktopHint = queryLower.contains(QStringLiteral(" desktop"))
+        || queryLower.endsWith(QStringLiteral("desktop"));
+
+    if (queryLower.contains(QStringLiteral(" pdf"))) {
+        hints.extensionHint = QStringLiteral("pdf");
+    } else if (queryLower.contains(QStringLiteral(" docx"))) {
+        hints.extensionHint = QStringLiteral("docx");
+    } else if (queryLower.contains(QStringLiteral(" markdown"))
+               || queryLower.contains(QStringLiteral(" md "))) {
+        hints.extensionHint = QStringLiteral("md");
+    } else if (queryLower.contains(QStringLiteral(" image"))
+               || queryLower.contains(QStringLiteral(" jpg"))
+               || queryLower.contains(QStringLiteral(" jpeg"))
+               || queryLower.contains(QStringLiteral(" png"))) {
+        hints.extensionHint = QStringLiteral("__image__");
+    }
+
+    struct MonthToken {
+        const char* token;
+        int month;
+    };
+    static constexpr MonthToken kMonths[] = {
+        {"january", 1}, {"february", 2}, {"march", 3}, {"april", 4},
+        {"may", 5}, {"june", 6}, {"july", 7}, {"august", 8},
+        {"september", 9}, {"october", 10}, {"november", 11}, {"december", 12},
+    };
+    for (const auto& month : kMonths) {
+        if (queryLower.contains(QString::fromLatin1(month.token))) {
+            hints.monthHint = month.month;
+            break;
+        }
+    }
+
+    static const QRegularExpression yearRegex(QStringLiteral(R"((19|20)\d{2})"));
+    QRegularExpressionMatch yearMatch = yearRegex.match(queryLower);
+    if (yearMatch.hasMatch()) {
+        hints.yearHint = yearMatch.captured(0).toInt();
+    }
+
+    return hints;
 }
 
 QueryService::QueryService(QObject* parent)
@@ -283,6 +413,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             limit = 200;
         }
     }
+    const bool debugRequested = params.value(QStringLiteral("debug")).toBool(false);
+    const SearchQueryMode queryMode = parseSearchQueryMode(params);
 
     // Parse context
     QueryContext context;
@@ -304,15 +436,147 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
     }
 
-    LOG_INFO(bsIpc, "Search: query='%s' limit=%d", qPrintable(query), limit);
+    const QString queryLower = query.toLower();
+    const QueryHints queryHints = parseQueryHints(queryLower);
+    const QStringList queryTokensRaw = tokenizeWords(queryLower);
+    QSet<QString> querySignalTokens;
+    for (const QString& token : queryTokensRaw) {
+        if (token.size() >= 3 && !queryStopwords().contains(token)) {
+            querySignalTokens.insert(token);
+        }
+    }
+
+    LOG_INFO(bsIpc, "Search: query='%s' limit=%d mode=%d",
+             qPrintable(query), limit, static_cast<int>(queryMode));
 
     QElapsedTimer timer;
     timer.start();
 
-    // Overquery for ranking: fetch limit * 2 from FTS5
+    // Overquery for ranking: fetch limit * 2 from strict FTS5
     int ftsLimit = limit * 2;
-    std::vector<SQLiteStore::FtsHit> hits = m_store->searchFts5(query, ftsLimit);
-    int totalMatches = static_cast<int>(hits.size());
+    std::vector<SQLiteStore::FtsHit> hits;
+    std::vector<SQLiteStore::FtsHit> strictHits;
+    std::vector<SQLiteStore::FtsHit> relaxedHits;
+    QJsonArray correctedTokensDebug;
+    QString rewrittenRelaxedQuery;
+
+    auto buildTypoRewrittenQuery = [&]() -> QString {
+        sqlite3* db = m_store->rawDb();
+        if (!db) {
+            return query;
+        }
+
+        QSet<QString> lexicon;
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "SELECT name FROM items ORDER BY id DESC LIMIT 50000",
+                               -1, &stmt, nullptr) != SQLITE_OK) {
+            return query;
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* rawName = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (!rawName) {
+                continue;
+            }
+            const QString name = QString::fromUtf8(rawName);
+            const QStringList nameTokens = tokenizeWords(name);
+            for (const QString& token : nameTokens) {
+                if (token.size() < 3 || queryStopwords().contains(token)) {
+                    continue;
+                }
+                lexicon.insert(token);
+            }
+        }
+        sqlite3_finalize(stmt);
+
+        if (lexicon.isEmpty()) {
+            return query;
+        }
+
+        QStringList queryTokens = tokenizeWords(query);
+        if (queryTokens.isEmpty()) {
+            return query;
+        }
+
+        int replacements = 0;
+        for (int i = 0; i < queryTokens.size(); ++i) {
+            const QString token = queryTokens.at(i);
+            if (token.size() < 4 || queryStopwords().contains(token) || lexicon.contains(token)) {
+                continue;
+            }
+            if (replacements >= 2) {
+                break;
+            }
+
+            const int maxDistance = token.size() >= 8 ? 2 : 1;
+            QString bestCandidate;
+            int bestDistance = maxDistance + 1;
+            for (const QString& candidate : lexicon) {
+                if (candidate.isEmpty() || candidate.front() != token.front()) {
+                    continue;
+                }
+                if (std::abs(candidate.size() - token.size()) > 2) {
+                    continue;
+                }
+
+                const int distance = MatchClassifier::editDistance(token, candidate);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestCandidate = candidate;
+                    if (distance == 1) {
+                        break;
+                    }
+                }
+            }
+
+            if (!bestCandidate.isEmpty() && bestDistance <= maxDistance) {
+                QJsonObject replacement;
+                replacement[QStringLiteral("from")] = token;
+                replacement[QStringLiteral("to")] = bestCandidate;
+                correctedTokensDebug.append(replacement);
+
+                queryTokens[i] = bestCandidate;
+                ++replacements;
+            }
+        }
+
+        if (replacements == 0) {
+            return query;
+        }
+        return queryTokens.join(QLatin1Char(' '));
+    };
+
+    switch (queryMode) {
+    case SearchQueryMode::Strict:
+        strictHits = m_store->searchFts5(query, ftsLimit, false);
+        hits = strictHits;
+        break;
+    case SearchQueryMode::Relaxed:
+        rewrittenRelaxedQuery = buildTypoRewrittenQuery();
+        relaxedHits = m_store->searchFts5(
+            rewrittenRelaxedQuery,
+            std::max(ftsLimit * 2, limit * 4),
+            true);
+        hits = relaxedHits;
+        break;
+    case SearchQueryMode::Auto:
+    default:
+        strictHits = m_store->searchFts5(query, ftsLimit, false);
+        hits = strictHits;
+        if (static_cast<int>(strictHits.size()) < std::max(5, limit / 2)) {
+            rewrittenRelaxedQuery = buildTypoRewrittenQuery();
+            relaxedHits = m_store->searchFts5(
+                rewrittenRelaxedQuery,
+                std::max(ftsLimit * 2, limit * 4),
+                true);
+            hits.insert(hits.end(), relaxedHits.begin(), relaxedHits.end());
+        }
+        break;
+    }
+
+    const int strictHitsCount = static_cast<int>(strictHits.size());
+    const int relaxedHitsCount = static_cast<int>(relaxedHits.size());
+    const int totalMatches = static_cast<int>(hits.size());
 
     // Build SearchResult list from FTS hits.
     // Deduplicate by itemId and keep the strongest lexical chunk per file.
@@ -464,8 +728,20 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     // M2: Apply interaction, path preference, and type affinity boosts
     QString normalizedQuery = InteractionTracker::normalizeQuery(query);
+    const QString homePath = QDir::homePath();
+    const QString downloadsPath = homePath + QStringLiteral("/Downloads");
+    const QString documentsPath = homePath + QStringLiteral("/Documents");
+    const QString desktopPath = homePath + QStringLiteral("/Desktop");
+
+    auto isNoteLikeTextExtension = [](const QString& ext) {
+        return ext == QLatin1String("md")
+            || ext == QLatin1String("txt")
+            || ext == QLatin1String("log");
+    };
+
     for (auto& sr : results) {
         double m2Boost = 0.0;
+        const QString ext = QFileInfo(sr.path).suffix().toLower();
 
         if (m_interactionTracker) {
             m2Boost += m_interactionTracker->getInteractionBoost(normalizedQuery, sr.itemId);
@@ -477,7 +753,82 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             m2Boost += m_typeAffinity->getBoost(sr.path);
         }
 
-        sr.score += m2Boost;
+        if (!querySignalTokens.isEmpty()) {
+            const QStringList nameTokens = tokenizeWords(sr.name.toLower());
+            QSet<QString> matchedQueryTokens;
+            for (const QString& token : nameTokens) {
+                if (querySignalTokens.contains(token)) {
+                    matchedQueryTokens.insert(token);
+                }
+            }
+
+            // Parent-directory tokens provide additional deterministic signal
+            // without requiring new ranking models.
+            const QStringList parentTokens =
+                tokenizeWords(QFileInfo(sr.path).absolutePath().toLower());
+            for (const QString& token : parentTokens) {
+                if (querySignalTokens.contains(token)) {
+                    matchedQueryTokens.insert(token);
+                }
+            }
+
+            const int overlapCount = matchedQueryTokens.size();
+            const int queryTokenCount = querySignalTokens.size();
+            const double overlapRatio = queryTokenCount > 0
+                ? static_cast<double>(overlapCount) / static_cast<double>(queryTokenCount)
+                : 0.0;
+
+            if (overlapCount > 0) {
+                m2Boost += std::min(42.0, static_cast<double>(overlapCount) * 12.0);
+                if (queryTokenCount >= 3 && overlapRatio >= 0.60) {
+                    m2Boost += 8.0;
+                }
+            } else if (sr.matchType == MatchType::Content && querySignalTokens.size() >= 3) {
+                // Long natural-language queries should not be dominated by unrelated
+                // "query list" notes with zero filename signal.
+                m2Boost -= 22.0;
+                if (querySignalTokens.size() >= 4 && isNoteLikeTextExtension(ext)) {
+                    m2Boost -= 8.0;
+                }
+            }
+        }
+
+        if (queryHints.downloadsHint && sr.path.startsWith(downloadsPath)) {
+            m2Boost += 18.0;
+        }
+        if (queryHints.documentsHint && sr.path.startsWith(documentsPath)) {
+            m2Boost += 18.0;
+        }
+        if (queryHints.desktopHint && sr.path.startsWith(desktopPath)) {
+            m2Boost += 18.0;
+        }
+
+        if (!queryHints.extensionHint.isEmpty()) {
+            if (queryHints.extensionHint == QLatin1String("__image__")) {
+                if (ext == QLatin1String("png") || ext == QLatin1String("jpg")
+                    || ext == QLatin1String("jpeg") || ext == QLatin1String("webp")
+                    || ext == QLatin1String("bmp") || ext == QLatin1String("tiff")) {
+                    m2Boost += 10.0;
+                }
+            } else if (ext == queryHints.extensionHint) {
+                m2Boost += 10.0;
+            }
+        }
+
+        if (!sr.modificationDate.isEmpty()
+            && (queryHints.monthHint > 0 || queryHints.yearHint > 0)) {
+            const QDateTime modified = QDateTime::fromString(sr.modificationDate, Qt::ISODate);
+            if (modified.isValid()) {
+                if (queryHints.monthHint > 0 && modified.date().month() == queryHints.monthHint) {
+                    m2Boost += 6.0;
+                }
+                if (queryHints.yearHint > 0 && modified.date().year() == queryHints.yearHint) {
+                    m2Boost += 4.0;
+                }
+            }
+        }
+
+        sr.score = std::max(0.0, sr.score + m2Boost);
     }
 
     // Re-sort after M2 boosts
@@ -534,6 +885,31 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     result[QStringLiteral("results")] = resultsArray;
     result[QStringLiteral("queryTime")] = static_cast<int>(timer.elapsed());
     result[QStringLiteral("totalMatches")] = totalMatches;
+    if (debugRequested) {
+        QJsonObject debugInfo;
+        switch (queryMode) {
+        case SearchQueryMode::Strict:
+            debugInfo[QStringLiteral("queryMode")] = QStringLiteral("strict");
+            break;
+        case SearchQueryMode::Relaxed:
+            debugInfo[QStringLiteral("queryMode")] = QStringLiteral("relaxed");
+            break;
+        case SearchQueryMode::Auto:
+        default:
+            debugInfo[QStringLiteral("queryMode")] = QStringLiteral("auto");
+            break;
+        }
+        debugInfo[QStringLiteral("lexicalStrictHits")] = strictHitsCount;
+        debugInfo[QStringLiteral("lexicalRelaxedHits")] = relaxedHitsCount;
+        debugInfo[QStringLiteral("semanticCandidates")] =
+            static_cast<int>(semanticResults.size());
+        debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
+        debugInfo[QStringLiteral("correctedTokens")] = correctedTokensDebug;
+        if (!rewrittenRelaxedQuery.isEmpty() && rewrittenRelaxedQuery != query) {
+            debugInfo[QStringLiteral("rewrittenQuery")] = rewrittenRelaxedQuery;
+        }
+        result[QStringLiteral("debugInfo")] = debugInfo;
+    }
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -556,6 +932,10 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                                                         health.totalIndexedItems - health.itemsWithoutContent)
                                                 / static_cast<double>(health.totalIndexedItems)
                                           : 100.0;
+    const double semanticCoveragePct = health.totalIndexedItems > 0
+                                           ? 100.0 * static_cast<double>(totalEmbeddedVectors)
+                                                 / static_cast<double>(health.totalIndexedItems)
+                                           : 100.0;
 
     QString lastScanTimeIso;
     if (health.lastIndexTime > 0.0) {
@@ -639,6 +1019,9 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("queueEmbedding")] = 0;
     indexHealth[QStringLiteral("queueDropped")] = 0;
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+    indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
+    indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
+    indexHealth[QStringLiteral("queryRewriteEnabled")] = true;
     indexHealth[QStringLiteral("recentErrors")] = recentErrors;
     indexHealth[QStringLiteral("indexRoots")] = QJsonArray();
     indexHealth[QStringLiteral("vectorRebuildStatus")] =

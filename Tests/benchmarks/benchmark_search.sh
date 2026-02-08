@@ -95,12 +95,21 @@ if not wait_socket(query_sock):
 latencies = []
 result_counts = []
 duplicate_rates = []
+strict_hits = []
+relaxed_hits = []
+semantic_candidates = []
+rewrites = 0
 rid = 1
 
 for _ in range(5):
     for q in queries:
         t0 = time.time()
-        resp = rpc(query_sock, "search", {"query": q, "limit": 20}, rid=rid, timeout=10.0)
+        resp = rpc(query_sock, "search", {
+            "query": q,
+            "limit": 20,
+            "queryMode": "auto",
+            "debug": True
+        }, rid=rid, timeout=10.0)
         rid += 1
         dt = (time.time() - t0) * 1000.0
 
@@ -113,6 +122,12 @@ for _ in range(5):
             unique = len(set(paths))
             dup_rate = 0.0 if not paths else (1.0 - (unique / len(paths)))
             duplicate_rates.append(dup_rate)
+            dbg = resp.get("result", {}).get("debugInfo", {})
+            strict_hits.append(int(dbg.get("lexicalStrictHits", 0)))
+            relaxed_hits.append(int(dbg.get("lexicalRelaxedHits", 0)))
+            semantic_candidates.append(int(dbg.get("semanticCandidates", 0)))
+            if dbg.get("rewrittenQuery"):
+                rewrites += 1
 
 health = {}
 try:
@@ -133,6 +148,10 @@ if latencies:
     print(f"  max latency: {max(latencies):.2f} ms")
     print(f"  avg results: {statistics.mean(result_counts):.2f}")
     print(f"  avg top-10 duplicate rate: {statistics.mean(duplicate_rates) * 100.0:.2f}%")
+    print(f"  avg strict lexical hits: {statistics.mean(strict_hits):.2f}")
+    print(f"  avg relaxed lexical hits: {statistics.mean(relaxed_hits):.2f}")
+    print(f"  avg semantic candidates: {statistics.mean(semantic_candidates):.2f}")
+    print(f"  rewritten query count: {rewrites}")
 
     report = {
         "queryCount": len(latencies),
@@ -141,6 +160,10 @@ if latencies:
         "maxMs": round(max(latencies), 2),
         "avgResults": round(statistics.mean(result_counts), 2),
         "avgTop10DuplicateRatePct": round(statistics.mean(duplicate_rates) * 100.0, 2),
+        "avgStrictLexicalHits": round(statistics.mean(strict_hits), 2) if strict_hits else 0.0,
+        "avgRelaxedLexicalHits": round(statistics.mean(relaxed_hits), 2) if relaxed_hits else 0.0,
+        "avgSemanticCandidates": round(statistics.mean(semantic_candidates), 2) if semantic_candidates else 0.0,
+        "rewrittenQueryCount": rewrites,
         "indexHealth": {
             "totalIndexedItems": health.get("totalIndexedItems"),
             "totalChunks": health.get("totalChunks"),

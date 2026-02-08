@@ -95,7 +95,7 @@ public:
         QString snippet;
     };
 
-    std::vector<FtsHit> searchFts5(const QString& query, int limit = 20);
+    std::vector<FtsHit> searchFts5(const QString& query, int limit = 20, bool relaxed = false);
 
     // ── Failures ────────────────────────────────────────────
 
@@ -162,7 +162,8 @@ public:
 
 private:
     SQLiteStore() = default;
-    static QString sanitizeFtsQuery(const QString& raw);
+    static QString sanitizeFtsQueryStrict(const QString& raw);
+    static QString sanitizeFtsQueryRelaxed(const QString& raw);
     bool init(const QString& dbPath);
     bool execSql(const char* sql);
 

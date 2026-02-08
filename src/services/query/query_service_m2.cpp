@@ -19,6 +19,7 @@
 #include <QStandardPaths>
 #include <QJsonArray>
 
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -27,6 +28,7 @@ namespace bs {
 namespace {
 constexpr const char* kVectorModelVersion = "bge-small-en-v1.5";
 constexpr int kVectorRebuildProgressUpdateStride = 128;
+constexpr int kVectorRebuildChunksPerItem = 3;
 } // namespace
 
 QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject& params)
@@ -361,7 +363,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
     VectorStore workerVectorStore(db);
 
-    QString whereClause = QStringLiteral("c.chunk_index = 0");
+    QString whereClause = QStringLiteral("length(trim(c.chunk_text)) > 0");
     if (!includePaths.isEmpty()) {
         QStringList pathPredicates;
         pathPredicates.reserve(includePaths.size());
@@ -396,9 +398,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
     const QString countSql = includePaths.isEmpty()
                                  ? QStringLiteral(
-                                       "SELECT COUNT(*) FROM content c WHERE c.chunk_index = 0")
+                                       "SELECT COUNT(DISTINCT c.item_id) FROM content c "
+                                       "WHERE length(trim(c.chunk_text)) > 0")
                                  : QStringLiteral(
-                                       "SELECT COUNT(*) "
+                                       "SELECT COUNT(DISTINCT c.item_id) "
                                        "FROM content c "
                                        "JOIN items i ON i.id = c.item_id "
                                        "WHERE %1")
@@ -452,14 +455,14 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
                                  ? QStringLiteral(
                                        "SELECT c.item_id, c.chunk_text "
                                        "FROM content c "
-                                       "WHERE c.chunk_index = 0 "
-                                       "ORDER BY c.item_id")
+                                       "WHERE length(trim(c.chunk_text)) > 0 "
+                                       "ORDER BY c.item_id, c.chunk_index")
                                  : QStringLiteral(
                                        "SELECT c.item_id, c.chunk_text "
                                        "FROM content c "
                                        "JOIN items i ON i.id = c.item_id "
                                        "WHERE %1 "
-                                       "ORDER BY c.item_id")
+                                       "ORDER BY c.item_id, c.chunk_index")
                                        .arg(whereClause);
     if (sqlite3_prepare_v2(db, fetchSql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK) {
         rollbackIfNeeded();
@@ -475,6 +478,81 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     int embeddedCount = 0;
     int skippedCount = 0;
     int failedCount = 0;
+    int64_t currentItemId = -1;
+    QStringList currentChunks;
+
+    auto processCurrentItem = [&]() {
+        if (currentItemId <= 0) {
+            return;
+        }
+
+        ++processed;
+
+        std::vector<QString> texts;
+        texts.reserve(static_cast<size_t>(currentChunks.size()));
+        for (const QString& chunk : currentChunks) {
+            const QString trimmed = chunk.trimmed();
+            if (!trimmed.isEmpty()) {
+                texts.push_back(trimmed);
+            }
+        }
+        if (texts.empty()) {
+            ++skippedCount;
+            return;
+        }
+
+        std::vector<std::vector<float>> embeddings = workerEmbeddingManager.embedBatch(texts);
+        if (embeddings.size() != texts.size()) {
+            embeddings.clear();
+            embeddings.reserve(texts.size());
+            for (const QString& text : texts) {
+                embeddings.push_back(workerEmbeddingManager.embed(text));
+            }
+        }
+
+        std::vector<float> pooled(static_cast<size_t>(VectorIndex::kDimensions), 0.0f);
+        int usableEmbeddings = 0;
+        for (const auto& embedding : embeddings) {
+            if (embedding.size() != static_cast<size_t>(VectorIndex::kDimensions)) {
+                continue;
+            }
+            for (size_t i = 0; i < embedding.size(); ++i) {
+                pooled[i] += embedding[i];
+            }
+            ++usableEmbeddings;
+        }
+
+        if (usableEmbeddings == 0) {
+            ++failedCount;
+            return;
+        }
+
+        for (float& value : pooled) {
+            value /= static_cast<float>(usableEmbeddings);
+        }
+        double normSquared = 0.0;
+        for (const float value : pooled) {
+            normSquared += static_cast<double>(value) * static_cast<double>(value);
+        }
+        const double norm = std::sqrt(normSquared);
+        if (norm > 0.0) {
+            for (float& value : pooled) {
+                value = static_cast<float>(static_cast<double>(value) / norm);
+            }
+        }
+
+        const uint64_t label = rebuiltIndex->addVector(pooled.data());
+        if (label == std::numeric_limits<uint64_t>::max()) {
+            ++failedCount;
+            return;
+        }
+        if (!workerVectorStore.addMapping(currentItemId, label, kVectorModelVersion)) {
+            rebuiltIndex->deleteVector(label);
+            ++failedCount;
+            return;
+        }
+        ++embeddedCount;
+    };
 
     while (true) {
         if (m_stopRebuildRequested.load()) {
@@ -501,34 +579,26 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         const char* rawText = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         const QString text = rawText ? QString::fromUtf8(rawText) : QString();
 
-        if (text.trimmed().isEmpty()) {
-            ++skippedCount;
-            ++processed;
-        } else {
-            std::vector<float> embedding = workerEmbeddingManager.embed(text);
-            if (embedding.size() != static_cast<size_t>(VectorIndex::kDimensions)) {
-                ++failedCount;
-                ++processed;
-            } else {
-                const uint64_t label = rebuiltIndex->addVector(embedding.data());
-                if (label == std::numeric_limits<uint64_t>::max()) {
-                    ++failedCount;
-                    ++processed;
-                } else if (!workerVectorStore.addMapping(itemId, label, kVectorModelVersion)) {
-                    rebuiltIndex->deleteVector(label);
-                    ++failedCount;
-                    ++processed;
-                } else {
-                    ++embeddedCount;
-                    ++processed;
-                }
+        if (currentItemId == -1) {
+            currentItemId = itemId;
+        }
+        if (itemId != currentItemId) {
+            processCurrentItem();
+            if (processed % kVectorRebuildProgressUpdateStride == 0) {
+                updateVectorRebuildProgress(runId, totalCandidates, processed,
+                                            embeddedCount, skippedCount, failedCount);
             }
+            currentItemId = itemId;
+            currentChunks.clear();
         }
 
-        if (processed % kVectorRebuildProgressUpdateStride == 0) {
-            updateVectorRebuildProgress(runId, totalCandidates, processed,
-                                        embeddedCount, skippedCount, failedCount);
+        if (!text.trimmed().isEmpty()
+            && currentChunks.size() < kVectorRebuildChunksPerItem) {
+            currentChunks.append(text);
         }
+    }
+    if (currentItemId != -1) {
+        processCurrentItem();
     }
 
     sqlite3_finalize(stmt);
