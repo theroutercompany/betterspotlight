@@ -5,6 +5,8 @@
 #include <sqlite3.h>
 #include <QDateTime>
 #include <QFile>
+#include <QRegularExpression>
+#include <QSet>
 #include <QThread>
 
 #include <cstring>
@@ -461,7 +463,7 @@ bool SQLiteStore::deleteChunksForItem(int64_t itemId, const QString& filePath)
 
 // ── FTS5 Search ─────────────────────────────────────────────
 
-QString SQLiteStore::sanitizeFtsQuery(const QString& raw)
+QString SQLiteStore::sanitizeFtsQueryStrict(const QString& raw)
 {
     const QString trimmedRaw = raw.trimmed();
     if (trimmedRaw.isEmpty()) {
@@ -551,16 +553,19 @@ QString SQLiteStore::sanitizeFtsQuery(const QString& raw)
 }
 
 std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
-    const QString& query, int limit)
+    const QString& query, int limit, bool relaxed)
 {
-    const QString sanitized = sanitizeFtsQuery(query);
+    const QString sanitized = relaxed ? sanitizeFtsQueryRelaxed(query)
+                                      : sanitizeFtsQueryStrict(query);
     if (sanitized.isEmpty()) {
         LOG_DEBUG(bsIndex, "FTS5 search skipped after sanitization");
         return {};
     }
     if (sanitized != query) {
-        LOG_DEBUG(bsIndex, "FTS5 query sanitized from '%s' to '%s'",
-                  query.toUtf8().constData(), sanitized.toUtf8().constData());
+        LOG_DEBUG(bsIndex, "FTS5 query (%s) sanitized from '%s' to '%s'",
+                  relaxed ? "relaxed" : "strict",
+                  query.toUtf8().constData(),
+                  sanitized.toUtf8().constData());
     }
 
     const char* sql = R"(
@@ -595,6 +600,69 @@ std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
     }
     sqlite3_finalize(stmt);
     return hits;
+}
+
+QString SQLiteStore::sanitizeFtsQueryRelaxed(const QString& raw)
+{
+    const QString normalized = raw.toLower().trimmed();
+    if (normalized.isEmpty()) {
+        return {};
+    }
+
+    static const QRegularExpression tokenRegex(QStringLiteral(R"([a-z0-9_]+)"));
+    static const QSet<QString> stopwords = {
+        QStringLiteral("a"),
+        QStringLiteral("an"),
+        QStringLiteral("any"),
+        QStringLiteral("and"),
+        QStringLiteral("are"),
+        QStringLiteral("at"),
+        QStringLiteral("for"),
+        QStringLiteral("from"),
+        QStringLiteral("how"),
+        QStringLiteral("in"),
+        QStringLiteral("is"),
+        QStringLiteral("it"),
+        QStringLiteral("my"),
+        QStringLiteral("of"),
+        QStringLiteral("on"),
+        QStringLiteral("or"),
+        QStringLiteral("that"),
+        QStringLiteral("there"),
+        QStringLiteral("the"),
+        QStringLiteral("to"),
+        QStringLiteral("what"),
+        QStringLiteral("when"),
+        QStringLiteral("where"),
+        QStringLiteral("which"),
+        QStringLiteral("who"),
+        QStringLiteral("why"),
+        QStringLiteral("with"),
+    };
+
+    QStringList tokens;
+    QSet<QString> seen;
+    auto matchIt = tokenRegex.globalMatch(normalized);
+    while (matchIt.hasNext()) {
+        const QString token = matchIt.next().captured(0);
+        if (token.size() < 2 || stopwords.contains(token) || seen.contains(token)) {
+            continue;
+        }
+        seen.insert(token);
+        if (token.size() >= 4) {
+            tokens.append(token + QStringLiteral("*"));
+        } else {
+            tokens.append(token);
+        }
+        if (tokens.size() >= 8) {
+            break;
+        }
+    }
+
+    if (tokens.isEmpty()) {
+        return {};
+    }
+    return tokens.join(QStringLiteral(" OR "));
 }
 
 // ── Failures ────────────────────────────────────────────────

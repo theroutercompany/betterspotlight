@@ -105,12 +105,12 @@ void TestSearchMerger::testWeightsApplied()
     config.lexicalWeight = 0.6F;
     config.semanticWeight = 0.4F;
     config.similarityThreshold = 0.7F;
+    config.rrfK = 60;
 
     const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, semantic, config);
     QCOMPARE(static_cast<int>(merged.size()), 1);
 
-    const float expectedSemantic = bs::SearchMerger::normalizeSemanticScore(0.90F, 0.7F);
-    const double expected = 0.6 + (0.4 * static_cast<double>(expectedSemantic));
+    const double expected = (0.6 / 61.0) + (0.4 / 61.0);
     QVERIFY(std::fabs(merged[0].score - expected) < 0.0001);
 }
 

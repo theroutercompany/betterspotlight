@@ -18,6 +18,7 @@ struct MergeConfig {
     float lexicalWeight = 0.6f;
     float semanticWeight = 0.4f;
     float similarityThreshold = 0.7f;
+    int rrfK = 60;
     int maxResults = 20;
 };
 

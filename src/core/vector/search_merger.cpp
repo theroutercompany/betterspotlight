@@ -8,14 +8,18 @@
 
 namespace {
 
-double getLexicalRawScore(const bs::SearchResult& result)
-{
-    return result.score;
-}
-
 void setMergedScore(bs::SearchResult& result, double score)
 {
     result.score = score;
+}
+
+double computeRrfContribution(float weight, int rank, int rrfK)
+{
+    if (rank <= 0) {
+        return 0.0;
+    }
+    const int denom = std::max(1, rrfK) + rank;
+    return static_cast<double>(weight) / static_cast<double>(denom);
 }
 
 } // namespace
@@ -48,18 +52,23 @@ std::vector<SearchResult> SearchMerger::merge(
 {
     std::unordered_map<int64_t, const SearchResult*> lexicalById;
     std::unordered_map<int64_t, float> semanticById;
+    std::unordered_map<int64_t, int> lexicalRankById;
+    std::unordered_map<int64_t, int> semanticRankById;
     lexicalById.reserve(lexicalResults.size());
     semanticById.reserve(semanticResults.size());
+    lexicalRankById.reserve(lexicalResults.size());
+    semanticRankById.reserve(semanticResults.size());
 
-    float maxLexicalScore = 0.0f;
-    for (const SearchResult& result : lexicalResults) {
+    for (size_t i = 0; i < lexicalResults.size(); ++i) {
+        const SearchResult& result = lexicalResults[i];
         lexicalById[result.itemId] = &result;
-        maxLexicalScore = std::max(maxLexicalScore,
-                                   static_cast<float>(getLexicalRawScore(result)));
+        lexicalRankById[result.itemId] = static_cast<int>(i) + 1;
     }
 
-    for (const SemanticResult& result : semanticResults) {
+    for (size_t i = 0; i < semanticResults.size(); ++i) {
+        const SemanticResult& result = semanticResults[i];
         semanticById[result.itemId] = result.cosineSimilarity;
+        semanticRankById[result.itemId] = static_cast<int>(i) + 1;
     }
 
     std::unordered_map<int64_t, MergeCategory> categories;
@@ -83,34 +92,21 @@ std::vector<SearchResult> SearchMerger::merge(
         const auto lexicalIt = lexicalById.find(itemId);
         const auto semanticIt = semanticById.find(itemId);
 
-        const float normalizedLexical =
-            lexicalIt != lexicalById.end()
-                ? normalizeLexicalScore(
-                      static_cast<float>(getLexicalRawScore(*lexicalIt->second)),
-                      maxLexicalScore)
-                : 0.0f;
+        const int lexicalRank =
+            lexicalIt != lexicalById.end() ? lexicalRankById[itemId] : 0;
+        const int semanticRank =
+            semanticIt != semanticById.end() ? semanticRankById[itemId] : 0;
 
-        const float normalizedSemantic =
-            semanticIt != semanticById.end()
-                ? normalizeSemanticScore(semanticIt->second, config.similarityThreshold)
-                : 0.0f;
-
-        float mergedScore = 0.0f;
-        switch (category) {
-        case MergeCategory::Both:
-            mergedScore = (config.lexicalWeight * normalizedLexical)
-                + (config.semanticWeight * normalizedSemantic);
-            break;
-        case MergeCategory::LexicalOnly:
-            mergedScore = config.lexicalWeight * normalizedLexical;
-            break;
-        case MergeCategory::SemanticOnly:
-            mergedScore = config.semanticWeight * normalizedSemantic;
-            break;
-        }
+        const double lexicalContribution =
+            computeRrfContribution(config.lexicalWeight, lexicalRank, config.rrfK);
+        const double semanticContribution =
+            computeRrfContribution(config.semanticWeight, semanticRank, config.rrfK);
+        const double mergedScore = lexicalContribution + semanticContribution;
 
         if (category == MergeCategory::SemanticOnly) {
-            if (mergedScore <= 0.0f) {
+            const float normalizedSemantic = normalizeSemanticScore(
+                semanticIt->second, config.similarityThreshold);
+            if (normalizedSemantic <= 0.0f || mergedScore <= 0.0) {
                 continue;
             }
             SearchResult result;

@@ -195,6 +195,14 @@ ScoreBreakdown Scorer::computeScore(const SearchResult& result,
     }
     breakdown.frequencyBoost = computeFrequencyBoost(result.openCount, lastOpenEpoch);
 
+    // Content-only matches can otherwise be dominated by recency/frequency and
+    // surface broad "chat notes" over directly matching filenames. Dampen these
+    // boosts for content matches while preserving lexical BM25 strength.
+    if (result.matchType == MatchType::Content) {
+        breakdown.recencyBoost *= 0.25;
+        breakdown.frequencyBoost *= 0.5;
+    }
+
     // 4. Context boost (CWD proximity + app context)
     double ctxBoost = 0.0;
     if (context.cwdPath.has_value() && !context.cwdPath->isEmpty()) {
