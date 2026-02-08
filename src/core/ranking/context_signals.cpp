@@ -175,8 +175,7 @@ double ContextSignals::cwdProximityBoost(const QString& filePath, const QString&
         return 0.0;
     }
 
-    // Flat boost: full cwdBoostWeight for files within maxDepth levels of CWD
-    const double boost = static_cast<double>(cwdBoostWeight);
+    const double boost = static_cast<double>(cwdBoostWeight) * (1.0 - static_cast<double>(depth) / static_cast<double>(maxDepth + 1));
 
     LOG_DEBUG(bsRanking, "cwdProximityBoost: file='%s' cwd='%s' depth=%d boost=%.1f",
               qUtf8Printable(filePath), qUtf8Printable(cwdPath), depth, boost);
