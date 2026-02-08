@@ -78,9 +78,8 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
     qCDebug(bsIpc, "Sending request: method=%s id=%llu", qPrintable(method),
             static_cast<unsigned long long>(id));
 
-    // Register pending request
-    PendingRequest pending;
-    m_pending[id] = &pending;
+    auto pending = std::make_shared<PendingRequest>();
+    m_pending[id] = pending;
 
     // Write the message
     m_socket->write(encoded);
@@ -90,7 +89,7 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
     QElapsedTimer timer;
     timer.start();
 
-    while (!pending.completed && timer.elapsed() < timeoutMs) {
+    while (!pending->completed && timer.elapsed() < timeoutMs) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
 
         // Also try reading directly in case signals are not delivered
@@ -101,13 +100,13 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
 
     m_pending.remove(id);
 
-    if (!pending.completed) {
+    if (!pending->completed) {
         qCWarning(bsIpc, "Request timed out: method=%s id=%llu timeout=%dms",
                   qPrintable(method), static_cast<unsigned long long>(id), timeoutMs);
         return std::nullopt;
     }
 
-    return pending.response;
+    return pending->response;
 }
 
 bool SocketClient::sendNotification(const QString& method, const QJsonObject& params)
