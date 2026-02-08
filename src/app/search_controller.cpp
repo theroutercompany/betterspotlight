@@ -238,8 +238,20 @@ void SearchController::executeSearch()
         return;
     }
 
+    SocketClient* indexerClient = m_supervisor->clientFor(QStringLiteral("indexer"));
+    const auto setIndexerActive = [indexerClient](bool active) {
+        if (!indexerClient || !indexerClient->isConnected()) {
+            return;
+        }
+        QJsonObject params;
+        params[QStringLiteral("active")] = active;
+        // Best effort signal: keep timeout short to avoid impacting search UX.
+        indexerClient->sendRequest(QStringLiteral("setUserActive"), params, 250);
+    };
+
     m_isSearching = true;
     emit isSearchingChanged();
+    setIndexerActive(true);
 
     LOG_DEBUG(bsCore, "SearchController: searching for '%s'", qPrintable(trimmedQuery));
 
@@ -251,6 +263,7 @@ void SearchController::executeSearch()
 
     m_isSearching = false;
     emit isSearchingChanged();
+    setIndexerActive(false);
 
     if (!response) {
         LOG_WARN(bsCore, "SearchController: search request failed (timeout or disconnected)");

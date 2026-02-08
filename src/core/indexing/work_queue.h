@@ -15,6 +15,13 @@ struct QueueStats {
     size_t depth = 0;
     size_t activeItems = 0;
     size_t droppedItems = 0;
+    size_t failedItems = 0;
+    size_t preparing = 0;
+    size_t writing = 0;
+    size_t coalesced = 0;
+    size_t staleDropped = 0;
+    size_t prepWorkers = 0;
+    size_t writerBatchDepth = 0;
     bool isPaused = false;
 };
 

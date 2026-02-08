@@ -27,6 +27,7 @@ private:
     QJsonObject handleStartIndexing(uint64_t id, const QJsonObject& params);
     QJsonObject handlePauseIndexing(uint64_t id);
     QJsonObject handleResumeIndexing(uint64_t id);
+    QJsonObject handleSetUserActive(uint64_t id, const QJsonObject& params);
     QJsonObject handleReindexPath(uint64_t id, const QJsonObject& params);
     QJsonObject handleRebuildAll(uint64_t id);
     QJsonObject handleGetQueueStatus(uint64_t id);

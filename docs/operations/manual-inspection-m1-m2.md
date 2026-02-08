@@ -381,6 +381,54 @@ Expected:
 
 - non-empty results for tokens present in indexed text files.
 
+### Step 7.6: Verify staged concurrency (`preparing > 1`) in idle mode
+
+Run a larger fixture/root and poll queue telemetry:
+
+```bash
+for i in $(seq 1 50); do
+  /tmp/bs_ipc.py indexer getQueueStatus | python3 -c '
+import json,sys
+r=json.load(sys.stdin).get("result",{})
+print(f"pending={r.get(\"pending\",0)} processing={r.get(\"processing\",0)} preparing={r.get(\"preparing\",0)} writing={r.get(\"writing\",0)} prepWorkers={r.get(\"prepWorkers\",0)} writerBatchDepth={r.get(\"writerBatchDepth\",0)} staleDropped={r.get(\"staleDropped\",0)}")
+'
+  sleep 0.1
+done
+```
+
+Expected on M4 Pro in idle mode:
+
+- `prepWorkers` reports `2` or `3` (current policy target: up to `3`).
+- `preparing` should exceed `1` during non-trivial indexing bursts.
+- `writing` remains `0` or `1` (single writer by design).
+
+Note: very small corpora may complete too fast to observe `preparing > 1`.
+
+### Step 7.7: Verify latest-wins stale-drop handling
+
+Create a same-path event storm while indexing is active:
+
+```bash
+RACE_FILE="/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop/manual-race.txt"
+for i in $(seq 1 150); do
+  echo "race-$i" > "$RACE_FILE"
+done
+rm -f "$RACE_FILE"
+/tmp/bs_ipc.py indexer reindexPath '{"path":"/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop"}'
+```
+
+Poll status:
+
+```bash
+/tmp/bs_ipc.py indexer getQueueStatus
+```
+
+Expected:
+
+- Final search/DB state reflects newest path state only (deleted in this example).
+- `staleDropped` may increase during storms (non-zero is a healthy sign of generation filtering).
+- No crash/deadlock; queue drains to idle.
+
 ---
 
 ## 8. Incremental Update Checks (M1)
@@ -681,6 +729,55 @@ Cause:
 Fix:
 
 - Use backup/delete/restore DB procedure in Section 7.
+
+### T12. `preparing` never exceeds `1`
+
+Symptoms:
+
+- `prepWorkers` is `1`, or `preparing` stays `0/1` during large indexing runs.
+
+Causes:
+
+- Active-mode cap is engaged (`setUserActive(true)` behavior).
+- Workload is too small/fast to observe parallel prep.
+- Heavy extractor classes (OCR/PDF) are correctly capped to single lane.
+
+Fix:
+
+- Re-run with a larger text-heavy corpus and poll every `50-100ms`.
+- Confirm `prepWorkers` in queue status is `2-3` in idle conditions.
+- If `prepWorkers` remains `1`, verify indexer received `setUserActive(false)` after query bursts.
+
+### T13. Writer bottleneck diagnosis (`preparing` high, throughput low)
+
+Symptoms:
+
+- `preparing` often > 1, but `pending` drains slowly.
+- `writerBatchDepth` frequently grows before commits.
+
+Cause:
+
+- Single SQLite writer is saturated (expected design tradeoff for correctness).
+
+Fix:
+
+- Confirm this is acceptable for current workload/latency budget.
+- Prefer reducing expensive per-item write amplification (for example, avoiding unnecessary chunk rewrites) before changing writer model.
+- Keep writer single-threaded unless you are prepared to redesign SQLite ownership/locking semantics.
+
+### T14. Queue status counters look inconsistent
+
+Symptoms:
+
+- `processing` differs from expectations.
+
+Cause:
+
+- `processing` is a compatibility aggregate: `preparing + writing`.
+
+Fix:
+
+- Treat `preparing`, `writing`, `coalesced`, `staleDropped`, `prepWorkers`, and `writerBatchDepth` as the authoritative staged counters.
 
 ---
 

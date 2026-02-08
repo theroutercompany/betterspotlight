@@ -158,6 +158,13 @@ void ServiceManager::resumeIndexing()
     sendIndexerRequest(QStringLiteral("resumeIndexing"));
 }
 
+void ServiceManager::setIndexingUserActive(bool active)
+{
+    QJsonObject params;
+    params[QStringLiteral("active")] = active;
+    sendIndexerRequest(QStringLiteral("setUserActive"), params);
+}
+
 void ServiceManager::rebuildAll()
 {
     sendIndexerRequest(QStringLiteral("rebuildAll"));

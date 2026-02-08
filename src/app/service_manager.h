@@ -33,6 +33,7 @@ public:
     Q_INVOKABLE void stop();
     Q_INVOKABLE void pauseIndexing();
     Q_INVOKABLE void resumeIndexing();
+    Q_INVOKABLE void setIndexingUserActive(bool active);
     Q_INVOKABLE void rebuildAll();
     Q_INVOKABLE void rebuildVectorIndex();
     Q_INVOKABLE void clearExtractionCache();

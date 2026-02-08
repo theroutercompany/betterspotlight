@@ -7,7 +7,16 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 
+#include <algorithm>
+#include <chrono>
+
 namespace bs {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+} // namespace
 
 // ── Construction / destruction ──────────────────────────────
 
@@ -22,7 +31,10 @@ Pipeline::Pipeline(SQLiteStore& store, ExtractionManager& extractor,
     , m_indexer(std::make_unique<Indexer>(m_store, m_extractor, m_pathRules, m_chunker))
     , m_monitor(std::make_unique<FileMonitorMacOS>())
 {
-    LOG_INFO(bsIndex, "Pipeline created");
+    m_idlePrepWorkers = computeIdlePrepWorkers();
+    m_allowedPrepWorkers.store(m_idlePrepWorkers);
+    LOG_INFO(bsIndex, "Pipeline created (idle prep workers=%d)",
+             static_cast<int>(m_idlePrepWorkers));
 }
 
 Pipeline::~Pipeline()
@@ -30,7 +42,7 @@ Pipeline::~Pipeline()
     stop();
 }
 
-// ── Start / stop ────────────────────────────────────────────
+// ── Lifecycle ───────────────────────────────────────────────
 
 void Pipeline::start(const std::vector<std::string>& roots)
 {
@@ -41,11 +53,15 @@ void Pipeline::start(const std::vector<std::string>& roots)
 
     LOG_INFO(bsIndex, "Pipeline starting with %d root(s)", static_cast<int>(roots.size()));
 
-    m_running.store(true);
-    m_processedCount = 0;
-    m_scanRoots = roots;
+    resetRuntimeState();
 
-    // Start file monitoring first so FS events during scan are captured.
+    m_scanRoots = roots;
+    m_running.store(true);
+    m_stopping.store(false);
+    m_paused.store(false);
+
+    updatePrepConcurrencyPolicy();
+
     bool monitorOk = m_monitor->start(roots,
         [this](const std::vector<WorkItem>& items) {
             onFileSystemEvents(items);
@@ -56,72 +72,210 @@ void Pipeline::start(const std::vector<std::string>& roots)
         emit indexingError(QStringLiteral("Failed to start file monitor"));
     }
 
-    // Start the processing thread FIRST so items are processed as they arrive.
-    m_processThread = std::make_unique<QThread>();
-    QObject::connect(m_processThread.get(), &QThread::started, [this] {
-        processingLoop();
-    });
-    m_processThread->start();
+    m_scanThread = std::thread([this] { scanEntry(); });
+    m_dispatchThread = std::thread([this] { prepDispatcherLoop(); });
 
-    // Start the scan thread — enqueues items progressively while processing
-    // runs concurrently. Runs on a separate thread so the main event loop
-    // stays responsive for IPC heartbeats during the initial directory walk.
-    m_workerThread = std::make_unique<QThread>();
-    QObject::connect(m_workerThread.get(), &QThread::started, [this] {
-        scanEntry();
-    });
-    m_workerThread->start();
+    m_prepThreads.clear();
+    m_prepThreads.reserve(m_idlePrepWorkers);
+    for (size_t i = 0; i < m_idlePrepWorkers; ++i) {
+        m_prepThreads.emplace_back([this, i] { prepWorkerLoop(i); });
+    }
 
-    LOG_INFO(bsIndex, "Pipeline started (scan and processing on separate threads)");
+    m_writerThread = std::thread([this] { writerLoop(); });
+
+    LOG_INFO(bsIndex, "Pipeline started (dispatcher + %d prep workers + writer)",
+             static_cast<int>(m_idlePrepWorkers));
 }
 
 void Pipeline::stop()
 {
-    if (!m_running.load()) {
+    if (!m_running.load() && !m_stopping.load()) {
         return;
     }
 
     LOG_INFO(bsIndex, "Pipeline stopping...");
 
+    m_stopping.store(true);
     m_running.store(false);
 
-    // Stop the file monitor first (no new events)
     if (m_monitor) {
         m_monitor->stop();
     }
 
-    // Signal the work queue to unblock the processing loop's dequeue() wait
     m_workQueue.shutdown();
+    wakeAllStages();
 
-    // Wait for the processing thread to finish (unblocked by shutdown above)
-    if (m_processThread && m_processThread->isRunning()) {
-        m_processThread->quit();
-        m_processThread->wait();
+    if (m_scanThread.joinable()) {
+        m_scanThread.join();
     }
-    m_processThread.reset();
-
-    // Wait for the scan thread to finish
-    if (m_workerThread && m_workerThread->isRunning()) {
-        m_workerThread->quit();
-        m_workerThread->wait();
+    if (m_dispatchThread.joinable()) {
+        m_dispatchThread.join();
     }
-    m_workerThread.reset();
 
-    LOG_INFO(bsIndex, "Pipeline stopped (processed %d items)", m_processedCount);
+    for (auto& worker : m_prepThreads) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    m_prepThreads.clear();
+
+    if (m_writerThread.joinable()) {
+        m_writerThread.join();
+    }
+
+    LOG_INFO(bsIndex, "Pipeline stopped (processed %d items)",
+             m_processedCount.load());
 }
 
 // ── Pause / resume ──────────────────────────────────────────
 
 void Pipeline::pause()
 {
+    m_paused.store(true);
     m_workQueue.pause();
+    wakeAllStages();
     LOG_INFO(bsIndex, "Pipeline paused");
 }
 
 void Pipeline::resume()
 {
+    m_paused.store(false);
     m_workQueue.resume();
+    wakeAllStages();
     LOG_INFO(bsIndex, "Pipeline resumed");
+}
+
+// ── Concurrency policy ──────────────────────────────────────
+
+void Pipeline::setUserActive(bool active)
+{
+    const bool previous = m_userActive.exchange(active);
+    if (previous == active) {
+        return;
+    }
+
+    updatePrepConcurrencyPolicy();
+    LOG_INFO(bsIndex, "Pipeline user activity changed: active=%d", active ? 1 : 0);
+}
+
+void Pipeline::updatePrepConcurrencyPolicy()
+{
+    const size_t allowed = m_userActive.load() ? 1 : m_idlePrepWorkers;
+    const size_t clamped = std::max<size_t>(1, std::min(allowed, m_idlePrepWorkers));
+
+    m_allowedPrepWorkers.store(clamped);
+    m_extractor.setMaxConcurrent(static_cast<int>(clamped));
+
+    wakeAllStages();
+}
+
+size_t Pipeline::computeIdlePrepWorkers()
+{
+    const unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+        return 2;
+    }
+
+    const size_t quarter = static_cast<size_t>(hw / 4);
+    return std::clamp<size_t>(quarter, 2, 3);
+}
+
+// ── Runtime helpers ─────────────────────────────────────────
+
+void Pipeline::resetRuntimeState()
+{
+    m_processedCount.store(0);
+    m_preparingCount.store(0);
+    m_writingCount.store(0);
+    m_failedCount.store(0);
+    m_committedCount.store(0);
+    m_coalescedCount.store(0);
+    m_staleDroppedCount.store(0);
+    m_writerBatchDepth.store(0);
+
+    {
+        std::lock_guard<std::mutex> lock(m_prepMutex);
+        m_prepQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_preparedMutex);
+        m_preparedQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_coordMutex);
+        m_pathCoordinator.clear();
+    }
+}
+
+void Pipeline::wakeAllStages()
+{
+    m_prepCv.notify_all();
+    m_preparedCv.notify_all();
+}
+
+size_t Pipeline::pendingMergedCount() const
+{
+    std::lock_guard<std::mutex> lock(m_coordMutex);
+    size_t count = 0;
+    for (const auto& [_, state] : m_pathCoordinator) {
+        if (state.pendingMergedType.has_value()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t Pipeline::totalPendingDepth() const
+{
+    size_t ingress = m_workQueue.size();
+
+    size_t prep = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_prepMutex);
+        prep = m_prepQueue.size();
+    }
+
+    size_t prepared = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_preparedMutex);
+        prepared = m_preparedQueue.size();
+    }
+
+    return ingress + prep + prepared + pendingMergedCount();
+}
+
+void Pipeline::waitForPipelineDrain()
+{
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const bool drained = (totalPendingDepth() == 0)
+            && (m_preparingCount.load() == 0)
+            && (m_writingCount.load() == 0);
+        if (drained) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
+    LOG_WARN(bsIndex, "waitForPipelineDrain timed out; continuing rebuild with residual activity");
+}
+
+WorkItem::Type Pipeline::mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs)
+{
+    auto rank = [](WorkItem::Type t) -> int {
+        switch (t) {
+        case WorkItem::Type::Delete:
+            return 0;
+        case WorkItem::Type::ModifiedContent:
+            return 1;
+        case WorkItem::Type::NewFile:
+            return 2;
+        case WorkItem::Type::RescanDirectory:
+            return 3;
+        }
+        return 3;
+    };
+
+    return (rank(lhs) <= rank(rhs)) ? lhs : rhs;
 }
 
 // ── Re-index / rebuild ──────────────────────────────────────
@@ -138,55 +292,88 @@ void Pipeline::reindexPath(const QString& path)
 
 void Pipeline::rebuildAll(const std::vector<std::string>& roots)
 {
-    LOG_INFO(bsIndex, "Rebuild all requested — stopping current processing");
+    std::lock_guard<std::mutex> rebuildLock(m_rebuildMutex);
 
-    // Pause while we clear the store
-    m_workQueue.pause();
+    if (!m_running.load()) {
+        LOG_WARN(bsIndex, "rebuildAll called while pipeline is not running");
+        return;
+    }
+
+    LOG_INFO(bsIndex, "Rebuild all requested");
+
+    pause();
+    waitForPipelineDrain();
 
     if (!m_store.deleteAll()) {
         LOG_ERROR(bsIndex, "rebuildAll: failed to clear index; aborting rebuild");
-        m_workQueue.resume();
+        resume();
         emit indexingError(QStringLiteral("Failed to clear index for rebuild"));
         return;
     }
 
-    m_processedCount = 0;
+    m_processedCount.store(0);
+    {
+        std::lock_guard<std::mutex> lock(m_coordMutex);
+        m_pathCoordinator.clear();
+    }
 
-    // Re-scan all roots
     FileScanner scanner(&m_pathRules);
+    size_t enqueued = 0;
     for (const auto& root : roots) {
         auto files = scanner.scanDirectory(root);
         for (auto& meta : files) {
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
-            m_workQueue.enqueue(std::move(item));
+            if (m_workQueue.enqueue(std::move(item))) {
+                ++enqueued;
+            }
         }
     }
 
-    m_workQueue.resume();
-    LOG_INFO(bsIndex, "Rebuild all: queued %d items", static_cast<int>(m_workQueue.size()));
+    resume();
+
+    LOG_INFO(bsIndex, "Rebuild all: queued %d items", static_cast<int>(enqueued));
 }
 
 QueueStats Pipeline::queueStatus() const
 {
-    return m_workQueue.stats();
+    QueueStats stats = m_workQueue.stats();
+
+    stats.depth = totalPendingDepth();
+    stats.preparing = m_preparingCount.load();
+    stats.writing = m_writingCount.load();
+    stats.coalesced = m_coalescedCount.load();
+    stats.staleDropped = m_staleDroppedCount.load();
+    stats.prepWorkers = m_allowedPrepWorkers.load();
+    stats.writerBatchDepth = m_writerBatchDepth.load();
+    stats.failedItems = stats.droppedItems + m_failedCount.load();
+    stats.activeItems = stats.preparing + stats.writing;
+
+    return stats;
 }
 
-// ── Scan thread entry ────────────────────────────────────────
+// ── Scan thread ─────────────────────────────────────────────
 
 void Pipeline::scanEntry()
 {
     FileScanner scanner(&m_pathRules);
+
     for (const auto& root : m_scanRoots) {
-        if (!m_running.load()) break;
+        if (!m_running.load() || m_stopping.load()) {
+            break;
+        }
 
         LOG_INFO(bsIndex, "Initial scan: %s", root.c_str());
         auto files = scanner.scanDirectory(root);
-        int totalFiles = static_cast<int>(files.size());
-        LOG_INFO(bsIndex, "Initial scan found %d files in %s", totalFiles, root.c_str());
+        LOG_INFO(bsIndex, "Initial scan found %d files in %s",
+                 static_cast<int>(files.size()), root.c_str());
 
         for (auto& meta : files) {
+            if (!m_running.load() || m_stopping.load()) {
+                break;
+            }
+
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
@@ -198,83 +385,293 @@ void Pipeline::scanEntry()
              static_cast<int>(m_workQueue.size()));
 }
 
-// ── Processing loop (runs on process thread) ─────────────────
+// ── Coordinator helpers ─────────────────────────────────────
 
-void Pipeline::processingLoop()
+std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkItem& item)
 {
-    LOG_INFO(bsIndex, "Processing loop started on process thread");
+    std::lock_guard<std::mutex> lock(m_coordMutex);
 
-    int batchCount = 0;
-    bool inTransaction = false;
+    PathCoordinatorState& state = m_pathCoordinator[item.filePath];
+    state.latestGeneration += 1;
 
-    while (m_running.load()) {
+    if (state.inPrep) {
+        if (state.pendingMergedType.has_value()) {
+            state.pendingMergedType = mergeWorkTypes(state.pendingMergedType.value(), item.type);
+        } else {
+            state.pendingMergedType = item.type;
+        }
+
+        m_coalescedCount.fetch_add(1);
+        LOG_DEBUG(bsIndex, "Coordinator coalesced path=%s gen=%lld",
+                  item.filePath.c_str(),
+                  static_cast<long long>(state.latestGeneration));
+        return std::nullopt;
+    }
+
+    state.inPrep = true;
+
+    PrepTask task;
+    task.item = item;
+    task.generation = state.latestGeneration;
+    return task;
+}
+
+std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& prepared)
+{
+    const std::string path = prepared.path.toStdString();
+
+    std::lock_guard<std::mutex> lock(m_coordMutex);
+    auto it = m_pathCoordinator.find(path);
+    if (it == m_pathCoordinator.end()) {
+        return std::nullopt;
+    }
+
+    PathCoordinatorState& state = it->second;
+    if (state.pendingMergedType.has_value()) {
+        PrepTask task;
+        task.item.type = state.pendingMergedType.value();
+        task.item.filePath = path;
+        task.generation = state.latestGeneration;
+
+        state.pendingMergedType.reset();
+        state.inPrep = true;
+        return task;
+    }
+
+    state.inPrep = false;
+    return std::nullopt;
+}
+
+bool Pipeline::isStalePreparedWork(const PreparedWork& prepared) const
+{
+    const std::string path = prepared.path.toStdString();
+
+    std::lock_guard<std::mutex> lock(m_coordMutex);
+    auto it = m_pathCoordinator.find(path);
+    if (it == m_pathCoordinator.end()) {
+        return false;
+    }
+
+    return prepared.generation < it->second.latestGeneration;
+}
+
+// ── Stage loops ─────────────────────────────────────────────
+
+void Pipeline::prepDispatcherLoop()
+{
+    LOG_INFO(bsIndex, "Prep dispatcher loop started");
+
+    while (!m_stopping.load()) {
         auto item = m_workQueue.dequeue();
         if (!item.has_value()) {
-            // Paused or shutting down
-            if (inTransaction) {
-                m_store.commitTransaction();
-                inTransaction = false;
-            }
-            if (!m_running.load()) {
+            if (m_stopping.load() || !m_running.load()) {
                 break;
             }
-            // Paused — loop back and wait for resume/shutdown
             continue;
         }
 
-        // Begin a transaction batch if not already in one
+        auto prepTask = tryDispatchFromIngress(item.value());
+        m_workQueue.markItemComplete();
+
+        if (!prepTask.has_value()) {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_prepMutex);
+            m_prepQueue.push_back(std::move(prepTask.value()));
+        }
+        m_prepCv.notify_one();
+    }
+
+    LOG_INFO(bsIndex, "Prep dispatcher loop exiting");
+}
+
+void Pipeline::prepWorkerLoop(size_t workerIndex)
+{
+    LOG_INFO(bsIndex, "Prep worker %d started", static_cast<int>(workerIndex));
+
+    while (true) {
+        PrepTask task;
+
+        {
+            std::unique_lock<std::mutex> lock(m_prepMutex);
+            m_prepCv.wait(lock, [this, workerIndex] {
+                if (m_stopping.load()) {
+                    return true;
+                }
+                if (m_paused.load()) {
+                    return false;
+                }
+                if (workerIndex >= m_allowedPrepWorkers.load()) {
+                    return false;
+                }
+                return !m_prepQueue.empty();
+            });
+
+            if (m_stopping.load() && m_prepQueue.empty()) {
+                break;
+            }
+            if (m_paused.load() || workerIndex >= m_allowedPrepWorkers.load() || m_prepQueue.empty()) {
+                continue;
+            }
+
+            task = std::move(m_prepQueue.front());
+            m_prepQueue.pop_front();
+        }
+
+        m_preparingCount.fetch_add(1);
+        PreparedWork prepared = m_indexer->prepareWorkItem(task.item, task.generation);
+        m_preparingCount.fetch_sub(1);
+
+        {
+            std::lock_guard<std::mutex> lock(m_preparedMutex);
+            m_preparedQueue.push_back(prepared);
+        }
+        m_preparedCv.notify_one();
+
+        auto nextTask = onPrepCompleted(prepared);
+        if (nextTask.has_value()) {
+            std::lock_guard<std::mutex> lock(m_prepMutex);
+            m_prepQueue.push_back(std::move(nextTask.value()));
+            m_prepCv.notify_one();
+        }
+    }
+
+    LOG_INFO(bsIndex, "Prep worker %d exiting", static_cast<int>(workerIndex));
+}
+
+void Pipeline::writerLoop()
+{
+    LOG_INFO(bsIndex, "Writer loop started");
+
+    bool inTransaction = false;
+    int batchCount = 0;
+    QElapsedTimer batchTimer;
+
+    auto commitBatch = [this, &inTransaction, &batchCount]() {
+        if (!inTransaction) {
+            return;
+        }
+
+        m_store.commitTransaction();
+        inTransaction = false;
+
+        m_committedCount.fetch_add(static_cast<size_t>(batchCount));
+        batchCount = 0;
+        m_writerBatchDepth.store(0);
+
+        const int processed = m_processedCount.load();
+        const int total = processed + static_cast<int>(totalPendingDepth());
+        emit progressUpdated(processed, total);
+    };
+
+    while (true) {
+        PreparedWork prepared;
+
+        {
+            std::unique_lock<std::mutex> lock(m_preparedMutex);
+            m_preparedCv.wait_for(lock, std::chrono::milliseconds(50), [this] {
+                return !m_preparedQueue.empty() || m_stopping.load();
+            });
+
+            if (m_preparedQueue.empty()) {
+                bool prepQueueEmpty = false;
+                {
+                    std::lock_guard<std::mutex> prepLock(m_prepMutex);
+                    prepQueueEmpty = m_prepQueue.empty();
+                }
+
+                if (m_stopping.load() && prepQueueEmpty && m_preparingCount.load() == 0) {
+                    break;
+                }
+
+                // Flush small batches periodically while idle.
+                if (inTransaction && batchCount > 0) {
+                    commitBatch();
+                }
+                continue;
+            }
+
+            prepared = std::move(m_preparedQueue.front());
+            m_preparedQueue.pop_front();
+        }
+
         if (!inTransaction) {
             m_store.beginTransaction();
             inTransaction = true;
             batchCount = 0;
+            batchTimer.start();
         }
 
-        // Process the work item
-        IndexResult result = m_indexer->processWorkItem(item.value());
-        m_workQueue.markItemComplete();
+        m_writingCount.store(1);
 
-        ++m_processedCount;
-        ++batchCount;
+        if (isStalePreparedWork(prepared)) {
+            m_staleDroppedCount.fetch_add(1);
+            LOG_DEBUG(bsIndex, "Writer dropped stale work path=%s gen=%lld",
+                      qUtf8Printable(prepared.path),
+                      static_cast<long long>(prepared.generation));
+        } else {
+            IndexResult result = m_indexer->applyPreparedWork(prepared);
+            m_processedCount.fetch_add(1);
 
-        LOG_DEBUG(bsIndex, "Processed %s: status=%d, chunks=%d, duration=%d ms",
-                  item->filePath.c_str(),
-                  static_cast<int>(result.status),
-                  result.chunksInserted,
-                  result.durationMs);
+            if (result.status == IndexResult::Status::ExtractionFailed) {
+                m_failedCount.fetch_add(1);
+            }
 
-        // Throttle CPU: sleep between items to stay < 50% of one core
-        int sleepMs = m_userActive.load() ? kThrottleActiveMs : kThrottleIdleMs;
-        QThread::msleep(sleepMs);
+            ++batchCount;
+            m_writerBatchDepth.store(static_cast<size_t>(batchCount));
 
-        // Commit the batch at the threshold
-        if (batchCount >= kBatchCommitSize) {
-            m_store.commitTransaction();
-            inTransaction = false;
-            batchCount = 0;
+            LOG_DEBUG(bsIndex,
+                      "Writer applied path=%s gen=%lld status=%d prep=%dms write=%dms",
+                      qUtf8Printable(prepared.path),
+                      static_cast<long long>(prepared.generation),
+                      static_cast<int>(result.status),
+                      prepared.prepDurationMs,
+                      result.durationMs);
+        }
 
-            emit progressUpdated(m_processedCount,
-                                 m_processedCount + static_cast<int>(m_workQueue.size()));
-        } else if (inTransaction && m_workQueue.size() == 0) {
-            // Flush small/idle batches so health/search can observe fresh data
-            // without waiting for the next batch boundary or shutdown.
-            m_store.commitTransaction();
-            inTransaction = false;
-            batchCount = 0;
+        m_writingCount.store(0);
 
-            emit progressUpdated(m_processedCount, m_processedCount);
+        bool prepQueueEmpty = false;
+        {
+            std::lock_guard<std::mutex> prepLock(m_prepMutex);
+            prepQueueEmpty = m_prepQueue.empty();
+        }
+
+        bool preparedQueueEmpty = false;
+        {
+            std::lock_guard<std::mutex> preparedLock(m_preparedMutex);
+            preparedQueueEmpty = m_preparedQueue.empty();
+        }
+
+        const bool queueDrained = prepQueueEmpty
+            && m_preparingCount.load() == 0
+            && m_workQueue.size() == 0
+            && preparedQueueEmpty
+            && pendingMergedCount() == 0;
+
+        const bool commitForSize = batchCount >= kBatchCommitSize;
+        const bool commitForTime = batchTimer.isValid() && batchTimer.elapsed() >= kBatchCommitIntervalMs;
+
+        if (commitForSize || commitForTime || queueDrained) {
+            commitBatch();
         }
     }
 
-    // Commit any remaining items
     if (inTransaction) {
         m_store.commitTransaction();
     }
 
-    // Record completion timestamp for index age calculation
     m_store.setSetting(QStringLiteral("last_full_index_at"),
                        QString::number(QDateTime::currentSecsSinceEpoch()));
 
-    LOG_INFO(bsIndex, "Processing loop exiting (total processed: %d)", m_processedCount);
+    LOG_INFO(bsIndex, "Writer loop exiting (processed=%d committed=%d failed=%d staleDropped=%d)",
+             m_processedCount.load(),
+             static_cast<int>(m_committedCount.load()),
+             static_cast<int>(m_failedCount.load()),
+             static_cast<int>(m_staleDroppedCount.load()));
+
     emit indexingComplete();
 }
 
@@ -284,8 +681,6 @@ void Pipeline::onFileSystemEvents(const std::vector<WorkItem>& items)
 {
     int enqueued = 0;
     for (const auto& item : items) {
-        // Filter FS events through PathRules to avoid queueing work
-        // for excluded paths (e.g., Library/Application Support/AddressBook).
         auto validation = m_pathRules.validate(item.filePath);
         if (validation == ValidationResult::Exclude) {
             continue;

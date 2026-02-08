@@ -31,6 +31,7 @@ QJsonObject IndexerService::handleRequest(const QJsonObject& request)
     if (method == QLatin1String("startIndexing"))  return handleStartIndexing(id, params);
     if (method == QLatin1String("pauseIndexing"))   return handlePauseIndexing(id);
     if (method == QLatin1String("resumeIndexing"))  return handleResumeIndexing(id);
+    if (method == QLatin1String("setUserActive"))   return handleSetUserActive(id, params);
     if (method == QLatin1String("reindexPath"))     return handleReindexPath(id, params);
     if (method == QLatin1String("rebuildAll"))       return handleRebuildAll(id);
     if (method == QLatin1String("getQueueStatus"))  return handleGetQueueStatus(id);
@@ -161,6 +162,28 @@ QJsonObject IndexerService::handleResumeIndexing(uint64_t id)
     return IpcMessage::makeResponse(id, result);
 }
 
+QJsonObject IndexerService::handleSetUserActive(uint64_t id, const QJsonObject& params)
+{
+    if (!m_isIndexing || !m_pipeline) {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("Indexing is not running"));
+    }
+
+    if (!params.contains(QStringLiteral("active"))) {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("Missing 'active' parameter"));
+    }
+
+    const bool active = params.value(QStringLiteral("active")).toBool(false);
+    m_pipeline->setUserActive(active);
+
+    QJsonObject result;
+    result[QStringLiteral("active")] = active;
+    result[QStringLiteral("prepWorkers")] =
+        static_cast<qint64>(m_pipeline->queueStatus().prepWorkers);
+    return IpcMessage::makeResponse(id, result);
+}
+
 QJsonObject IndexerService::handleReindexPath(uint64_t id, const QJsonObject& params)
 {
     QString path = params.value(QStringLiteral("path")).toString();
@@ -191,7 +214,6 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
                                      QStringLiteral("Indexing is not running; call startIndexing first"));
     }
 
-    m_pipeline->stop();
     m_pipeline->rebuildAll(m_currentRoots);
 
     LOG_INFO(bsIpc, "Rebuild all initiated");
@@ -236,8 +258,14 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     QJsonObject result;
     result[QStringLiteral("pending")] = static_cast<qint64>(stats.depth);
     result[QStringLiteral("processing")] = static_cast<qint64>(stats.activeItems);
-    result[QStringLiteral("failed")] = static_cast<qint64>(stats.droppedItems);
+    result[QStringLiteral("failed")] = static_cast<qint64>(stats.failedItems);
     result[QStringLiteral("paused")] = stats.isPaused;
+    result[QStringLiteral("preparing")] = static_cast<qint64>(stats.preparing);
+    result[QStringLiteral("writing")] = static_cast<qint64>(stats.writing);
+    result[QStringLiteral("coalesced")] = static_cast<qint64>(stats.coalesced);
+    result[QStringLiteral("staleDropped")] = static_cast<qint64>(stats.staleDropped);
+    result[QStringLiteral("prepWorkers")] = static_cast<qint64>(stats.prepWorkers);
+    result[QStringLiteral("writerBatchDepth")] = static_cast<qint64>(stats.writerBatchDepth);
     result[QStringLiteral("roots")] = roots;
     result[QStringLiteral("lastProgressReport")] = lastProgress;
     return IpcMessage::makeResponse(id, result);
