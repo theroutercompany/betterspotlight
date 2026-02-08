@@ -26,6 +26,8 @@ class SettingsController : public QObject {
     Q_PROPERTY(bool enableInteractionTracking READ enableInteractionTracking WRITE setEnableInteractionTracking NOTIFY enableInteractionTrackingChanged)
     Q_PROPERTY(int feedbackRetentionDays READ feedbackRetentionDays WRITE setFeedbackRetentionDays NOTIFY feedbackRetentionDaysChanged)
     Q_PROPERTY(QStringList sensitivePaths READ sensitivePaths WRITE setSensitivePaths NOTIFY sensitivePathsChanged)
+    Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY themeChanged)
+    Q_PROPERTY(QString language READ language WRITE setLanguage NOTIFY languageChanged)
 
 public:
     explicit SettingsController(QObject* parent = nullptr);
@@ -46,6 +48,8 @@ public:
     bool enableInteractionTracking() const;
     int feedbackRetentionDays() const;
     QStringList sensitivePaths() const;
+    QString theme() const;
+    QString language() const;
 
     // Setters
     void setHotkey(const QString& hotkey);
@@ -63,11 +67,17 @@ public:
     void setEnableInteractionTracking(bool enabled);
     void setFeedbackRetentionDays(int days);
     void setSensitivePaths(const QStringList& paths);
+    void setTheme(const QString& theme);
+    void setLanguage(const QString& language);
 
     Q_INVOKABLE void clearFeedbackData();
     Q_INVOKABLE void exportData();
     Q_INVOKABLE void pauseIndexing();
     Q_INVOKABLE void resumeIndexing();
+    Q_INVOKABLE void rebuildIndex();
+    Q_INVOKABLE void rebuildVectorIndex();
+    Q_INVOKABLE void clearExtractionCache();
+    Q_INVOKABLE void reindexFolder(const QString& folderPath);
 
 signals:
     void hotkeyChanged();
@@ -85,10 +95,16 @@ signals:
     void enableInteractionTrackingChanged();
     void feedbackRetentionDaysChanged();
     void sensitivePathsChanged();
+    void themeChanged();
+    void languageChanged();
     void settingsChanged(const QString& key);
     void feedbackDataCleared();
     void indexingPaused();
     void indexingResumed();
+    void rebuildIndexRequested();
+    void rebuildVectorIndexRequested();
+    void clearExtractionCacheRequested();
+    void reindexFolderRequested(const QString& folderPath);
 
 private:
     void loadSettings();
