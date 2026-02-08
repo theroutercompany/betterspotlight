@@ -118,7 +118,7 @@ ExtractionResult OcrExtractor::extract(const QString& filePath)
     const QByteArray pathUtf8 = filePath.toUtf8();
     Pix* image = pixRead(pathUtf8.constData());
     if (!image) {
-        result.status = ExtractionResult::Status::CorruptedFile;
+        result.status = ExtractionResult::Status::UnsupportedFormat;
         result.errorMessage = QStringLiteral("Leptonica failed to read image");
         result.durationMs = static_cast<int>(timer.elapsed());
         LOG_WARN(bsExtraction, "Leptonica pixRead failed: %s", qUtf8Printable(filePath));

@@ -244,6 +244,45 @@ size_t Pipeline::totalPendingDepth() const
     return ingress + prep + prepared + pendingMergedCount();
 }
 
+bool Pipeline::waitForScanBackpressureWindow() const
+{
+    while (m_running.load() && !m_stopping.load()) {
+        if (totalPendingDepth() <= kScanHighWatermark) {
+            return true;
+        }
+
+        while (m_running.load() && !m_stopping.load()
+               && totalPendingDepth() > kScanResumeWatermark) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kEnqueueRetrySleepMs));
+        }
+    }
+
+    return false;
+}
+
+bool Pipeline::enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts)
+{
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        if (!m_running.load() || m_stopping.load()) {
+            return false;
+        }
+
+        if (!waitForScanBackpressureWindow()) {
+            return false;
+        }
+
+        if (m_workQueue.enqueue(item)) {
+            return true;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(kEnqueueRetrySleepMs));
+    }
+
+    LOG_WARN(bsIndex, "Failed to enqueue primary work after retries: %s",
+             item.filePath.c_str());
+    return false;
+}
+
 void Pipeline::waitForPipelineDrain()
 {
     for (int attempt = 0; attempt < 200; ++attempt) {
@@ -287,7 +326,11 @@ void Pipeline::reindexPath(const QString& path)
     item.filePath = path.toStdString();
 
     LOG_INFO(bsIndex, "Re-index requested: %s", qUtf8Printable(path));
-    m_workQueue.enqueue(std::move(item));
+    if (!enqueuePrimaryWorkItem(item, 200)) {
+        m_failedCount.fetch_add(1);
+        LOG_WARN(bsIndex, "Re-index request dropped after retries: %s",
+                 qUtf8Printable(path));
+    }
 }
 
 void Pipeline::rebuildAll(const std::vector<std::string>& roots)
@@ -325,8 +368,10 @@ void Pipeline::rebuildAll(const std::vector<std::string>& roots)
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
-            if (m_workQueue.enqueue(std::move(item))) {
+            if (enqueuePrimaryWorkItem(item)) {
                 ++enqueued;
+            } else {
+                m_failedCount.fetch_add(1);
             }
         }
     }
@@ -377,7 +422,9 @@ void Pipeline::scanEntry()
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
-            m_workQueue.enqueue(std::move(item));
+            if (!enqueuePrimaryWorkItem(item)) {
+                m_failedCount.fetch_add(1);
+            }
         }
     }
 
@@ -568,6 +615,9 @@ void Pipeline::writerLoop()
 
     while (true) {
         PreparedWork prepared;
+        bool shouldCommitIdleBatch = false;
+        bool shouldBreak = false;
+        bool hasPreparedWork = false;
 
         {
             std::unique_lock<std::mutex> lock(m_preparedMutex);
@@ -583,18 +633,27 @@ void Pipeline::writerLoop()
                 }
 
                 if (m_stopping.load() && prepQueueEmpty && m_preparingCount.load() == 0) {
-                    break;
+                    shouldBreak = true;
+                } else if (inTransaction && batchCount > 0) {
+                    // Commit after dropping m_preparedMutex to avoid self-deadlock
+                    // through totalPendingDepth() lock acquisition.
+                    shouldCommitIdleBatch = true;
                 }
-
-                // Flush small batches periodically while idle.
-                if (inTransaction && batchCount > 0) {
-                    commitBatch();
-                }
-                continue;
+            } else {
+                prepared = std::move(m_preparedQueue.front());
+                m_preparedQueue.pop_front();
+                hasPreparedWork = true;
             }
+        }
 
-            prepared = std::move(m_preparedQueue.front());
-            m_preparedQueue.pop_front();
+        if (shouldBreak) {
+            break;
+        }
+        if (!hasPreparedWork) {
+            if (shouldCommitIdleBatch) {
+                commitBatch();
+            }
+            continue;
         }
 
         if (!inTransaction) {
@@ -685,8 +744,16 @@ void Pipeline::onFileSystemEvents(const std::vector<WorkItem>& items)
         if (validation == ValidationResult::Exclude) {
             continue;
         }
-        m_workQueue.enqueue(item);
-        ++enqueued;
+        if (item.type == WorkItem::Type::NewFile
+            || item.type == WorkItem::Type::ModifiedContent) {
+            if (enqueuePrimaryWorkItem(item, 80)) {
+                ++enqueued;
+            } else {
+                m_failedCount.fetch_add(1);
+            }
+        } else if (m_workQueue.enqueue(item)) {
+            ++enqueued;
+        }
     }
 
     if (enqueued > 0) {

@@ -6,8 +6,8 @@ namespace bs {
 
 // PdfExtractor — extracts text from PDF files using Poppler.
 //
-// When compiled with POPPLER_FOUND, uses Poppler's C++ API to iterate
-// pages and extract text. Without Poppler, returns UnsupportedFormat.
+// When compiled with BS_POPPLER_QT6 or BS_POPPLER_CPP, uses Poppler to
+// iterate pages and extract text. Without Poppler, returns UnsupportedFormat.
 //
 // Limits:
 //   - 1000-page cap per document

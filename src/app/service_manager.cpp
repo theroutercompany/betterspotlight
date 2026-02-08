@@ -172,7 +172,45 @@ void ServiceManager::rebuildAll()
 
 void ServiceManager::rebuildVectorIndex()
 {
-    sendServiceRequest(QStringLiteral("query"), QStringLiteral("rebuildVectorIndex"));
+    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
+    if (!client || !client->isConnected()) {
+        LOG_WARN(bsCore, "ServiceManager: query not connected, can't send 'rebuildVectorIndex'");
+        return;
+    }
+
+    QJsonObject params;
+    const QJsonArray embedRoots = loadEmbeddingRoots();
+    if (!embedRoots.isEmpty()) {
+        params[QStringLiteral("includePaths")] = embedRoots;
+    }
+
+    auto response = client->sendRequest(QStringLiteral("rebuildVectorIndex"), params, 10000);
+    if (!response) {
+        LOG_ERROR(bsCore, "ServiceManager: query request failed: rebuildVectorIndex");
+        return;
+    }
+
+    const QString type = response->value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("error")) {
+        const QString msg = response->value(QStringLiteral("error")).toObject()
+                                .value(QStringLiteral("message")).toString();
+        LOG_ERROR(bsCore, "ServiceManager: query 'rebuildVectorIndex' error: %s",
+                  qPrintable(msg));
+        emit serviceError(QStringLiteral("query"), msg);
+        return;
+    }
+
+    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+    const bool started = result.value(QStringLiteral("started")).toBool();
+    const bool alreadyRunning = result.value(QStringLiteral("alreadyRunning")).toBool();
+    const qint64 runId = result.value(QStringLiteral("runId")).toInteger();
+    if (alreadyRunning) {
+        LOG_INFO(bsCore, "ServiceManager: vector rebuild already running (runId=%lld)",
+                 static_cast<long long>(runId));
+    } else if (started) {
+        LOG_INFO(bsCore, "ServiceManager: vector rebuild started (runId=%lld)",
+                 static_cast<long long>(runId));
+    }
 }
 
 void ServiceManager::clearExtractionCache()
@@ -262,6 +300,43 @@ QJsonArray ServiceManager::loadIndexRoots() const
     if (roots.isEmpty()) {
         roots.append(QDir::homePath());
     }
+    return roots;
+}
+
+QJsonArray ServiceManager::loadEmbeddingRoots() const
+{
+    QJsonArray roots;
+
+    const QString settingsPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/settings.json");
+    QFile settingsFile(settingsPath);
+    if (!settingsFile.open(QIODevice::ReadOnly)) {
+        return roots;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(settingsFile.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        return roots;
+    }
+
+    const QJsonArray indexRoots = doc.object().value(QStringLiteral("indexRoots")).toArray();
+    for (const QJsonValue& value : indexRoots) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = value.toObject();
+        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        if (mode != QLatin1String("index_embed")) {
+            continue;
+        }
+        const QString path = obj.value(QStringLiteral("path")).toString();
+        if (!path.isEmpty()) {
+            roots.append(path);
+        }
+    }
+
     return roots;
 }
 

@@ -59,6 +59,7 @@ private:
                             const QJsonObject& params = {});
     bool sendIndexerRequest(const QString& method, const QJsonObject& params = {});
     QJsonArray loadIndexRoots() const;
+    QJsonArray loadEmbeddingRoots() const;
 
     std::unique_ptr<Supervisor> m_supervisor;
 

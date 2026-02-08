@@ -26,7 +26,9 @@ double Scorer::computeBaseMatchScore(MatchType matchType, double bm25RawScore) c
     case MatchType::PrefixPath:
         return static_cast<double>(m_weights.prefixPathWeight);
     case MatchType::Content:
-        return bm25RawScore * m_weights.contentMatchWeight;
+        // FTS5 bm25 returns lower-is-better values (often negative). Convert
+        // to a positive lexical signal so stronger matches get higher scores.
+        return std::max(0.0, -bm25RawScore) * m_weights.contentMatchWeight;
     case MatchType::Fuzzy:
         return static_cast<double>(m_weights.fuzzyMatchWeight);
     }
@@ -228,7 +230,8 @@ void Scorer::rankResults(std::vector<SearchResult>& results,
 {
     // Compute score for each result
     for (auto& result : results) {
-        const ScoreBreakdown breakdown = computeScore(result, context);
+        const ScoreBreakdown breakdown = computeScore(result, context,
+                                                      result.bm25RawScore);
         result.scoreBreakdown = breakdown;
 
         // Final score: max(0, base + recency + frequency + context + pinned - junk)

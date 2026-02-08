@@ -137,9 +137,9 @@ void TestScoring::testContentHigherThanFuzzy()
     auto content = makeResult(1, "/a/f.txt", "f.txt", bs::MatchType::Content);
     auto fuzzy = makeResult(2, "/a/f.txt", "f.txt", bs::MatchType::Fuzzy);
 
-    // For Content, the base score is bm25 * contentMatchWeight
-    // With bm25=50, that gives 50 > Fuzzy's 30
-    auto s1 = scorer.computeScore(content, ctx, 50.0);
+    // FTS5 bm25 is lower-is-better (often negative); scorer converts it
+    // into a positive lexical strength.
+    auto s1 = scorer.computeScore(content, ctx, -50.0);
     auto s2 = scorer.computeScore(fuzzy, ctx);
 
     QVERIFY(s1.baseMatchScore > s2.baseMatchScore);

@@ -23,12 +23,15 @@ bs_add_test(test-bsignore-parser    Unit/test_bsignore_parser.cpp)
 bs_add_test(test-ipc-messages       Unit/test_ipc_messages.cpp)
 bs_add_test(test-match-classifier   Unit/test_match_classifier.cpp)
 bs_add_test(test-corrupt-files     Unit/test_corrupt_files.cpp)
+bs_add_test(test-query-ranking      Unit/test_query_ranking.cpp)
+bs_add_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
 
 # ── Integration tests ────────────────────────────────────────────
 bs_add_test(test-full-pipeline      Integration/test_full_pipeline.cpp)
 bs_add_test(test-index-persistence  Integration/test_index_persistence.cpp)
 bs_add_test(test-incremental-update Integration/test_incremental_update.cpp)
 bs_add_test(test-crash-isolation    Integration/test_crash_isolation.cpp)
+bs_add_test(test-index-backpressure Integration/test_index_backpressure.cpp)
 
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)

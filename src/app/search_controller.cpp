@@ -153,29 +153,35 @@ void SearchController::clearResults()
 QVariantMap SearchController::getHealthSync()
 {
     QVariantMap emptyResult;
+    const auto cachedOrEmpty = [&]() -> QVariantMap {
+        if (!m_lastHealthSnapshot.isEmpty()) {
+            return m_lastHealthSnapshot;
+        }
+        return emptyResult;
+    };
 
     if (!m_supervisor) {
         LOG_WARN(bsCore, "SearchController: no supervisor set");
-        return emptyResult;
+        return cachedOrEmpty();
     }
 
     SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
     if (!client || !client->isConnected()) {
         LOG_WARN(bsCore, "SearchController: query service not connected");
-        return emptyResult;
+        return cachedOrEmpty();
     }
 
     auto response = client->sendRequest(QStringLiteral("getHealth"), {}, kSearchTimeoutMs);
     if (!response) {
         LOG_WARN(bsCore, "SearchController: getHealth request failed");
-        return emptyResult;
+        return cachedOrEmpty();
     }
 
     // Check for error
     QString type = response->value(QStringLiteral("type")).toString();
     if (type == QLatin1String("error")) {
         LOG_WARN(bsCore, "SearchController: getHealth returned error");
-        return emptyResult;
+        return cachedOrEmpty();
     }
 
     QJsonObject result = response->value(QStringLiteral("result")).toObject();
@@ -194,10 +200,24 @@ QVariantMap SearchController::getHealthSync()
             const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
             const int pending = queueResult.value(QStringLiteral("pending")).toInt();
             const int processing = queueResult.value(QStringLiteral("processing")).toInt();
+            const int dropped = queueResult.value(QStringLiteral("dropped")).toInt();
             const bool paused = queueResult.value(QStringLiteral("paused")).toBool();
 
             indexHealth[QStringLiteral("queuePending")] = pending;
             indexHealth[QStringLiteral("queueInProgress")] = processing;
+            indexHealth[QStringLiteral("queueDropped")] = dropped;
+            indexHealth[QStringLiteral("queuePreparing")] =
+                queueResult.value(QStringLiteral("preparing")).toInt();
+            indexHealth[QStringLiteral("queueWriting")] =
+                queueResult.value(QStringLiteral("writing")).toInt();
+            indexHealth[QStringLiteral("queueCoalesced")] =
+                queueResult.value(QStringLiteral("coalesced")).toInt();
+            indexHealth[QStringLiteral("queueStaleDropped")] =
+                queueResult.value(QStringLiteral("staleDropped")).toInt();
+            indexHealth[QStringLiteral("queuePrepWorkers")] =
+                queueResult.value(QStringLiteral("prepWorkers")).toInt();
+            indexHealth[QStringLiteral("queueWriterBatchDepth")] =
+                queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
 
             const QJsonArray roots = queueResult.value(QStringLiteral("roots")).toArray();
             if (!roots.isEmpty()) {
@@ -217,7 +237,21 @@ QVariantMap SearchController::getHealthSync()
         }
     }
 
-    return indexHealth.toVariantMap();
+    if (!indexHealth.contains(QStringLiteral("contentCoveragePct"))) {
+        const qint64 totalIndexed = indexHealth.value(QStringLiteral("totalIndexedItems")).toInteger();
+        const qint64 withoutContent = indexHealth.value(QStringLiteral("itemsWithoutContent")).toInteger();
+        if (totalIndexed > 0) {
+            const double coverage = 100.0 * static_cast<double>(totalIndexed - withoutContent)
+                                    / static_cast<double>(totalIndexed);
+            indexHealth[QStringLiteral("contentCoveragePct")] = coverage;
+        }
+    }
+
+    const QVariantMap healthMap = indexHealth.toVariantMap();
+    if (!healthMap.isEmpty()) {
+        m_lastHealthSnapshot = healthMap;
+    }
+    return cachedOrEmpty();
 }
 
 void SearchController::executeSearch()

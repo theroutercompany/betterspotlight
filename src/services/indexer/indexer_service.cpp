@@ -242,6 +242,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("pending")] = 0;
         result[QStringLiteral("processing")] = 0;
         result[QStringLiteral("failed")] = 0;
+        result[QStringLiteral("dropped")] = 0;
         result[QStringLiteral("paused")] = false;
         result[QStringLiteral("roots")] = roots;
         result[QStringLiteral("lastProgressReport")] = lastProgress;
@@ -259,6 +260,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     result[QStringLiteral("pending")] = static_cast<qint64>(stats.depth);
     result[QStringLiteral("processing")] = static_cast<qint64>(stats.activeItems);
     result[QStringLiteral("failed")] = static_cast<qint64>(stats.failedItems);
+    result[QStringLiteral("dropped")] = static_cast<qint64>(stats.droppedItems);
     result[QStringLiteral("paused")] = stats.isPaused;
     result[QStringLiteral("preparing")] = static_cast<qint64>(stats.preparing);
     result[QStringLiteral("writing")] = static_cast<qint64>(stats.writing);

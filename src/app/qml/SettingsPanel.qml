@@ -208,11 +208,12 @@ Window {
                                         }
                                     }
 
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label { text: qsTr("5"); font.pixelSize: 11; color: "#999999" }
-                                    Item { Layout.fillWidth: true }
-                                    Label { text: qsTr("50"); font.pixelSize: 11; color: "#999999" }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label { text: qsTr("5"); font.pixelSize: 11; color: "#999999" }
+                                        Item { Layout.fillWidth: true }
+                                        Label { text: qsTr("50"); font.pixelSize: 11; color: "#999999" }
+                                    }
                                 }
                             }
                         }
@@ -279,7 +280,6 @@ Window {
                             }
                         }
                     }
-                }
                 }
 
                 // ==========================================
@@ -760,6 +760,42 @@ Window {
 
                     property var healthData: ({})
                     property bool loaded: false
+                    property bool vectorRebuildRunning: {
+                        if (!healthData) return false
+                        return (healthData["vectorRebuildStatus"] || "idle") === "running"
+                    }
+
+                    function refreshHealth() {
+                        if (!searchController) {
+                            return
+                        }
+
+                        var next = searchController.getHealthSync()
+                        if (next && Object.keys(next).length > 0) {
+                            healthTab.healthData = next
+                            healthTab.loaded = true
+                        } else if (!healthTab.loaded) {
+                            healthTab.healthData = ({})
+                        }
+
+                        if (healthTab.vectorRebuildRunning) {
+                            if (!healthRefreshTimer.running) {
+                                healthRefreshTimer.start()
+                            }
+                        } else {
+                            healthRefreshTimer.stop()
+                        }
+                    }
+
+                    Timer {
+                        id: healthRefreshTimer
+                        interval: 2000
+                        repeat: true
+                        running: false
+                        onTriggered: healthTab.refreshHealth()
+                    }
+
+                    Component.onCompleted: healthTab.refreshHealth()
 
                     ColumnLayout {
                         width: parent.width
@@ -819,12 +855,7 @@ Window {
 
                                 Button {
                                     text: qsTr("Refresh")
-                                    onClicked: {
-                                        if (searchController) {
-                                            healthTab.healthData = searchController.getHealthSync()
-                                            healthTab.loaded = true
-                                        }
-                                    }
+                                    onClicked: healthTab.refreshHealth()
                                 }
                             }
                         }
@@ -842,6 +873,7 @@ Window {
                                         { label: qsTr("Indexed Files"), key: "totalIndexedItems", format: "int" },
                                         { label: qsTr("Content Chunks"), key: "totalChunks", format: "int" },
                                         { label: qsTr("Embedded Vectors"), key: "totalEmbeddedVectors", format: "int" },
+                                        { label: qsTr("Content Coverage"), key: "contentCoveragePct", format: "percent" },
                                         { label: qsTr("Database Size"), key: "ftsIndexSize", format: "bytes" },
                                         { label: qsTr("Vector Index Size"), key: "vectorIndexSize", format: "bytes" },
                                         { label: qsTr("Last Full Scan"), key: "lastScanTime", format: "timestamp" }
@@ -923,6 +955,7 @@ Window {
                                     model: [
                                         { label: qsTr("Pending"), key: "queuePending", format: "int" },
                                         { label: qsTr("In Progress"), key: "queueInProgress", format: "int" },
+                                        { label: qsTr("Dropped"), key: "queueDropped", format: "int" },
                                         { label: qsTr("Embedding Queue"), key: "queueEmbedding", format: "int" }
                                     ]
 
@@ -932,6 +965,59 @@ Window {
                                         Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
                                         Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
                                     }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Vector Rebuild")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Repeater {
+                                    model: [
+                                        { label: qsTr("Status"), key: "vectorRebuildStatus", format: "status" },
+                                        { label: qsTr("Progress"), key: "vectorRebuildProgressPct", format: "percent" },
+                                        { label: qsTr("Run ID"), key: "vectorRebuildRunId", format: "int" },
+                                        { label: qsTr("Processed"), key: "vectorRebuildProcessed", format: "int" },
+                                        { label: qsTr("Candidates"), key: "vectorRebuildTotalCandidates", format: "int" },
+                                        { label: qsTr("Scope Candidates"), key: "vectorRebuildScopeCandidates", format: "int" },
+                                        { label: qsTr("Embedded"), key: "vectorRebuildEmbedded", format: "int" },
+                                        { label: qsTr("Skipped"), key: "vectorRebuildSkipped", format: "int" },
+                                        { label: qsTr("Failed"), key: "vectorRebuildFailed", format: "int" },
+                                        { label: qsTr("Started"), key: "vectorRebuildStartedAt", format: "timestamp" },
+                                        { label: qsTr("Finished"), key: "vectorRebuildFinishedAt", format: "timestamp" }
+                                    ]
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 12; Layout.fillWidth: true
+                                        Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
+                                        Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
+                                    }
+                                }
+
+                                Label {
+                                    visible: !!(healthTab.healthData && healthTab.healthData["vectorRebuildLastError"])
+                                    text: qsTr("Last Error: ") + (healthTab.healthData["vectorRebuildLastError"] || "")
+                                    font.pixelSize: 11
+                                    color: "#C62828"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Label {
+                                    text: qsTr("Scope Roots: ") + ((healthTab.healthData["vectorRebuildScopeRoots"] || []).join(", "))
+                                    visible: !!(healthTab.healthData
+                                                && healthTab.healthData["vectorRebuildScopeRoots"]
+                                                && healthTab.healthData["vectorRebuildScopeRoots"].length > 0)
+                                    font.pixelSize: 11
+                                    color: "#666666"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
@@ -982,7 +1068,10 @@ Window {
                                 Button { text: qsTr("Rebuild All"); onClicked: rebuildAllDialog.open() }
                                 Button {
                                     text: qsTr("Rebuild Vector Index")
-                                    enabled: settingsController ? settingsController.embeddingEnabled : false
+                                    enabled: settingsController
+                                             ? (settingsController.embeddingEnabled
+                                                && !healthTab.vectorRebuildRunning)
+                                             : false
                                     onClicked: rebuildVectorDialog.open()
                                 }
                                 Button { text: qsTr("Clear Cache"); onClicked: clearCacheDialog.open() }
@@ -1017,7 +1106,12 @@ Window {
         title: qsTr("Rebuild Vector Index")
         text: qsTr("Are you sure you want to rebuild the vector index? All embeddings will be regenerated.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { if (settingsController) settingsController.rebuildVectorIndex() }
+        onAccepted: {
+            if (settingsController) {
+                settingsController.rebuildVectorIndex()
+                healthTab.refreshHealth()
+            }
+        }
     }
 
     MessageDialog {
@@ -1053,8 +1147,16 @@ Window {
         switch (format) {
         case "bool":
             return val ? qsTr("Healthy") : qsTr("Unhealthy")
+        case "status":
+            if (!val || val === "idle") return qsTr("Idle")
+            if (val === "running") return qsTr("Running")
+            if (val === "succeeded") return qsTr("Succeeded")
+            if (val === "failed") return qsTr("Failed")
+            return String(val)
         case "int":
             return Number(val).toLocaleString()
+        case "percent":
+            return Number(val).toFixed(1) + "%"
         case "bytes":
             var bytes = Number(val)
             if (bytes < 1024) return bytes + " B"
