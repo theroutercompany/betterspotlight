@@ -3,6 +3,8 @@ add_library(betterspotlight-core-shared STATIC
     chunk.cpp
     search_result.cpp
     logging.cpp
+    fda_check.cpp
+    settings_manager.cpp
 )
 
 target_include_directories(betterspotlight-core-shared PUBLIC

@@ -4,6 +4,7 @@
 #include "core/fs/file_scanner.h"
 #include "core/shared/logging.h"
 
+#include <QDateTime>
 #include <QElapsedTimer>
 
 namespace bs {
@@ -259,6 +260,10 @@ void Pipeline::processingLoop()
     if (inTransaction) {
         m_store.commitTransaction();
     }
+
+    // Record completion timestamp for index age calculation
+    m_store.setSetting(QStringLiteral("last_full_index_at"),
+                       QString::number(QDateTime::currentSecsSinceEpoch()));
 
     LOG_INFO(bsIndex, "Processing loop exiting (total processed: %d)", m_processedCount);
     emit indexingComplete();

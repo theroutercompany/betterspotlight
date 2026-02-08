@@ -2,6 +2,7 @@ add_library(betterspotlight-core-extraction STATIC
     text_extractor.cpp
     pdf_extractor.cpp
     ocr_extractor.cpp
+    text_cleaner.cpp
     extraction_manager.cpp
 )
 

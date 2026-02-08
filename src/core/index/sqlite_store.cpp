@@ -444,9 +444,108 @@ bool SQLiteStore::deleteChunksForItem(int64_t itemId, const QString& filePath)
 
 // ── FTS5 Search ─────────────────────────────────────────────
 
+QString SQLiteStore::sanitizeFtsQuery(const QString& raw)
+{
+    const QString trimmedRaw = raw.trimmed();
+    if (trimmedRaw.isEmpty()) {
+        return {};
+    }
+
+    int quoteCount = 0;
+    for (const QChar ch : trimmedRaw) {
+        if (ch == QLatin1Char('"')) {
+            ++quoteCount;
+        }
+    }
+    const bool stripQuotes = (quoteCount % 2) != 0;
+
+    QString stripped;
+    stripped.reserve(trimmedRaw.size());
+    for (const QChar ch : trimmedRaw) {
+        if (ch == QLatin1Char('*') || ch == QLatin1Char('^') ||
+            ch == QLatin1Char(':') || ch == QLatin1Char('(') ||
+            ch == QLatin1Char(')')) {
+            continue;
+        }
+        if (stripQuotes && ch == QLatin1Char('"')) {
+            continue;
+        }
+        stripped.append(ch);
+    }
+
+    QString normalized;
+    normalized.reserve(stripped.size());
+    bool inQuote = false;
+    int i = 0;
+    while (i < stripped.size()) {
+        const QChar ch = stripped.at(i);
+        if (ch == QLatin1Char('"')) {
+            inQuote = !inQuote;
+            normalized.append(ch);
+            ++i;
+            continue;
+        }
+
+        if (!inQuote && (ch.isLetterOrNumber() || ch == QLatin1Char('_'))) {
+            const int start = i;
+            while (i < stripped.size()) {
+                const QChar wordCh = stripped.at(i);
+                if (!wordCh.isLetterOrNumber() && wordCh != QLatin1Char('_')) {
+                    break;
+                }
+                ++i;
+            }
+
+            const QString token = stripped.mid(start, i - start);
+            if (token == QStringLiteral("OR")) {
+                normalized.append(QStringLiteral("or"));
+            } else if (token == QStringLiteral("NOT")) {
+                normalized.append(QStringLiteral("not"));
+            } else if (token == QStringLiteral("AND")) {
+                normalized.append(QStringLiteral("and"));
+            } else if (token == QStringLiteral("NEAR")) {
+                normalized.append(QStringLiteral("near"));
+            } else {
+                normalized.append(token);
+            }
+            continue;
+        }
+
+        normalized.append(ch);
+        ++i;
+    }
+
+    QString compact;
+    compact.reserve(normalized.size());
+    bool lastWasSpace = false;
+    for (const QChar ch : normalized) {
+        if (ch.isSpace()) {
+            if (!lastWasSpace) {
+                compact.append(QLatin1Char(' '));
+                lastWasSpace = true;
+            }
+            continue;
+        }
+        compact.append(ch);
+        lastWasSpace = false;
+    }
+
+    return compact.trimmed();
+}
+
 std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
     const QString& query, int limit)
 {
+    const QString sanitized = sanitizeFtsQuery(query);
+    if (sanitized.isEmpty()) {
+        LOG_DEBUG(bsIndex, "FTS5 search skipped after sanitization");
+        return {};
+    }
+    if (sanitized != query) {
+        LOG_DEBUG(bsIndex, "FTS5 query sanitized from '%s' to '%s'",
+                  query.toUtf8().constData(), sanitized.toUtf8().constData());
+    }
+
     const char* sql = R"(
         SELECT file_id, chunk_id, rank,
                snippet(search_index, 2, '<b>', '</b>', '...', 32)
@@ -462,7 +561,7 @@ std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
         return {};
     }
 
-    const QByteArray queryUtf8 = query.toUtf8();
+    const QByteArray queryUtf8 = sanitized.toUtf8();
     sqlite3_bind_text(stmt, 1, queryUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt, 2, limit);
 
@@ -731,11 +830,41 @@ IndexHealth SQLiteStore::getHealth()
         sqlite3_finalize(stmt);
     }
 
-    // Last index time
+    // Items without content: subtract distinct content item count from total items.
+    // This avoids the slow NOT IN subquery (O(n*m)) — two indexed COUNTs instead.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "SELECT (SELECT COUNT(*) FROM items) - (SELECT COUNT(DISTINCT item_id) FROM content)",
+            -1, &stmt, nullptr);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            health.itemsWithoutContent = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // FTS index size: use database file page stats instead of scanning all rows.
+    // This is O(1) vs O(n) for SUM(length(chunk_text)).
+    {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(m_db,
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            -1, &stmt, nullptr);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            health.ftsIndexSize = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Last index time and index age
     {
         auto lastIndex = getSetting(QStringLiteral("last_full_index_at"));
         if (lastIndex) {
             health.lastIndexTime = lastIndex->toDouble();
+            if (health.lastIndexTime > 0.0) {
+                double now = static_cast<double>(QDateTime::currentSecsSinceEpoch());
+                health.indexAge = now - health.lastIndexTime;
+            }
         }
     }
 

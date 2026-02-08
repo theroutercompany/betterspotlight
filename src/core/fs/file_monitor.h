@@ -3,6 +3,7 @@
 #include "core/shared/types.h"
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bs {
@@ -25,6 +26,7 @@ public:
 
     // Callback type: receives a batch of WorkItems for changed paths.
     using ChangeCallback = std::function<void(const std::vector<WorkItem>&)>;
+    using ErrorCallback = std::function<void(const QString& errorDescription)>;
 
     // Start monitoring the given root directories.
     // Returns true on success. The callback will be invoked on a background
@@ -37,11 +39,14 @@ public:
     // Safe to call when not running (no-op).
     virtual void stop() = 0;
 
+    virtual void setErrorCallback(ErrorCallback cb) { m_errorCallback = std::move(cb); }
+
     // Returns true if the monitor is currently watching for events.
     virtual bool isRunning() const = 0;
 
 protected:
     FileMonitor() = default;
+    ErrorCallback m_errorCallback;
 };
 
 } // namespace bs

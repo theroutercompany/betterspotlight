@@ -34,13 +34,16 @@ private:
     void scanRecursive(const QString& dirPath,
                        std::vector<FileMetadata>& results,
                        uint64_t& scannedCount,
-                       uint64_t& excludedCount) const;
+                       uint64_t& excludedCount,
+                       int depth = 0) const;
 
     // Build the extension -> ItemKind lookup table.
     static std::unordered_map<std::string, ItemKind> buildExtensionMap();
 
     // Singleton-like extension map (built once, immutable).
     static const std::unordered_map<std::string, ItemKind>& extensionMap();
+
+    static constexpr int kMaxDepth = 64;
 
     const PathRules* m_rules;
     PathRules m_ownedRules;  // used when no external rules provided

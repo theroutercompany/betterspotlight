@@ -1,4 +1,5 @@
 #include "core/extraction/extraction_manager.h"
+#include "core/extraction/text_cleaner.h"
 #include "core/shared/logging.h"
 
 #include <QElapsedTimer>
@@ -66,6 +67,22 @@ void ExtractionManager::setMaxFileSizeBytes(int64_t sz)
              static_cast<long long>(m_maxFileSize));
 }
 
+void ExtractionManager::requestCancel()
+{
+    m_cancelRequested.store(true);
+    LOG_INFO(bsExtraction, "Extraction cancellation requested");
+}
+
+void ExtractionManager::clearCancel()
+{
+    m_cancelRequested.store(false);
+}
+
+bool ExtractionManager::isCancelRequested() const
+{
+    return m_cancelRequested.load();
+}
+
 // ── Extractor selection ─────────────────────────────────────
 
 FileExtractor* ExtractionManager::selectExtractor(ItemKind kind) const
@@ -131,6 +148,14 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
         }
     }
 
+    // Check for cancellation before acquiring semaphore
+    if (m_cancelRequested.load()) {
+        result.status = ExtractionResult::Status::Cancelled;
+        result.errorMessage = QStringLiteral("Extraction was cancelled");
+        result.durationMs = 0;
+        return result;
+    }
+
     // Acquire semaphore permit with timeout
     if (!m_concurrencySemaphore.tryAcquire(1, m_timeoutMs)) {
         result.status = ExtractionResult::Status::Timeout;
@@ -154,6 +179,10 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
     result.durationMs = static_cast<int>(timer.elapsed());
 
     m_concurrencySemaphore.release();
+
+    if (result.status == ExtractionResult::Status::Success && result.content.has_value()) {
+        result.content = TextCleaner::clean(result.content.value());
+    }
 
     if (result.status == ExtractionResult::Status::Success) {
         LOG_DEBUG(bsExtraction, "Extraction succeeded: %s (%d ms, %lld chars)",

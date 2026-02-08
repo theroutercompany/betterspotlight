@@ -2,7 +2,6 @@
 
 #include "core/shared/search_result.h"
 #include "core/shared/scoring_types.h"
-#include "core/ranking/match_classifier.h"
 #include "core/ranking/context_signals.h"
 
 #include <QString>
@@ -45,6 +44,9 @@ private:
 
     // Known junk directory patterns (node_modules, .build, __pycache__, etc.)
     static const std::vector<QString>& junkPatterns();
+
+    // Dotfiles that should not receive junk penalties.
+    static bool isImportantDotfile(const QString& fileName);
 
     // Compute the base match score from match type and BM25
     double computeBaseMatchScore(MatchType matchType, double bm25RawScore) const;

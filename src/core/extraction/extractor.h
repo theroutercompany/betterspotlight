@@ -16,6 +16,7 @@ struct ExtractionResult {
         SizeExceeded,
         Inaccessible,
         Unknown,
+        Cancelled,
     };
 
     Status status = Status::Unknown;

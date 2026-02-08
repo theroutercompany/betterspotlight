@@ -49,8 +49,15 @@ std::vector<FileMetadata> FileScanner::scanDirectory(
 void FileScanner::scanRecursive(const QString& dirPath,
                                 std::vector<FileMetadata>& results,
                                 uint64_t& scannedCount,
-                                uint64_t& excludedCount) const
+                                uint64_t& excludedCount,
+                                int depth) const
 {
+    if (depth >= kMaxDepth) {
+        LOG_WARN(bsFs, "Max scan depth (%d) reached at: %s", kMaxDepth,
+                 qUtf8Printable(dirPath));
+        return;
+    }
+
     QDir dir(dirPath);
     const QFileInfoList entries = dir.entryInfoList(
         QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
@@ -60,6 +67,13 @@ void FileScanner::scanRecursive(const QString& dirPath,
         std::string filePath = fi.absoluteFilePath().toStdString();
 
         if (fi.isDir()) {
+            // Skip symlinked directories to prevent infinite recursion from
+            // symlink cycles (e.g. a symlink pointing to a parent directory).
+            if (fi.isSymLink()) {
+                ++excludedCount;
+                continue;
+            }
+
             // PRUNE: check path rules BEFORE recursing into the directory.
             // This avoids walking thousands of files in excluded trees
             // (e.g., .git/, .config/gcloud/virtenv/, Library/Containers/).
@@ -73,7 +87,15 @@ void FileScanner::scanRecursive(const QString& dirPath,
                 ++excludedCount;
                 continue;
             }
-            scanRecursive(fi.absoluteFilePath(), results, scannedCount, excludedCount);
+
+            // Progress logging every 10 000 files
+            if ((scannedCount + excludedCount) % 10000 == 0 && (scannedCount + excludedCount) > 0) {
+                LOG_INFO(bsFs, "Scan progress: %" PRIu64 " files, %" PRIu64 " excluded, entering %s",
+                         scannedCount, excludedCount, filePath.c_str());
+            }
+
+            scanRecursive(fi.absoluteFilePath(), results, scannedCount,
+                          excludedCount, depth + 1);
             continue;
         }
 
