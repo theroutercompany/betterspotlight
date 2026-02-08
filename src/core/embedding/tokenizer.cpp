@@ -150,7 +150,8 @@ TokenizerOutput WordPieceTokenizer::tokenize(const QString& text, int padToLengt
     output.inputIds.push_back(kSepTokenId);
 
     const int unpaddedLength = static_cast<int>(output.inputIds.size());
-    const int targetLength = std::max(unpaddedLength, padToLength);
+    const int clampedPadLength = std::min(padToLength, kMaxSequenceLength);
+    const int targetLength = std::max(unpaddedLength, clampedPadLength);
 
     output.attentionMask.assign(static_cast<size_t>(targetLength), 0);
     output.tokenTypeIds.assign(static_cast<size_t>(targetLength), 0);

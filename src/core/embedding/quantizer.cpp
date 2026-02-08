@@ -26,7 +26,10 @@ QuantizedVector Quantizer::quantize(const std::vector<float>& embedding) const
 
     float scale = (maxValue - minValue) / 255.0F;
     if (scale <= std::numeric_limits<float>::epsilon()) {
-        scale = 1.0F;
+        qv.scale = 0.0F;
+        qv.zeroPoint = 0;
+        qv.data.assign(kEmbeddingDimensions, 0);
+        return qv;
     }
 
     const int zeroPointInt = static_cast<int>(std::lround(-minValue / scale));
