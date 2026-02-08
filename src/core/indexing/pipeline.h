@@ -8,11 +8,17 @@
 
 #include <QObject>
 #include <QString>
-#include <QThread>
 
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace bs {
@@ -22,12 +28,10 @@ class ExtractionManager;
 
 // Pipeline — top-level indexing orchestrator.
 //
-// Owns the WorkQueue, Chunker, and Indexer. Wires them to the FileMonitor
-// for live FS event processing and to SQLiteStore + ExtractionManager for
-// content pipeline stages. Runs the processing loop on a dedicated QThread.
-//
-// Transaction batching: commits every kBatchCommitSize items to balance
-// throughput vs. write amplification.
+// Architecture:
+//  1) Ingress/Coordinator (WorkQueue + generation tracking)
+//  2) Prep worker pool (validation, stat, extraction, chunking)
+//  3) Single DB writer (SQLite mutations + batched commits)
 class Pipeline : public QObject {
     Q_OBJECT
 
@@ -45,10 +49,10 @@ public:
     // Start monitoring the given root directories and processing items.
     void start(const std::vector<std::string>& roots);
 
-    // Stop monitoring and processing. Blocks until the worker thread exits.
+    // Stop monitoring and processing. Blocks until all worker threads exit.
     void stop();
 
-    // Pause/resume the work queue (processing loop sleeps while paused).
+    // Pause/resume ingestion and prep scheduling.
     void pause();
     void resume();
 
@@ -59,14 +63,14 @@ public:
     void rebuildAll(const std::vector<std::string>& roots);
 
     // Hint that the user is actively interacting (e.g. typing a query).
-    // When active, the processing loop throttles harder to keep CPU < 50%.
-    void setUserActive(bool active) { m_userActive.store(active); }
+    // Active mode clamps prep concurrency to one worker.
+    void setUserActive(bool active);
 
     // Snapshot of current queue statistics.
     QueueStats queueStatus() const;
 
     // Number of items processed so far.
-    int processedCount() const { return m_processedCount; }
+    int processedCount() const { return m_processedCount.load(); }
 
 signals:
     void progressUpdated(int processedCount, int totalCount);
@@ -74,13 +78,44 @@ signals:
     void indexingError(const QString& error);
 
 private:
+    struct PrepTask {
+        WorkItem item;
+        uint64_t generation = 0;
+    };
+
+    struct PathCoordinatorState {
+        uint64_t latestGeneration = 0;
+        bool inPrep = false;
+        std::optional<WorkItem::Type> pendingMergedType;
+    };
+
     // Scan thread entry point: walks directories and enqueues work items.
     void scanEntry();
-    // Processing thread entry point: dequeues and processes work items.
-    void processingLoop();
+
+    // Stage loops.
+    void prepDispatcherLoop();
+    void prepWorkerLoop(size_t workerIndex);
+    void writerLoop();
 
     // Callback from FileMonitorMacOS — enqueues incoming FS events.
     void onFileSystemEvents(const std::vector<WorkItem>& items);
+
+    // Coordinator helpers.
+    std::optional<PrepTask> tryDispatchFromIngress(const WorkItem& item);
+    std::optional<PrepTask> onPrepCompleted(const PreparedWork& prepared);
+    bool isStalePreparedWork(const PreparedWork& prepared) const;
+
+    // Runtime helpers.
+    void resetRuntimeState();
+    void wakeAllStages();
+    void waitForPipelineDrain();
+    size_t pendingMergedCount() const;
+    size_t totalPendingDepth() const;
+    static WorkItem::Type mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs);
+
+    // Concurrency policy helpers.
+    void updatePrepConcurrencyPolicy();
+    static size_t computeIdlePrepWorkers();
 
     SQLiteStore& m_store;
     ExtractionManager& m_extractor;
@@ -89,16 +124,53 @@ private:
     WorkQueue m_workQueue;
     std::unique_ptr<Indexer> m_indexer;
     std::unique_ptr<FileMonitorMacOS> m_monitor;
-    std::unique_ptr<QThread> m_workerThread;
-    std::unique_ptr<QThread> m_processThread;
+
+    // Threads
+    std::thread m_scanThread;
+    std::thread m_dispatchThread;
+    std::vector<std::thread> m_prepThreads;
+    std::thread m_writerThread;
+
+    // Lifecycle flags
     std::atomic<bool> m_running{false};
+    std::atomic<bool> m_stopping{false};
+    std::atomic<bool> m_paused{false};
+
+    // Stage queues
+    mutable std::mutex m_prepMutex;
+    std::condition_variable m_prepCv;
+    std::deque<PrepTask> m_prepQueue;
+
+    mutable std::mutex m_preparedMutex;
+    std::condition_variable m_preparedCv;
+    std::deque<PreparedWork> m_preparedQueue;
+
+    // Path coordinator state
+    mutable std::mutex m_coordMutex;
+    std::unordered_map<std::string, PathCoordinatorState> m_pathCoordinator;
+
+    // Rebuild coordination
+    mutable std::mutex m_rebuildMutex;
+
+    // Runtime counters
+    std::atomic<int> m_processedCount{0};
+    std::atomic<size_t> m_preparingCount{0};
+    std::atomic<size_t> m_writingCount{0};
+    std::atomic<size_t> m_failedCount{0};
+    std::atomic<size_t> m_committedCount{0};
+    std::atomic<size_t> m_coalescedCount{0};
+    std::atomic<size_t> m_staleDroppedCount{0};
+    std::atomic<size_t> m_writerBatchDepth{0};
+
+    // Concurrency policy
+    std::atomic<bool> m_userActive{false};
+    std::atomic<size_t> m_allowedPrepWorkers{1};
+    size_t m_idlePrepWorkers = 2;
+
     std::vector<std::string> m_scanRoots;
-    int m_processedCount = 0;
 
     static constexpr int kBatchCommitSize = 50;
-    static constexpr int kThrottleIdleMs = 5;    // sleep between items when idle
-    static constexpr int kThrottleActiveMs = 50;  // sleep between items when user is active
-    std::atomic<bool> m_userActive{false};
+    static constexpr int kBatchCommitIntervalMs = 250;
 };
 
 } // namespace bs

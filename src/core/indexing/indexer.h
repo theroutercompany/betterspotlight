@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace bs {
 
@@ -31,6 +32,32 @@ struct IndexResult {
     int durationMs = 0;
 };
 
+struct PreparedFailure {
+    QString stage;
+    QString message;
+};
+
+// PreparedWork is produced by parallel prep workers and later consumed
+// by the single-threaded DB writer stage.
+struct PreparedWork {
+    WorkItem::Type type = WorkItem::Type::NewFile;
+    QString path;
+    uint64_t generation = 0;
+
+    ValidationResult validation = ValidationResult::Include;
+    std::optional<FileMetadata> metadata;
+    QString parentPath;
+    Sensitivity sensitivity = Sensitivity::Normal;
+
+    bool nonExtractable = false;
+    bool hasExtractedContent = false;
+    QString contentHash;
+    std::vector<Chunk> chunks;
+
+    std::optional<PreparedFailure> failure;
+    int prepDurationMs = 0;
+};
+
 // Indexer — coordinates per-file processing through pipeline stages 3-7.
 //
 // For each WorkItem it:
@@ -47,23 +74,32 @@ public:
     Indexer(SQLiteStore& store, ExtractionManager& extractor,
             const PathRules& pathRules, const Chunker& chunker);
 
+    // Prep stage: CPU/IO-heavy work that does not mutate SQLite.
+    PreparedWork prepareWorkItem(const WorkItem& item, uint64_t generation = 0);
+
+    // Writer stage: applies a prepared unit to SQLite (single-threaded owner).
+    IndexResult applyPreparedWork(const PreparedWork& prepared);
+
     // Process one work item through the pipeline. Dispatches to the
-    // appropriate handler based on WorkItem::Type.
+    // staged prepare+apply flow. Kept for compatibility with existing tests.
     IndexResult processWorkItem(const WorkItem& item);
 
 private:
-    IndexResult processNewOrModified(const WorkItem& item);
-    IndexResult processDelete(const WorkItem& item);
-    IndexResult processRescan(const WorkItem& item);
+    PreparedWork prepareNewOrModified(const WorkItem& item, uint64_t generation);
+    PreparedWork prepareDelete(const WorkItem& item, uint64_t generation);
+    PreparedWork prepareRescan(const WorkItem& item, uint64_t generation);
+
+    IndexResult applyNewOrModified(const PreparedWork& prepared);
+    IndexResult applyDelete(const PreparedWork& prepared);
+    IndexResult applyRescan(const PreparedWork& prepared);
 
     // Stage 4: Extract filesystem metadata via stat().
     // Returns nullopt if the file is inaccessible.
     std::optional<FileMetadata> extractMetadata(const std::string& filePath);
 
-    // Stage 5+6+7: Extract content, chunk it, and insert into FTS5.
-    // Enforces the critical invariant: on any failure after extraction,
-    // the error is recorded via recordFailure().
-    IndexResult extractAndIndex(int64_t itemId, const FileMetadata& meta);
+    // Prep-only extraction + chunking stage.
+    void prepareExtractedContent(PreparedWork& prepared, const FileMetadata& meta,
+                                 int initialRetryCount);
 
     SQLiteStore& m_store;
     ExtractionManager& m_extractor;

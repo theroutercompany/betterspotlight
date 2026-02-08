@@ -165,6 +165,22 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
         return result;
     }
 
+    QSemaphore* heavySemaphore = nullptr;
+    if (kind == ItemKind::Pdf) {
+        heavySemaphore = &m_pdfSemaphore;
+    } else if (kind == ItemKind::Image) {
+        heavySemaphore = &m_ocrSemaphore;
+    }
+
+    if (heavySemaphore && !heavySemaphore->tryAcquire(1, m_timeoutMs)) {
+        m_concurrencySemaphore.release();
+        result.status = ExtractionResult::Status::Timeout;
+        result.errorMessage = QStringLiteral("Timed out waiting for extractor kind slot");
+        result.durationMs = m_timeoutMs;
+        LOG_WARN(bsExtraction, "Extractor kind slot timeout for: %s", qUtf8Printable(filePath));
+        return result;
+    }
+
     // Perform the extraction within the semaphore-guarded section
     QElapsedTimer timer;
     timer.start();
@@ -173,11 +189,20 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
               qUtf8Printable(filePath),
               qUtf8Printable(itemKindToString(kind)));
 
-    result = extractor->extract(filePath);
+    if (kind == ItemKind::Image) {
+        // Tesseract's API object is mutable and not safe for concurrent calls.
+        std::lock_guard<std::mutex> lock(m_ocrMutex);
+        result = extractor->extract(filePath);
+    } else {
+        result = extractor->extract(filePath);
+    }
 
     // Override duration to include semaphore wait time
     result.durationMs = static_cast<int>(timer.elapsed());
 
+    if (heavySemaphore) {
+        heavySemaphore->release();
+    }
     m_concurrencySemaphore.release();
 
     if (result.status == ExtractionResult::Status::Success && result.content.has_value()) {

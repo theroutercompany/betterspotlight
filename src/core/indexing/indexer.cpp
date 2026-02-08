@@ -28,29 +28,198 @@ Indexer::Indexer(SQLiteStore& store, ExtractionManager& extractor,
     LOG_INFO(bsIndex, "Indexer initialised");
 }
 
-// ── Public entry point ──────────────────────────────────────
+// ── Public entry points ─────────────────────────────────────
 
-IndexResult Indexer::processWorkItem(const WorkItem& item)
+PreparedWork Indexer::prepareWorkItem(const WorkItem& item, uint64_t generation)
 {
     switch (item.type) {
     case WorkItem::Type::Delete:
-        return processDelete(item);
+        return prepareDelete(item, generation);
     case WorkItem::Type::ModifiedContent:
     case WorkItem::Type::NewFile:
-        return processNewOrModified(item);
+        return prepareNewOrModified(item, generation);
     case WorkItem::Type::RescanDirectory:
-        return processRescan(item);
+        return prepareRescan(item, generation);
     }
 
-    // Unreachable, but satisfies compiler warnings
+    PreparedWork prepared;
+    prepared.type = item.type;
+    prepared.path = QString::fromStdString(item.filePath);
+    prepared.generation = generation;
+    prepared.validation = ValidationResult::Exclude;
+    return prepared;
+}
+
+IndexResult Indexer::applyPreparedWork(const PreparedWork& prepared)
+{
+    switch (prepared.type) {
+    case WorkItem::Type::Delete:
+        return applyDelete(prepared);
+    case WorkItem::Type::ModifiedContent:
+    case WorkItem::Type::NewFile:
+        return applyNewOrModified(prepared);
+    case WorkItem::Type::RescanDirectory:
+        return applyRescan(prepared);
+    }
+
     IndexResult result;
     result.status = IndexResult::Status::Excluded;
     return result;
 }
 
-// ── Delete ──────────────────────────────────────────────────
+IndexResult Indexer::processWorkItem(const WorkItem& item)
+{
+    PreparedWork prepared = prepareWorkItem(item, 0);
+    return applyPreparedWork(prepared);
+}
 
-IndexResult Indexer::processDelete(const WorkItem& item)
+// ── Prep stage ──────────────────────────────────────────────
+
+PreparedWork Indexer::prepareDelete(const WorkItem& item, uint64_t generation)
+{
+    PreparedWork prepared;
+    prepared.type = WorkItem::Type::Delete;
+    prepared.path = QString::fromStdString(item.filePath);
+    prepared.generation = generation;
+    prepared.validation = ValidationResult::Include;
+    return prepared;
+}
+
+PreparedWork Indexer::prepareNewOrModified(const WorkItem& item, uint64_t generation)
+{
+    QElapsedTimer timer;
+    timer.start();
+
+    PreparedWork prepared;
+    prepared.type = item.type;
+    prepared.path = QString::fromStdString(item.filePath);
+    prepared.generation = generation;
+
+    auto validation = m_pathRules.validate(item.filePath);
+    prepared.validation = validation;
+
+    if (validation == ValidationResult::Exclude) {
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    auto meta = extractMetadata(item.filePath);
+    if (!meta.has_value()) {
+        prepared.failure = PreparedFailure{
+            QStringLiteral("metadata"),
+            QStringLiteral("Cannot stat or access file")
+        };
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    prepared.metadata = meta;
+    prepared.sensitivity = m_pathRules.classifySensitivity(item.filePath);
+
+    QFileInfo fi(prepared.path);
+    prepared.parentPath = fi.path();
+
+    if (validation == ValidationResult::MetadataOnly) {
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    if (meta->itemKind == ItemKind::Directory
+        || meta->itemKind == ItemKind::Archive
+        || meta->itemKind == ItemKind::Binary
+        || meta->itemKind == ItemKind::Unknown) {
+        prepared.nonExtractable = true;
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    prepareExtractedContent(prepared, meta.value(), item.retryCount);
+
+    prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+    return prepared;
+}
+
+PreparedWork Indexer::prepareRescan(const WorkItem& item, uint64_t generation)
+{
+    QElapsedTimer timer;
+    timer.start();
+
+    PreparedWork prepared;
+    prepared.type = WorkItem::Type::RescanDirectory;
+    prepared.path = QString::fromStdString(item.filePath);
+    prepared.generation = generation;
+
+    auto validation = m_pathRules.validate(item.filePath);
+    prepared.validation = validation;
+    if (validation == ValidationResult::Exclude) {
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    auto meta = extractMetadata(item.filePath);
+    if (!meta.has_value()) {
+        prepared.failure = PreparedFailure{
+            QStringLiteral("metadata"),
+            QStringLiteral("Cannot stat or access file")
+        };
+        prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+        return prepared;
+    }
+
+    prepared.metadata = meta;
+    prepared.sensitivity = m_pathRules.classifySensitivity(item.filePath);
+
+    QFileInfo fi(prepared.path);
+    prepared.parentPath = fi.path();
+    prepared.prepDurationMs = static_cast<int>(timer.elapsed());
+    return prepared;
+}
+
+void Indexer::prepareExtractedContent(PreparedWork& prepared,
+                                      const FileMetadata& meta,
+                                      int initialRetryCount)
+{
+    static constexpr int kMaxRetries = 2;
+
+    int attempts = initialRetryCount;
+    ExtractionResult extraction;
+
+    do {
+        extraction = m_extractor.extract(prepared.path, meta.itemKind);
+        if (extraction.status == ExtractionResult::Status::Success
+            && extraction.content.has_value()) {
+            break;
+        }
+
+        ++attempts;
+        if (attempts <= kMaxRetries) {
+            LOG_WARN(bsIndex, "Retrying extraction (%d/%d): %s",
+                     attempts, kMaxRetries, meta.filePath.c_str());
+        }
+    } while (attempts <= kMaxRetries);
+
+    if (extraction.status != ExtractionResult::Status::Success
+        || !extraction.content.has_value()) {
+        prepared.failure = PreparedFailure{
+            QStringLiteral("extraction"),
+            extraction.errorMessage.value_or(
+                QStringLiteral("Extraction failed with no details"))
+        };
+        return;
+    }
+
+    const QString& content = extraction.content.value();
+    const QByteArray contentUtf8 = content.toUtf8();
+
+    prepared.contentHash = QString::fromLatin1(
+        QCryptographicHash::hash(contentUtf8, QCryptographicHash::Sha256).toHex());
+    prepared.chunks = m_chunker.chunkContent(prepared.path, content);
+    prepared.hasExtractedContent = true;
+}
+
+// ── Writer stage ────────────────────────────────────────────
+
+IndexResult Indexer::applyDelete(const PreparedWork& prepared)
 {
     QElapsedTimer timer;
     timer.start();
@@ -58,173 +227,178 @@ IndexResult Indexer::processDelete(const WorkItem& item)
     IndexResult result;
     result.status = IndexResult::Status::Deleted;
 
-    const QString path = QString::fromStdString(item.filePath);
-
-    auto existing = m_store.getItemByPath(path);
+    auto existing = m_store.getItemByPath(prepared.path);
     if (existing.has_value()) {
-        // Delete chunks first, then the item
-        m_store.deleteChunksForItem(existing->id, path);
-        m_store.deleteItemByPath(path);
+        m_store.deleteChunksForItem(existing->id, prepared.path);
+        m_store.deleteItemByPath(prepared.path);
         LOG_INFO(bsIndex, "Deleted from index: %s (id=%lld)",
-                 item.filePath.c_str(), static_cast<long long>(existing->id));
+                 qUtf8Printable(prepared.path),
+                 static_cast<long long>(existing->id));
     } else {
         LOG_DEBUG(bsIndex, "Delete requested for non-indexed path: %s",
-                  item.filePath.c_str());
+                  qUtf8Printable(prepared.path));
     }
 
     result.durationMs = static_cast<int>(timer.elapsed());
     return result;
 }
 
-// ── New or modified file ────────────────────────────────────
-
-IndexResult Indexer::processNewOrModified(const WorkItem& item)
+IndexResult Indexer::applyNewOrModified(const PreparedWork& prepared)
 {
     QElapsedTimer timer;
     timer.start();
 
     IndexResult result;
 
-    // Stage 3: Path validation
-    auto validation = m_pathRules.validate(item.filePath);
-
-    if (validation == ValidationResult::Exclude) {
+    if (prepared.validation == ValidationResult::Exclude) {
         result.status = IndexResult::Status::Excluded;
         result.durationMs = static_cast<int>(timer.elapsed());
-        LOG_DEBUG(bsIndex, "Excluded by path rules: %s", item.filePath.c_str());
         return result;
     }
 
-    // Stage 4: Extract filesystem metadata
-    auto meta = extractMetadata(item.filePath);
-    if (!meta.has_value()) {
+    if (!prepared.metadata.has_value()) {
         result.status = IndexResult::Status::ExtractionFailed;
         result.durationMs = static_cast<int>(timer.elapsed());
-        LOG_WARN(bsIndex, "Cannot stat file: %s", item.filePath.c_str());
         return result;
     }
 
-    // Skip check: if the file has not changed (same mtime + size)
-    const QString qPath = QString::fromStdString(item.filePath);
-    auto existing = m_store.getItemByPath(qPath);
-    if (existing.has_value() && item.type == WorkItem::Type::ModifiedContent) {
-        if (static_cast<int64_t>(meta->fileSize) == existing->size
-            && meta->modifiedAt == existing->modifiedAt) {
+    const FileMetadata& meta = prepared.metadata.value();
+
+    auto existing = m_store.getItemByPath(prepared.path);
+    if (existing.has_value() && prepared.type == WorkItem::Type::ModifiedContent) {
+        if (static_cast<int64_t>(meta.fileSize) == existing->size
+            && meta.modifiedAt == existing->modifiedAt) {
             result.status = IndexResult::Status::Skipped;
             result.durationMs = static_cast<int>(timer.elapsed());
-            LOG_DEBUG(bsIndex, "Skipped (unchanged): %s", item.filePath.c_str());
             return result;
         }
     }
 
-    // Determine sensitivity
-    Sensitivity sensitivity = m_pathRules.classifySensitivity(item.filePath);
-    QString sensitivityStr = sensitivityToString(sensitivity);
+    const QString sensitivityStr = sensitivityToString(prepared.sensitivity);
+    const QString existingHash = existing.has_value() ? existing->contentHash : QString();
 
-    // Compute parent path
-    QFileInfo fi(qPath);
-    QString parentPath = fi.path();
-
-    // Upsert the item metadata in the store
     auto itemId = m_store.upsertItem(
-        qPath,
-        QString::fromStdString(meta->fileName),
-        QString::fromStdString(meta->extension),
-        meta->itemKind,
-        static_cast<int64_t>(meta->fileSize),
-        meta->createdAt,
-        meta->modifiedAt,
-        QString(),   // contentHash — set after extraction
+        prepared.path,
+        QString::fromStdString(meta.fileName),
+        QString::fromStdString(meta.extension),
+        meta.itemKind,
+        static_cast<int64_t>(meta.fileSize),
+        meta.createdAt,
+        meta.modifiedAt,
+        existingHash,
         sensitivityStr,
-        parentPath);
+        prepared.parentPath);
 
     if (!itemId.has_value()) {
         result.status = IndexResult::Status::ExtractionFailed;
         result.durationMs = static_cast<int>(timer.elapsed());
-        LOG_ERROR(bsIndex, "Failed to upsert item metadata: %s", item.filePath.c_str());
         return result;
     }
 
-    // MetadataOnly: sensitive files get metadata but no content extraction
-    if (validation == ValidationResult::MetadataOnly) {
+    if (prepared.validation == ValidationResult::MetadataOnly) {
         result.status = IndexResult::Status::MetadataOnly;
         result.durationMs = static_cast<int>(timer.elapsed());
-        LOG_INFO(bsIndex, "MetadataOnly (sensitive): %s", item.filePath.c_str());
         return result;
     }
 
-    // Non-extractable item kinds: metadata is already stored; no content to extract.
-    // This is NOT a failure — Binary/Archive/Unknown/Directory items are findable
-    // by name/path but have no text content for FTS5.
-    if (meta->itemKind == ItemKind::Directory
-        || meta->itemKind == ItemKind::Archive
-        || meta->itemKind == ItemKind::Binary
-        || meta->itemKind == ItemKind::Unknown) {
+    if (prepared.nonExtractable) {
         result.status = IndexResult::Status::Indexed;
         result.durationMs = static_cast<int>(timer.elapsed());
         return result;
     }
 
-    static constexpr int kMaxRetries = 2;
-    int attempts = item.retryCount;
-    do {
-        result = extractAndIndex(itemId.value(), meta.value());
-        if (result.status != IndexResult::Status::ExtractionFailed) break;
-        attempts++;
-        if (attempts <= kMaxRetries) {
-            LOG_WARN(bsIndex, "Retrying extraction (%d/%d): %s",
-                     attempts, kMaxRetries, item.filePath.c_str());
-        }
-    } while (attempts <= kMaxRetries);
-
-    result.durationMs = static_cast<int>(timer.elapsed());
-    return result;
-}
-
-// ── Rescan directory ────────────────────────────────────────
-
-IndexResult Indexer::processRescan(const WorkItem& item)
-{
-    // A RescanDirectory item is treated as a NewFile for the directory path
-    // itself. The actual directory walk is handled by the Pipeline, which
-    // will enqueue individual NewFile items for each discovered file.
-    //
-    // Here we just validate the directory path and update its metadata.
-    QElapsedTimer timer;
-    timer.start();
-
-    IndexResult result;
-
-    auto validation = m_pathRules.validate(item.filePath);
-    if (validation == ValidationResult::Exclude) {
-        result.status = IndexResult::Status::Excluded;
-        result.durationMs = static_cast<int>(timer.elapsed());
-        return result;
-    }
-
-    auto meta = extractMetadata(item.filePath);
-    if (!meta.has_value()) {
+    if (prepared.failure.has_value()) {
+        m_store.recordFailure(itemId.value(),
+                              prepared.failure->stage,
+                              prepared.failure->message);
         result.status = IndexResult::Status::ExtractionFailed;
         result.durationMs = static_cast<int>(timer.elapsed());
         return result;
     }
 
-    const QString qPath = QString::fromStdString(item.filePath);
-    QFileInfo fi(qPath);
-    QString parentPath = fi.path();
-    Sensitivity sensitivity = m_pathRules.classifySensitivity(item.filePath);
+    if (!prepared.hasExtractedContent) {
+        result.status = IndexResult::Status::ExtractionFailed;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
 
-    m_store.upsertItem(
-        qPath,
-        QString::fromStdString(meta->fileName),
-        QString::fromStdString(meta->extension),
-        meta->itemKind,
-        static_cast<int64_t>(meta->fileSize),
-        meta->createdAt,
-        meta->modifiedAt,
-        QString(),
-        sensitivityToString(sensitivity),
-        parentPath);
+    if (!existingHash.isEmpty() && existingHash == prepared.contentHash) {
+        result.status = IndexResult::Status::Skipped;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    if (prepared.chunks.empty()) {
+        m_store.updateContentHash(itemId.value(), prepared.contentHash);
+        m_store.clearFailures(itemId.value());
+        result.status = IndexResult::Status::Indexed;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    const bool insertOk = m_store.insertChunks(itemId.value(),
+                                               QString::fromStdString(meta.fileName),
+                                               prepared.path,
+                                               prepared.chunks);
+    if (!insertOk) {
+        m_store.recordFailure(itemId.value(),
+                              QStringLiteral("fts5_insert"),
+                              QStringLiteral("insertChunks() returned false"));
+        result.status = IndexResult::Status::ExtractionFailed;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    m_store.updateContentHash(itemId.value(), prepared.contentHash);
+    m_store.clearFailures(itemId.value());
+
+    result.status = IndexResult::Status::Indexed;
+    result.chunksInserted = static_cast<int>(prepared.chunks.size());
+    result.durationMs = static_cast<int>(timer.elapsed());
+    return result;
+}
+
+IndexResult Indexer::applyRescan(const PreparedWork& prepared)
+{
+    QElapsedTimer timer;
+    timer.start();
+
+    IndexResult result;
+
+    if (prepared.validation == ValidationResult::Exclude) {
+        result.status = IndexResult::Status::Excluded;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    if (!prepared.metadata.has_value()) {
+        result.status = IndexResult::Status::ExtractionFailed;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    const FileMetadata& meta = prepared.metadata.value();
+    const QString sensitivityStr = sensitivityToString(prepared.sensitivity);
+    const auto existing = m_store.getItemByPath(prepared.path);
+    const QString existingHash = existing.has_value() ? existing->contentHash : QString();
+
+    auto itemId = m_store.upsertItem(
+        prepared.path,
+        QString::fromStdString(meta.fileName),
+        QString::fromStdString(meta.extension),
+        meta.itemKind,
+        static_cast<int64_t>(meta.fileSize),
+        meta.createdAt,
+        meta.modifiedAt,
+        existingHash,
+        sensitivityStr,
+        prepared.parentPath);
+
+    if (!itemId.has_value()) {
+        result.status = IndexResult::Status::ExtractionFailed;
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
 
     result.status = IndexResult::Status::Indexed;
     result.durationMs = static_cast<int>(timer.elapsed());
@@ -267,8 +441,6 @@ std::optional<FileMetadata> Indexer::extractMetadata(const std::string& filePath
     meta.permissions = static_cast<uint16_t>(st.st_mode & 0777);
     meta.isReadable = true;
 
-    // Classify ItemKind from extension and mode
-    // Directories get ItemKind::Directory
     if (S_ISDIR(st.st_mode)) {
         meta.itemKind = ItemKind::Directory;
     } else {
@@ -276,81 +448,6 @@ std::optional<FileMetadata> Indexer::extractMetadata(const std::string& filePath
     }
 
     return meta;
-}
-
-// ── Stages 5+6+7: Extract, chunk, index ─────────────────────
-
-IndexResult Indexer::extractAndIndex(int64_t itemId, const FileMetadata& meta)
-{
-    IndexResult result;
-
-    const QString qPath = QString::fromStdString(meta.filePath);
-
-    // Stage 5: Content extraction
-    ExtractionResult extraction = m_extractor.extract(qPath, meta.itemKind);
-
-    if (extraction.status != ExtractionResult::Status::Success
-        || !extraction.content.has_value()) {
-        // CRITICAL INVARIANT: record the failure, never silently drop
-        QString errorMsg = extraction.errorMessage.value_or(
-            QStringLiteral("Extraction failed with no details"));
-        m_store.recordFailure(itemId, QStringLiteral("extraction"), errorMsg);
-
-        result.status = IndexResult::Status::ExtractionFailed;
-        LOG_WARN(bsIndex, "Extraction failed for %s: %s",
-                 meta.filePath.c_str(), qUtf8Printable(errorMsg));
-        return result;
-    }
-
-    const QString& content = extraction.content.value();
-
-    const QByteArray contentUtf8 = content.toUtf8();
-    const QString newHash = QString::fromLatin1(
-        QCryptographicHash::hash(contentUtf8, QCryptographicHash::Sha256).toHex());
-
-    auto existingItem = m_store.getItemById(itemId);
-    if (existingItem.has_value() && !existingItem->contentHash.isEmpty()
-        && existingItem->contentHash == newHash) {
-        result.status = IndexResult::Status::Skipped;
-        LOG_DEBUG(bsIndex, "Skipped (content hash unchanged): %s", meta.filePath.c_str());
-        return result;
-    }
-
-    std::vector<Chunk> newChunks = m_chunker.chunkContent(qPath, content);
-
-    if (newChunks.empty()) {
-        m_store.updateContentHash(itemId, newHash);
-        result.status = IndexResult::Status::Indexed;
-        LOG_DEBUG(bsIndex, "No chunks produced for %s (empty content)",
-                  meta.filePath.c_str());
-        return result;
-    }
-
-    bool insertOk = m_store.insertChunks(itemId,
-                                          QString::fromStdString(meta.fileName),
-                                          qPath,
-                                          newChunks);
-
-    if (!insertOk) {
-        m_store.recordFailure(itemId, QStringLiteral("fts5_insert"),
-                              QStringLiteral("insertChunks() returned false"));
-        result.status = IndexResult::Status::ExtractionFailed;
-        LOG_ERROR(bsIndex, "CRITICAL: insertChunks failed for %s (id=%lld) — recorded failure",
-                  meta.filePath.c_str(), static_cast<long long>(itemId));
-        return result;
-    }
-
-    m_store.updateContentHash(itemId, newHash);
-
-    result.status = IndexResult::Status::Indexed;
-    result.chunksInserted = static_cast<int>(newChunks.size());
-
-    LOG_INFO(bsIndex, "Indexed %s: %d chunks",
-             meta.filePath.c_str(), result.chunksInserted);
-
-    m_store.clearFailures(itemId);
-
-    return result;
 }
 
 } // namespace bs

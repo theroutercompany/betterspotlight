@@ -8,6 +8,7 @@
 
 #include <QSemaphore>
 #include <atomic>
+#include <mutex>
 #include <memory>
 
 namespace bs {
@@ -75,6 +76,9 @@ private:
     std::atomic<bool> m_cancelRequested{false};
 
     QSemaphore m_concurrencySemaphore{4};
+    QSemaphore m_pdfSemaphore{1};
+    QSemaphore m_ocrSemaphore{1};
+    std::mutex m_ocrMutex;
 
     // Select the appropriate extractor for a given ItemKind.
     // Returns nullptr for non-extractable kinds.
