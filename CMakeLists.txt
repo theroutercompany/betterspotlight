@@ -41,7 +41,7 @@ target_compile_definitions(sqlite3 PRIVATE
 target_compile_options(sqlite3 PRIVATE -w)
 
 # ---------- Optional Dependencies ----------
-option(BETTERSPOTLIGHT_WITH_ONNX "Enable ONNX Runtime for semantic search" OFF)
+option(BETTERSPOTLIGHT_WITH_ONNX "Enable ONNX Runtime for semantic search" ON)
 
 find_package(Tesseract QUIET)
 find_package(PkgConfig QUIET)

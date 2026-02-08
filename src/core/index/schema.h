@@ -125,6 +125,22 @@ CREATE TABLE IF NOT EXISTS vector_map (
 
 CREATE INDEX IF NOT EXISTS idx_vector_map_label ON vector_map(hnsw_label);
 
+CREATE TABLE IF NOT EXISTS interactions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    query         TEXT NOT NULL,
+    query_normalized TEXT NOT NULL,
+    item_id       INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    path          TEXT NOT NULL,
+    match_type    TEXT NOT NULL,
+    result_position INTEGER NOT NULL,
+    app_context   TEXT,
+    timestamp     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_interactions_query ON interactions(query_normalized);
+CREATE INDEX IF NOT EXISTS idx_interactions_item ON interactions(item_id);
+CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     file_name,
     file_path,
@@ -165,6 +181,21 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticWeight', '40');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticSimilarityThreshold', '0.7');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('pinnedBoostWeight', '200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('junkPenaltyWeight', '50');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('lexicalWeight', '0.6');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('knnK', '50');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('efSearch', '50');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingBatchSize', '32');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('enableFeedbackLogging', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('enableInteractionTracking', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('enablePathPreferences', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('enableFileTypeAffinity', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('feedbackRetentionDays', '90');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('interactionRetentionDays', '180');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('nextHnswLabel', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('hnswDeletedCount', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingEnabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onboardingCompleted', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('lastFeedbackAggregation', '0');
 )";
 
 constexpr int kCurrentSchemaVersion = 1;

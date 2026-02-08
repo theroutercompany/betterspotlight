@@ -7,6 +7,7 @@
 #include "core/shared/types.h"
 
 #include <QSemaphore>
+#include <atomic>
 #include <memory>
 
 namespace bs {
@@ -53,6 +54,15 @@ public:
     // Files exceeding this are rejected with SizeExceeded.
     void setMaxFileSizeBytes(int64_t sz);
 
+    // Request cancellation of any in-progress or upcoming extraction.
+    void requestCancel();
+
+    // Clear the cancellation flag (call before starting a new batch).
+    void clearCancel();
+
+    // Check if cancellation has been requested.
+    bool isCancelRequested() const;
+
 private:
     std::unique_ptr<TextExtractor> m_textExtractor;
     std::unique_ptr<PdfExtractor> m_pdfExtractor;
@@ -61,6 +71,8 @@ private:
     int m_maxConcurrent = 4;
     int m_timeoutMs = 30000;
     int64_t m_maxFileSize = 50 * 1024 * 1024;
+
+    std::atomic<bool> m_cancelRequested{false};
 
     QSemaphore m_concurrencySemaphore{4};
 

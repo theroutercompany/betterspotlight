@@ -86,6 +86,14 @@ double Scorer::computeJunkPenalty(const QString& filePath) const
         return 0.0;
     }
 
+    // Important dotfiles should never be penalized.
+    const int lastSlash = filePath.lastIndexOf(QLatin1Char('/'));
+    const QString fileName = (lastSlash >= 0) ? filePath.mid(lastSlash + 1)
+                                               : filePath;
+    if (isImportantDotfile(fileName)) {
+        return 0.0;
+    }
+
     const QString pathLower = filePath.toLower();
     for (const auto& pattern : junkPatterns()) {
         if (pathLower.contains(pattern)) {
@@ -104,6 +112,31 @@ double Scorer::computePinnedBoost(bool isPinned) const
         return static_cast<double>(m_weights.pinnedBoostWeight);
     }
     return 0.0;
+}
+
+bool Scorer::isImportantDotfile(const QString& fileName)
+{
+    static const std::vector<QString> importantDotfiles = {
+        QStringLiteral(".gitignore"),
+        QStringLiteral(".gitattributes"),
+        QStringLiteral(".gitmodules"),
+        QStringLiteral(".editorconfig"),
+        QStringLiteral(".env"),
+        QStringLiteral(".envrc"),
+        QStringLiteral(".zshrc"),
+        QStringLiteral(".bashrc"),
+        QStringLiteral(".profile"),
+        QStringLiteral(".vimrc"),
+        QStringLiteral(".tmux.conf"),
+        QStringLiteral(".prettierrc"),
+        QStringLiteral(".eslintrc"),
+        QStringLiteral(".npmrc"),
+        QStringLiteral(".bsignore"),
+    };
+
+    const QString normalized = fileName.toLower();
+    return std::find(importantDotfiles.begin(), importantDotfiles.end(),
+                     normalized) != importantDotfiles.end();
 }
 
 const std::vector<QString>& Scorer::junkPatterns()

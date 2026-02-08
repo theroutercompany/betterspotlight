@@ -161,6 +161,7 @@ public:
 
 private:
     SQLiteStore() = default;
+    static QString sanitizeFtsQuery(const QString& raw);
     bool init(const QString& dbPath);
     bool execSql(const char* sql);
 

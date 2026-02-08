@@ -23,6 +23,14 @@ public:
                ChangeCallback callback) override;
     void stop() override;
     bool isRunning() const override;
+    void setLastEventId(uint64_t eventId)
+    {
+        m_lastEventId = static_cast<FSEventStreamEventId>(eventId);
+    }
+    uint64_t lastEventId() const
+    {
+        return static_cast<uint64_t>(m_lastEventId);
+    }
 
 private:
     // FSEvents callback — static trampoline that forwards to the instance.
@@ -36,7 +44,8 @@ private:
     // Process a batch of raw FSEvents into WorkItems and deliver them.
     void handleEvents(size_t numEvents,
                       char** paths,
-                      const FSEventStreamEventFlags flags[]);
+                      const FSEventStreamEventFlags flags[],
+                      const FSEventStreamEventId eventIds[]);
 
     // Determine the WorkItem::Type from FSEvents flags.
     static WorkItem::Type classifyEvent(FSEventStreamEventFlags flags);
@@ -53,6 +62,7 @@ private:
     dispatch_queue_t m_queue = nullptr;
     ChangeCallback m_callback;
     std::vector<std::string> m_roots;
+    FSEventStreamEventId m_lastEventId = kFSEventStreamEventIdSinceNow;
 
     // Debounce buffer: events accumulate here and are delivered
     // kDebounceMs after the last event arrives.

@@ -77,7 +77,7 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
         &FileMonitorMacOS::fsEventsCallback,
         &context,
         pathsToWatch,
-        kFSEventStreamEventIdSinceNow,
+        m_lastEventId,
         m_latency,
         flags);
 
@@ -165,23 +165,41 @@ void FileMonitorMacOS::fsEventsCallback(
     size_t numEvents,
     void* eventPaths,
     const FSEventStreamEventFlags eventFlags[],
-    const FSEventStreamEventId /*eventIds*/[])
+    const FSEventStreamEventId eventIds[])
 {
     auto* self = static_cast<FileMonitorMacOS*>(clientCallBackInfo);
     auto** paths = static_cast<char**>(eventPaths);
-    self->handleEvents(numEvents, paths, eventFlags);
+    self->handleEvents(numEvents, paths, eventFlags, eventIds);
 }
 
 void FileMonitorMacOS::handleEvents(
     size_t numEvents,
     char** paths,
-    const FSEventStreamEventFlags flags[])
+    const FSEventStreamEventFlags flags[],
+    const FSEventStreamEventId eventIds[])
 {
     std::vector<WorkItem> items;
     items.reserve(numEvents);
 
     for (size_t i = 0; i < numEvents; ++i) {
         const FSEventStreamEventFlags eventFlags = flags[i];
+
+        if (eventFlags & kFSEventStreamEventFlagMustScanSubDirs) {
+            if (m_errorCallback) {
+                m_errorCallback(QStringLiteral("FSEvents: must rescan subdirs at ") +
+                                QString::fromUtf8(paths[i]));
+            }
+        }
+        if (eventFlags & kFSEventStreamEventFlagKernelDropped) {
+            if (m_errorCallback) {
+                m_errorCallback(QStringLiteral("FSEvents: kernel dropped events"));
+            }
+        }
+        if (eventFlags & kFSEventStreamEventFlagUserDropped) {
+            if (m_errorCallback) {
+                m_errorCallback(QStringLiteral("FSEvents: user dropped events"));
+            }
+        }
 
         // Skip history-done and root-changed sentinel events.
         if (eventFlags & kFSEventStreamEventFlagHistoryDone) {
@@ -227,6 +245,12 @@ void FileMonitorMacOS::handleEvents(
         }
 
         items.push_back(std::move(item));
+    }
+
+    // Track the latest event ID for persistence
+    // (the caller stores this in SQLite settings for restart recovery)
+    if (numEvents > 0) {
+        m_lastEventId = eventIds[numEvents - 1];
     }
 
     if (items.empty()) {
