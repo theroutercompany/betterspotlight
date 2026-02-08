@@ -256,6 +256,21 @@ bool SQLiteStore::deleteItemByPath(const QString& path)
     return rc == SQLITE_DONE;
 }
 
+bool SQLiteStore::updateContentHash(int64_t itemId, const QString& contentHash)
+{
+    const char* sql = "UPDATE items SET content_hash = ?1 WHERE id = ?2";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    const QByteArray hashUtf8 = contentHash.toUtf8();
+    sqlite3_bind_text(stmt, 1, hashUtf8.constData(), -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, itemId);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
 std::optional<SQLiteStore::ItemRow> SQLiteStore::getItemByPath(const QString& path)
 {
     const char* sql = R"(

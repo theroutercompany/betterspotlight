@@ -6,6 +6,7 @@
 #include "core/fs/path_rules.h"
 #include "core/shared/logging.h"
 
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QString>
@@ -164,8 +165,18 @@ IndexResult Indexer::processNewOrModified(const WorkItem& item)
         return result;
     }
 
-    // Stages 5+6+7: Extract content, chunk, insert into FTS5
-    result = extractAndIndex(itemId.value(), meta.value());
+    static constexpr int kMaxRetries = 2;
+    int attempts = item.retryCount;
+    do {
+        result = extractAndIndex(itemId.value(), meta.value());
+        if (result.status != IndexResult::Status::ExtractionFailed) break;
+        attempts++;
+        if (attempts <= kMaxRetries) {
+            LOG_WARN(bsIndex, "Retrying extraction (%d/%d): %s",
+                     attempts, kMaxRetries, item.filePath.c_str());
+        }
+    } while (attempts <= kMaxRetries);
+
     result.durationMs = static_cast<int>(timer.elapsed());
     return result;
 }
@@ -293,26 +304,34 @@ IndexResult Indexer::extractAndIndex(int64_t itemId, const FileMetadata& meta)
 
     const QString& content = extraction.content.value();
 
-    // Stage 6: Chunking
+    const QByteArray contentUtf8 = content.toUtf8();
+    const QString newHash = QString::fromLatin1(
+        QCryptographicHash::hash(contentUtf8, QCryptographicHash::Sha256).toHex());
+
+    auto existingItem = m_store.getItemById(itemId);
+    if (existingItem.has_value() && !existingItem->contentHash.isEmpty()
+        && existingItem->contentHash == newHash) {
+        result.status = IndexResult::Status::Skipped;
+        LOG_DEBUG(bsIndex, "Skipped (content hash unchanged): %s", meta.filePath.c_str());
+        return result;
+    }
+
     std::vector<Chunk> newChunks = m_chunker.chunkContent(qPath, content);
 
     if (newChunks.empty()) {
-        // Empty content is valid (e.g., empty file). Store metadata only.
+        m_store.updateContentHash(itemId, newHash);
         result.status = IndexResult::Status::Indexed;
         LOG_DEBUG(bsIndex, "No chunks produced for %s (empty content)",
                   meta.filePath.c_str());
         return result;
     }
 
-    // Stage 7: FTS5 insertion (insertChunks handles old-chunk cleanup internally)
     bool insertOk = m_store.insertChunks(itemId,
                                           QString::fromStdString(meta.fileName),
                                           qPath,
                                           newChunks);
 
     if (!insertOk) {
-        // CRITICAL INVARIANT: chunk insertion failed — record failure.
-        // This should never happen silently.
         m_store.recordFailure(itemId, QStringLiteral("fts5_insert"),
                               QStringLiteral("insertChunks() returned false"));
         result.status = IndexResult::Status::ExtractionFailed;
@@ -321,13 +340,14 @@ IndexResult Indexer::extractAndIndex(int64_t itemId, const FileMetadata& meta)
         return result;
     }
 
+    m_store.updateContentHash(itemId, newHash);
+
     result.status = IndexResult::Status::Indexed;
     result.chunksInserted = static_cast<int>(newChunks.size());
 
     LOG_INFO(bsIndex, "Indexed %s: %d chunks",
              meta.filePath.c_str(), result.chunksInserted);
 
-    // Clear any previous failures for this item now that it succeeded
     m_store.clearFailures(itemId);
 
     return result;
