@@ -3,6 +3,7 @@
 Last validated against repo state: 2026-02-08 (post-fixes)
 
 This guide is based on:
+
 - M1/M2 requirements in `docs/milestones/`
 - The current implementation under `src/`
 - Actual runtime behavior observed from the built binaries in `build/`
@@ -14,12 +15,14 @@ It is intentionally practical: each step has concrete commands, expected outcome
 ## 1. Scope and Ground Rules
 
 1. This guide verifies both M1 and M2 behavior, but it distinguishes between:
+
 - documented target behavior (spec)
 - current implementation behavior (what the code/binaries do today)
 
 2. Some M2 features are partially wired in code but not fully integrated into runtime flows. This guide calls those out explicitly.
 
 3. The service/database paths used by the current binaries are:
+
 - Socket directory: `/tmp/betterspotlight-$(id -u)/`
 - Database: `$HOME/Library/Application Support/betterspotlight/index.db`
 - App settings (runtime): `$HOME/Library/Application Support/betterspotlight/BetterSpotlight/settings.json`
@@ -53,6 +56,7 @@ tesseract --version || echo "tesseract not detected"
 ```
 
 Expected:
+
 - CMake/CTest/Python/SQLite available.
 - If Poppler is missing, PDF extraction will log as unavailable.
 
@@ -67,6 +71,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Expected:
+
 - Build succeeds.
 - All tests pass (currently 26/26 in this repo state).
 
@@ -89,6 +94,7 @@ build/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
 ```
 
 Expected:
+
 - App starts and remains running.
 - No QML component load failures.
 
@@ -102,6 +108,7 @@ sqlite3 "$DB" ".tables" | tr ' ' '\n' | rg '^(items|search_index|feedback|freque
 ```
 
 Expected minimum tables for M2 checks:
+
 - `items`
 - `search_index`
 - `feedback`
@@ -122,10 +129,26 @@ If `interactions` is missing or schema version is `1`, run Troubleshooting T2.
 ### Gate C: Semantic model assets
 
 Query service expects model assets near its executable:
+
 - `build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx`
 - `build/src/services/Resources/models/vocab.txt`
 
 If missing, semantic search falls back to lexical only (expected fallback, see T3).
+
+Bootstrap/fix command:
+
+```bash
+./tools/fetch_embedding_models.sh
+cmake -S . -B build
+cmake --build build -j8
+```
+
+Re-check assets:
+
+```bash
+ls -l build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx
+ls -l build/src/services/Resources/models/vocab.txt
+```
 
 ---
 
@@ -142,16 +165,19 @@ build/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
 ```
 
 2. Verify:
+
 - Tray icon appears.
 - Tray menu contains `Show Search`, `Settings...`, `Quit BetterSpotlight`.
 - Search panel opens from tray action.
 
 3. Hotkey behavior:
+
 - Default hotkey is `Cmd+Space`.
 - Verify open/close toggle.
 - Verify panel reopens immediately after closing.
 
 Pass criteria:
+
 - No crash.
 - Search panel visible and focused when opened.
 
@@ -165,6 +191,7 @@ Inside search panel:
 4. Use arrow keys to move selection.
 5. Press Enter to open selected item.
 6. Use reveal/copy shortcuts:
+
 - Reveal in Finder: `Cmd+R` (Qt key modifier mapping can vary; see T10)
 - Copy path: `Cmd+Shift+C`
 
@@ -177,6 +204,7 @@ rm -f "$HOME/Library/Application Support/betterspotlight/BetterSpotlight/setting
 ```
 
 Restart app and verify:
+
 - Step 1: Welcome.
 - Step 2: FDA flow (`Open System Settings`, `Verify Access`, `Skip for now`).
 - Step 3: Home directory map with per-folder mode dropdown.
@@ -188,12 +216,14 @@ cat "$HOME/Library/Application Support/betterspotlight/BetterSpotlight/settings.
 ```
 
 Expected keys include:
+
 - `onboarding_completed` (or equivalent onboarding flag)
 - `home_directories`
 
 ### Step 5.4: Settings panel checks
 
 Open `Settings...` from tray and verify tabs:
+
 - General
 - Indexing
 - Exclusions
@@ -203,6 +233,7 @@ Open `Settings...` from tray and verify tabs:
 Validate persistence by changing values, quitting app, relaunching, and confirming values persist.
 
 Important current implementation notes:
+
 - Indexing actions are wired to indexer IPC (`pause/resume/rebuild/reindex`).
 - Health tab merges query health with indexer queue stats.
 - `Rebuild Vector Index` is wired to query service RPC (`rebuildVectorIndex`).
@@ -283,6 +314,7 @@ Ping both services:
 ## 7. Controlled Fixture Run (M1 indexing/search)
 
 Use fixture:
+
 - `/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1`
 
 ### Step 7.1: Backup your live DB first
@@ -312,14 +344,14 @@ Poll queue status:
 
 ### Step 7.3: Commit visibility check for small datasets
 
-The pipeline now flushes transactions when the queue drains, including small batches.
-After indexing completes, run:
+The pipeline now flushes transactions when the queue drains, including small batches. After indexing completes, run:
 
 ```bash
 /tmp/bs_ipc.py query getHealth
 ```
 
 Expected:
+
 - `totalIndexedItems > 0`
 - `queuePending` approaches `0` after completion
 
@@ -333,6 +365,7 @@ sqlite3 "$DB" "SELECT COUNT(*) AS fts_rows FROM search_index;"
 ```
 
 Expected:
+
 - `items > 0`
 - `search_index > 0` for extracted text content
 
@@ -345,6 +378,7 @@ Expected:
 ```
 
 Expected:
+
 - non-empty results for tokens present in indexed text files.
 
 ---
@@ -382,6 +416,7 @@ rm -f "$TEST_FILE"
 ```
 
 Expected:
+
 - create/modify/delete reflected after indexing cycle.
 
 ---
@@ -426,6 +461,7 @@ Check classification behavior by indexing files under those paths and confirming
 ```
 
 Expected:
+
 - `openCount` increments.
 - `frequencyTier`/`boost` reflect opens.
 
@@ -456,11 +492,13 @@ rg -n "EmbeddingManager unavailable|tokenizer vocab not loaded|semantic search d
 ```
 
 Expected:
+
 - search still returns lexical results (no crash).
 
 ### Step 11.2: Semantic enabled path
 
 Preconditions:
+
 - ONNX Runtime available at build time.
 - Model and vocab present at runtime paths.
 - `vector_map` populated (currently not auto-populated by indexer pipeline in this snapshot).
@@ -472,6 +510,7 @@ Conceptual query check:
 ```
 
 Expected (when semantic is fully wired and populated):
+
 - conceptually related results even without direct token overlap.
 
 ---
@@ -481,131 +520,166 @@ Expected (when semantic is fully wired and populated):
 ### T1. App fails at startup with QML duplicate signal errors
 
 Symptom:
+
 - App exits with QML load failure.
 
 Cause:
+
 - A QML component declares an explicit `...Changed` signal for a property that already has an auto-generated notifier (for example `property var model` plus `signal modelChanged()`).
 
 Fix:
+
 - Remove explicit duplicate notifier signal declarations and any manual calls to them.
 - Rebuild app target and relaunch.
 
 ### T2. M2 interaction APIs fail: `no such table: interactions`
 
 Symptom:
+
 - `record_interaction` returns internal error.
 - Query logs show prepare failures on `interactions`.
 
 Cause:
+
 - Existing DB predates schema version `2` and was not migrated.
 
 Fix options:
+
 1. Restart services and let built-in migration run to schema version `2`.
 2. If migration still did not run, backup DB and recreate schema from clean DB files.
 
 ### T3. Semantic unavailable at runtime
 
 Symptom:
+
 - Logs show tokenizer/model missing or ONNX unavailable.
 
 Cause:
+
 - Missing `vocab.txt`/ONNX model at expected runtime path, or ONNX Runtime not found at build.
 
 Fix:
-- Provide model assets in expected resources location.
+
+- Fetch model assets and rebuild so post-build sync copies them into runtime resources:
+  - `./tools/fetch_embedding_models.sh`
+  - `cmake -S . -B build && cmake --build build -j8`
 - Reconfigure/rebuild with ONNX Runtime detected.
 
 ### T4. `tests/relevance/run_relevance_test.sh` hangs or is unusable
 
 Symptoms:
+
 - Script times out.
 - It expects CLI flags on service binaries that currently run as socket daemons.
 
 Cause:
+
 - Script assumes non-existent CLI mode for `betterspotlight-indexer`/`betterspotlight-query`.
 
 Fix:
+
 - The script now fails fast with an explicit daemon-mode warning.
 - Use CTest integration tests and IPC-driven checks from this manual instead.
 
 ### T5. Index Health tab shows many `--` values
 
 Symptom:
+
 - Health UI placeholders remain empty after refresh.
 
 Cause:
+
 - Query and/or indexer service is not connected, or health refresh happened before services were ready.
 
 Fix:
+
 - Confirm both sockets are alive (`query.sock`, `indexer.sock`), then click Refresh again.
 - Check `/tmp/bs-query.log` and `/tmp/bs-indexer.log` for IPC errors.
 
 ### T6. Settings actions appear to do nothing
 
 Symptoms:
+
 - Indexing/vector/cache actions do not have visible backend effect.
 
 Cause:
+
 - Relevant service is disconnected, or action failed server-side.
 
 Fix:
+
 - Verify all services are connected (`indexer`, `query`, `extractor`) before triggering actions.
 - Check `/tmp/bs-indexer.log`, `/tmp/bs-query.log`, `/tmp/bs-extractor.log` for the corresponding RPC error.
 
 ### T7. Small fixture indexed, but search/health stay empty
 
 Symptom:
+
 - `startIndexing` succeeds; logs show processing; query health still zero.
 
 Cause:
+
 - Indexing did not actually start on the expected root, or query service is reading a different DB path.
 
 Workaround:
+
 - Call `getQueueStatus` and verify pending/processing counters move.
 - Check DB path and row counts directly with sqlite3 queries.
 
 ### T8. PDF files never searchable
 
 Symptom:
+
 - PDF extraction failures in logs (`Poppler not found`).
 
 Cause:
+
 - Poppler dependency not detected at build/runtime.
 
 Fix:
+
 - Install Poppler Qt6 development/runtime libs and rebuild.
 
 ### T9. OCR failures on image fixtures
 
 Symptom:
+
 - Leptonica pix read failures for placeholder `.jpg` files in fixture.
 
 Cause:
+
 - Some fixture “image” files are textual placeholders, not real image binaries.
 
 Fix:
+
 - Use real binary images when validating OCR path.
 
 ### T10. Reveal/copy shortcuts don’t trigger as expected on macOS
 
 Symptom:
+
 - `Cmd+R` or `Cmd+Shift+C` not firing.
 
 Cause:
+
 - Qt modifier mapping differences (`ControlModifier` vs `MetaModifier`) can vary in QML key handling.
 
 Fix:
+
 - Validate actual modifier mapping on your Qt/macOS runtime and adjust shortcut handling.
 
 ### T11. Results include unrelated files from your real home index
 
 Symptom:
+
 - Fixture queries return files outside fixture.
 
 Cause:
+
 - Existing live DB content still present.
 
 Fix:
+
 - Use backup/delete/restore DB procedure in Section 7.
 
 ---
@@ -636,6 +710,7 @@ done
 ## 14. Recommended Pass/Fail Recording Template
 
 For each major block, record:
+
 - command(s) run
 - expected outcome
 - actual outcome
@@ -643,6 +718,7 @@ For each major block, record:
 - logs/screenshots path
 
 Minimum evidence set:
+
 1. Build + ctest output
 2. App launch output
 3. Socket ping output

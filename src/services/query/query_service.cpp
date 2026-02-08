@@ -20,6 +20,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QProcessEnvironment>
 #include <QStandardPaths>
 
 namespace bs {
@@ -154,11 +155,23 @@ void QueryService::initM2Modules()
     }
 
     const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList modelDirs = {
-        appDir + QStringLiteral("/../Resources/models"),
-        appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"),
-        appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"),
-    };
+
+    QStringList modelDirs;
+    const QString envModelDir =
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
+    if (!envModelDir.isEmpty()) {
+        modelDirs << QDir::cleanPath(envModelDir);
+    }
+
+    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"));
+    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"));
+    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"));
+    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../../../data/models"));
+#ifdef BETTERSPOTLIGHT_SOURCE_DIR
+    modelDirs << QDir::cleanPath(QString::fromUtf8(BETTERSPOTLIGHT_SOURCE_DIR)
+                                 + QStringLiteral("/data/models"));
+#endif
+    modelDirs.removeDuplicates();
 
     QString modelPath;
     QString vocabPath;
@@ -173,8 +186,11 @@ void QueryService::initM2Modules()
     }
 
     if (modelPath.isEmpty()) {
-        // Preserve previous behavior (single canonical path) for logging clarity.
-        const QString fallbackDir = appDir + QStringLiteral("/../Resources/models");
+        LOG_WARN(bsIpc, "Embedding assets missing. Searched model dirs: %s",
+                 qPrintable(modelDirs.join(QStringLiteral(", "))));
+        const QString fallbackDir = modelDirs.isEmpty()
+                                        ? QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"))
+                                        : modelDirs.first();
         modelPath = fallbackDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
         vocabPath = fallbackDir + QStringLiteral("/vocab.txt");
     }

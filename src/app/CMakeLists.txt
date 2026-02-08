@@ -70,3 +70,15 @@ set_target_properties(betterspotlight PROPERTIES
     MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
 )
+
+if(TARGET betterspotlight-fetch-models)
+    add_dependencies(betterspotlight betterspotlight-fetch-models)
+endif()
+
+add_custom_command(TARGET betterspotlight POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -DBS_MODEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}/data/models
+        -DBS_MODEL_DEST_DIR=$<TARGET_FILE_DIR:betterspotlight>/../Resources/models
+        -P ${CMAKE_SOURCE_DIR}/cmake/sync_embedding_models.cmake
+    VERBATIM
+)
