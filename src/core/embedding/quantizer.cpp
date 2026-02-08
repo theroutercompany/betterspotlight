@@ -12,12 +12,13 @@ namespace bs {
 QuantizedVector Quantizer::quantize(const std::vector<float>& embedding) const
 {
     QuantizedVector qv;
-    qv.data.assign(kEmbeddingDimensions, 0);
 
     if (embedding.size() != static_cast<size_t>(kEmbeddingDimensions)) {
         qWarning() << "Quantizer::quantize expected 384 values, got" << embedding.size();
         return qv;
     }
+
+    qv.data.assign(kEmbeddingDimensions, 0);
 
     const auto [minIt, maxIt] = std::minmax_element(embedding.begin(), embedding.end());
     const float minValue = *minIt;
