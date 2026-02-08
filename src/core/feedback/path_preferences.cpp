@@ -23,7 +23,7 @@ double directoryBoost(int selectionCount)
     if (selectionCount <= 0) {
         return 0.0;
     }
-    return static_cast<double>(qMin(selectionCount / 5, 15));
+    return qMin(static_cast<double>(selectionCount) / 5.0, 15.0);
 }
 
 } // namespace
