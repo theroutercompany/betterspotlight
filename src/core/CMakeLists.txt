@@ -31,6 +31,7 @@ add_library(betterspotlight-core STATIC
     query/doctype_classifier.cpp
     query/rules_engine.cpp
     query/stopwords.cpp
+    query/query_cache.cpp
 )
 
 target_include_directories(betterspotlight-core PUBLIC

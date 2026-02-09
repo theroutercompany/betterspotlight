@@ -44,6 +44,8 @@ struct ScoreBreakdown {
     double semanticBoost = 0.0;
     double crossEncoderBoost = 0.0;
     double structuredQueryBoost = 0.0;
+    double feedbackBoost = 0.0;     // interaction + path preference + type affinity
+    double m2SignalBoost = 0.0;     // token overlap, NL penalties, location/extension/temporal hints
 };
 
 struct SearchResult {

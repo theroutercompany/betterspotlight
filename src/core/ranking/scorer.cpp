@@ -258,6 +258,8 @@ void Scorer::rankResults(std::vector<SearchResult>& results,
                                   + breakdown.semanticBoost
                                   + breakdown.crossEncoderBoost
                                   + breakdown.structuredQueryBoost
+                                  + breakdown.feedbackBoost
+                                  + breakdown.m2SignalBoost
                                   - breakdown.junkPenalty;
         result.score = std::max(0.0, finalScore);
     }

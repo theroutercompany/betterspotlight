@@ -5,6 +5,7 @@
 #include "core/index/typo_lexicon.h"
 #include "core/fs/bsignore_parser.h"
 #include "core/ranking/scorer.h"
+#include "core/query/query_cache.h"
 
 #include <atomic>
 #include <memory>
@@ -139,6 +140,8 @@ private:
     std::atomic<uint64_t> m_rewriteAppliedCount{0};
     std::atomic<uint64_t> m_semanticOnlyAdmittedCount{0};
     std::atomic<uint64_t> m_semanticOnlySuppressedCount{0};
+
+    QueryCache m_queryCache;
 };
 
 } // namespace bs
