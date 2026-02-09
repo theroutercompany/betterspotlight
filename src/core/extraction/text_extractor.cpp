@@ -58,6 +58,8 @@ const QSet<QString>& TextExtractor::supportedExtensions()
         QStringLiteral("docx"),
         QStringLiteral("rtf"),
         QStringLiteral("odt"),
+        // Binary office formats (.xlsx/.pptx/.numbers/...) are intentionally
+        // excluded and handled by MdlsTextExtractor.
 
         // Web / markup
         QStringLiteral("html"),
@@ -317,6 +319,15 @@ ExtractionResult TextExtractor::extract(const QString& filePath)
     file.close();
 
     if (rawBytes.isEmpty()) {
+        if (info.size() > 0) {
+            LOG_INFO(bsExtraction, "Cloud placeholder detected (stat size=%lld but read empty): %s",
+                     static_cast<long long>(info.size()), qUtf8Printable(filePath));
+            result.status = ExtractionResult::Status::Inaccessible;
+            result.errorMessage = QStringLiteral("File appears to be a cloud placeholder (size reported but no content readable)");
+            result.durationMs = static_cast<int>(timer.elapsed());
+            return result;
+        }
+
         // Empty file is valid — just has no content
         result.status = ExtractionResult::Status::Success;
         result.content = QString();
