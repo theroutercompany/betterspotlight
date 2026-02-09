@@ -10,6 +10,8 @@ Window {
     property var searchController: null
     property var serviceManager: null
     property var settingsController: null
+    property string hotkeyConflictMessage: ""
+    property var hotkeySuggestions: []
 
     title: qsTr("BetterSpotlight Settings")
     width: 640
@@ -76,8 +78,53 @@ Window {
                                     Layout.fillWidth: true
                                     hotkey: settingsController ? settingsController.hotkey : "Cmd+Space"
                                     onHotkeyChanged: {
-                                        if (settingsController) {
+                                        if (settingsController && hotkeyManagerObj) {
+                                            if (hotkeyManagerObj.applyHotkey(hotkey)) {
+                                                settingsController.hotkey = hotkey
+                                                settingsWindow.hotkeyConflictMessage = ""
+                                                settingsWindow.hotkeySuggestions = []
+                                            } else {
+                                                hotkeyRecorder.hotkey = settingsController.hotkey
+                                                settingsWindow.hotkeyConflictMessage =
+                                                    hotkeyManagerObj.registrationError || qsTr("Hotkey is unavailable.")
+                                                settingsWindow.hotkeySuggestions =
+                                                    hotkeyManagerObj.suggestedAlternatives || []
+                                            }
+                                        } else if (settingsController) {
                                             settingsController.hotkey = hotkey
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: settingsWindow.hotkeyConflictMessage.length > 0
+                                    text: settingsWindow.hotkeyConflictMessage
+                                    font.pixelSize: 11
+                                    color: "#C62828"
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+
+                                Flow {
+                                    visible: settingsWindow.hotkeySuggestions.length > 0
+                                    spacing: 6
+                                    Layout.fillWidth: true
+
+                                    Repeater {
+                                        model: settingsWindow.hotkeySuggestions
+                                        delegate: Button {
+                                            required property var modelData
+                                            text: modelData
+                                            onClicked: {
+                                                if (!settingsController || !hotkeyManagerObj) return
+                                                var candidate = String(modelData)
+                                                if (hotkeyManagerObj.applyHotkey(candidate)) {
+                                                    settingsController.hotkey = candidate
+                                                    hotkeyRecorder.hotkey = candidate
+                                                    settingsWindow.hotkeyConflictMessage = ""
+                                                    settingsWindow.hotkeySuggestions = []
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -165,6 +212,29 @@ Window {
                                         onToggled: {
                                             if (settingsController) {
                                                 settingsController.checkForUpdates = checked
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Update status: ")
+                                              + (updateManagerObj ? (updateManagerObj.lastStatus || "idle") : "unavailable")
+                                        font.pixelSize: 11
+                                        color: "#666666"
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Button {
+                                        text: qsTr("Check Now")
+                                        enabled: updateManagerObj && updateManagerObj.available
+                                        onClicked: {
+                                            if (updateManagerObj) {
+                                                updateManagerObj.checkNow()
                                             }
                                         }
                                     }
@@ -759,6 +829,7 @@ Window {
                     id: healthTab
 
                     property var healthData: ({})
+                    property var diagnosticsData: []
                     property bool loaded: false
                     property bool vectorRebuildRunning: {
                         if (!healthData) return false
@@ -776,6 +847,9 @@ Window {
                             healthTab.loaded = true
                         } else if (!healthTab.loaded) {
                             healthTab.healthData = ({})
+                        }
+                        if (serviceManager && serviceManager.serviceDiagnostics) {
+                            healthTab.diagnosticsData = serviceManager.serviceDiagnostics()
                         }
 
                         if (healthTab.vectorRebuildRunning) {
@@ -946,6 +1020,59 @@ Window {
 
                         GroupBox {
                             Layout.fillWidth: true
+                            title: qsTr("Supervisor")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 6
+
+                                Repeater {
+                                    model: healthTab.diagnosticsData || []
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 10
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: modelData.name || ""
+                                            font.pixelSize: 12
+                                            font.weight: Font.DemiBold
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 90
+                                        }
+                                        Label {
+                                            text: (modelData.running ? qsTr("running") : qsTr("stopped"))
+                                                  + (modelData.ready ? qsTr(" / ready") : qsTr(" / not-ready"))
+                                            font.pixelSize: 11
+                                            color: modelData.running ? "#2E7D32" : "#999999"
+                                            Layout.preferredWidth: 130
+                                        }
+                                        Label {
+                                            text: qsTr("Crashes: %1").arg(Number(modelData.crashCount || 0).toLocaleString())
+                                            font.pixelSize: 11
+                                            color: Number(modelData.crashCount || 0) > 0 ? "#C62828" : "#666666"
+                                            Layout.preferredWidth: 90
+                                        }
+                                        Label {
+                                            text: qsTr("PID: %1").arg(Number(modelData.pid || 0))
+                                            font.pixelSize: 11
+                                            color: "#666666"
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: !healthTab.diagnosticsData || healthTab.diagnosticsData.length === 0
+                                    text: qsTr("No supervisor diagnostics available.")
+                                    font.pixelSize: 11
+                                    color: "#999999"
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
                             title: qsTr("Queue")
 
                             ColumnLayout {
@@ -966,6 +1093,99 @@ Window {
                                         Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
                                         Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
                                     }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Process Metrics")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Repeater {
+                                    model: [
+                                        { label: qsTr("Query"), key: "query" },
+                                        { label: qsTr("Indexer"), key: "indexer" },
+                                        { label: qsTr("Extractor"), key: "extractor" }
+                                    ]
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 12
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 110
+                                        }
+                                        Label {
+                                            property var processStats: (healthTab.healthData["processStats"] || {})
+                                            property var serviceStats: (processStats[modelData.key] || {})
+                                            text: {
+                                                if (!serviceStats || !serviceStats["available"]) {
+                                                    return qsTr("Unavailable")
+                                                }
+                                                var pid = serviceStats["pid"] || 0
+                                                var rss = Number(serviceStats["rssBytes"] || 0)
+                                                var cpu = Number(serviceStats["cpuPercent"] || 0)
+                                                var rssMb = (rss / (1024 * 1024)).toFixed(1)
+                                                return qsTr("PID %1  RSS %2 MB  CPU %3%")
+                                                    .arg(pid)
+                                                    .arg(rssMb)
+                                                    .arg(cpu.toFixed(1))
+                                            }
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Exclusions")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 6
+
+                                Label {
+                                    property var bsignore: (healthTab.healthData["bsignoreDetails"] || {})
+                                    text: qsTr("Path: ") + (bsignore["path"] || healthTab.healthData["bsignorePath"] || "--")
+                                    font.pixelSize: 12
+                                    color: "#1A1A1A"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideMiddle
+                                }
+
+                                Label {
+                                    property var bsignore: (healthTab.healthData["bsignoreDetails"] || {})
+                                    text: qsTr("Loaded: %1   Patterns: %2")
+                                        .arg((bsignore["loaded"] === true || healthTab.healthData["bsignoreLoaded"] === true)
+                                             ? qsTr("Yes") : qsTr("No"))
+                                        .arg(Number(bsignore["patternCount"] || healthTab.healthData["bsignorePatternCount"] || 0).toLocaleString())
+                                    font.pixelSize: 12
+                                    color: "#1A1A1A"
+                                }
+
+                                Label {
+                                    property var bsignore: (healthTab.healthData["bsignoreDetails"] || {})
+                                    text: qsTr("Last Reloaded: ")
+                                          + formatHealthValue(
+                                              {value: bsignore["lastLoadedAt"] || healthTab.healthData["bsignoreLastLoadedAtMs"] || 0},
+                                              "value",
+                                              "timestamp")
+                                    font.pixelSize: 12
+                                    color: "#666666"
                                 }
                             }
                         }
@@ -1034,22 +1254,58 @@ Window {
                                 Repeater {
                                     model: {
                                         if (!healthTab.loaded) return []
+                                        var detailed = healthTab.healthData["detailedFailures"] || []
+                                        if (detailed.length > 0) return detailed
                                         return healthTab.healthData["recentErrors"] || []
                                     }
 
                                     delegate: RowLayout {
                                         required property var modelData
                                         spacing: 8; Layout.fillWidth: true
-                                        Label { text: modelData.path || ""; font.pixelSize: 11; font.family: "Menlo"; color: "#C62828"; Layout.fillWidth: true; elide: Text.ElideMiddle }
-                                        Label { text: modelData.error || ""; font.pixelSize: 11; color: "#666666"; Layout.preferredWidth: 200; elide: Text.ElideRight }
+
+                                        Rectangle {
+                                            visible: !!modelData.severity
+                                            radius: 4
+                                            color: modelData.severity === "critical" ? "#FFEBEE" : "#FFF8E1"
+                                            border.color: modelData.severity === "critical" ? "#C62828" : "#F57F17"
+                                            border.width: 1
+                                            Layout.preferredHeight: 18
+                                            Layout.preferredWidth: severityLabel.implicitWidth + 10
+
+                                            Label {
+                                                id: severityLabel
+                                                anchors.centerIn: parent
+                                                text: modelData.severity || ""
+                                                font.pixelSize: 9
+                                                color: modelData.severity === "critical" ? "#B71C1C" : "#8A4B00"
+                                            }
+                                        }
+
+                                        Label {
+                                            text: modelData.path || ""
+                                            font.pixelSize: 11
+                                            font.family: "Menlo"
+                                            color: modelData.severity === "critical" ? "#C62828" : "#8A4B00"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Label {
+                                            text: (modelData.stage ? ("[" + modelData.stage + "] ") : "") + (modelData.error || "")
+                                            font.pixelSize: 11
+                                            color: "#666666"
+                                            Layout.preferredWidth: 260
+                                            elide: Text.ElideRight
+                                        }
                                     }
                                 }
 
                                 Label {
                                     visible: {
                                         if (!healthTab.loaded) return true
-                                        var errors = healthTab.healthData["recentErrors"]
-                                        return !errors || errors.length === 0
+                                        var detailed = healthTab.healthData["detailedFailures"] || []
+                                        if (detailed.length > 0) return false
+                                        var errors = healthTab.healthData["recentErrors"] || []
+                                        return errors.length === 0
                                     }
                                     text: healthTab.loaded ? qsTr("No recent errors.") : qsTr("Click Refresh to load error data.")
                                     font.pixelSize: 11; color: "#999999"
@@ -1127,6 +1383,15 @@ Window {
         id: reindexFolderDialog
         title: qsTr("Select Folder to Reindex")
         onAccepted: { if (settingsController) settingsController.reindexFolder(selectedFolder.toString()) }
+    }
+
+    Connections {
+        target: hotkeyManagerObj
+        enabled: hotkeyManagerObj !== null
+        function onHotkeyConflictDetected(attemptedHotkey, error, suggestions) {
+            settingsWindow.hotkeyConflictMessage = error || qsTr("Hotkey is unavailable.")
+            settingsWindow.hotkeySuggestions = suggestions || []
+        }
     }
 
     // ---- Helper functions ----

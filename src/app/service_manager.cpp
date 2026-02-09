@@ -321,6 +321,14 @@ void ServiceManager::reindexPath(const QString& path)
     sendIndexerRequest(QStringLiteral("reindexPath"), params);
 }
 
+QVariantList ServiceManager::serviceDiagnostics() const
+{
+    if (!m_supervisor) {
+        return {};
+    }
+    return m_supervisor->serviceSnapshot().toVariantList();
+}
+
 bool ServiceManager::sendIndexerRequest(const QString& method, const QJsonObject& params)
 {
     return sendServiceRequest(QStringLiteral("indexer"), method, params);

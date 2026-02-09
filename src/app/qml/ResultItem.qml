@@ -7,20 +7,37 @@ Rectangle {
 
     property var itemData: ({})
     property bool isSelected: false
+    property bool isHeader: false
+    property string headerText: ""
 
     signal clicked()
 
-    color: isSelected ? "#0078D4" : mouseArea.containsMouse ? "#E8E8E8" : "transparent"
+    color: isHeader ? "transparent" : (isSelected ? "#0078D4" : mouseArea.containsMouse ? "#E8E8E8" : "transparent")
     radius: 4
 
     MouseArea {
         id: mouseArea
         anchors.fill: parent
         hoverEnabled: true
+        enabled: !isHeader
         onClicked: resultItemRoot.clicked()
     }
 
+    Label {
+        visible: isHeader
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: 12
+        anchors.rightMargin: 12
+        text: headerText
+        font.pixelSize: 11
+        font.weight: Font.DemiBold
+        color: "#666666"
+    }
+
     RowLayout {
+        visible: !isHeader
         anchors.fill: parent
         anchors.leftMargin: 12
         anchors.rightMargin: 12
