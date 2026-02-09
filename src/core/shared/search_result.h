@@ -50,6 +50,7 @@ struct SearchResult {
     QString name;
     QString kind;
     MatchType matchType = MatchType::Content;
+    int fuzzyDistance = 0;
     double score = 0.0;
     double bm25RawScore = 0.0;
     QString snippet;

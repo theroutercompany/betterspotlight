@@ -2,10 +2,27 @@
 #include "core/shared/logging.h"
 
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <algorithm>
 #include <vector>
 
 namespace bs {
+
+namespace {
+
+// Regex: \s*[-–—_]+\s* → collapse dash/en-dash/em-dash/underscore separators to single space
+QString normalizeSeparators(const QString& s)
+{
+    static const QRegularExpression dashSep(
+        QStringLiteral("\\s*[-\\x{2013}\\x{2014}_]+\\s*"));
+    static const QRegularExpression multiSpace(QStringLiteral(R"(\s{2,})"));
+    QString result = s;
+    result.replace(dashSep, QStringLiteral(" "));
+    result.replace(multiSpace, QStringLiteral(" "));
+    return result.trimmed();
+}
+
+} // namespace
 
 QString MatchClassifier::stripExtension(const QString& fileName)
 {
@@ -28,8 +45,11 @@ MatchType MatchClassifier::classify(const QString& query, const QString& fileNam
     const QString nameLower = fileName.toLower();
     const QString nameNoExtLower = stripExtension(fileName).toLower();
 
+    const QString queryNorm = normalizeSeparators(queryLower);
+    const QString nameNoExtNorm = normalizeSeparators(nameNoExtLower);
+
     // 1. ExactName: fileName (without extension) matches query, case-insensitive
-    if (nameNoExtLower == queryLower) {
+    if (nameNoExtNorm == queryNorm) {
         LOG_DEBUG(bsRanking, "classify: ExactName match for query='%s' file='%s'",
                   qUtf8Printable(query), qUtf8Printable(fileName));
         return MatchType::ExactName;
