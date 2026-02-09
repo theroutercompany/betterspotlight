@@ -25,6 +25,7 @@ bs_add_test(test-match-classifier   Unit/test_match_classifier.cpp)
 bs_add_test(test-corrupt-files     Unit/test_corrupt_files.cpp)
 bs_add_test(test-query-ranking      Unit/test_query_ranking.cpp)
 bs_add_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
+bs_add_test(test-extraction-extension-fallback Unit/test_extraction_extension_fallback.cpp)
 
 # ── Integration tests ────────────────────────────────────────────
 bs_add_test(test-full-pipeline      Integration/test_full_pipeline.cpp)

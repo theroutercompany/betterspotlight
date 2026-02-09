@@ -31,6 +31,15 @@ bool isOptionalExtractorUnavailableMessage(const std::optional<QString>& errorMe
         || lowered.contains(QStringLiteral("tesseract not found"));
 }
 
+bool isUnsupportedExtensionMessage(const std::optional<QString>& errorMessage)
+{
+    if (!errorMessage.has_value()) {
+        return false;
+    }
+    return errorMessage.value().contains(
+        QStringLiteral("is not supported by extractor"), Qt::CaseInsensitive);
+}
+
 } // namespace
 
 // ── Construction ────────────────────────────────────────────
@@ -147,8 +156,7 @@ PreparedWork Indexer::prepareNewOrModified(const WorkItem& item, uint64_t genera
 
     if (meta->itemKind == ItemKind::Directory
         || meta->itemKind == ItemKind::Archive
-        || meta->itemKind == ItemKind::Binary
-        || meta->itemKind == ItemKind::Unknown) {
+        || meta->itemKind == ItemKind::Binary) {
         prepared.nonExtractable = true;
         prepared.prepDurationMs = static_cast<int>(timer.elapsed());
         return prepared;
@@ -224,8 +232,10 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
     if (extraction.status != ExtractionResult::Status::Success
         || !extraction.content.has_value()) {
         if (extraction.status == ExtractionResult::Status::UnsupportedFormat) {
-            if (isOptionalExtractorUnavailableMessage(extraction.errorMessage)) {
+            if (isOptionalExtractorUnavailableMessage(extraction.errorMessage)
+                || isUnsupportedExtensionMessage(extraction.errorMessage)) {
                 // Optional extractor backend not available (e.g., Poppler/Tesseract):
+                // OR extension unsupported after text probe:
                 // keep metadata indexed without recording a hard failure.
                 prepared.nonExtractable = true;
                 return;
