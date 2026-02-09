@@ -3,6 +3,7 @@
 #include "core/shared/types.h"
 #include "core/shared/chunk.h"
 #include "core/shared/index_health.h"
+#include "core/shared/search_options.h"
 #include <QString>
 #include <optional>
 #include <vector>
@@ -95,7 +96,18 @@ public:
         QString snippet;
     };
 
+    struct NameHit {
+        int64_t fileId = 0;
+        QString name;
+        QString path;
+    };
+
     std::vector<FtsHit> searchFts5(const QString& query, int limit = 20, bool relaxed = false);
+    std::vector<FtsHit> searchFts5(const QString& query, int limit, bool relaxed,
+                                   const SearchOptions& options);
+    std::vector<NameHit> searchByNameFuzzy(const QString& query, int limit = 20);
+    std::vector<NameHit> searchByNameFuzzy(const QString& query, int limit,
+                                           const SearchOptions& options);
 
     // ── Failures ────────────────────────────────────────────
 
@@ -132,6 +144,12 @@ public:
 
     std::optional<QString> getSetting(const QString& key);
     bool setSetting(const QString& key, const QString& value);
+
+    // Apply BM25 weights from settings table, or use defaults if not found.
+    bool applyBm25Weights();
+
+    // Update BM25 weights: persists to settings + reapplies to FTS5.
+    bool setBm25Weights(double nameWeight, double pathWeight, double contentWeight);
 
     // ── Health ──────────────────────────────────────────────
 

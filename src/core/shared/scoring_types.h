@@ -10,7 +10,7 @@ struct ScoringWeights {
     int containsNameWeight = 100;
     int exactPathWeight = 90;
     int prefixPathWeight = 80;
-    double contentMatchWeight = 1.0;
+    double contentMatchWeight = 0.6;
     int fuzzyMatchWeight = 30;
 
     // Boost weights
