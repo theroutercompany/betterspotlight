@@ -32,6 +32,7 @@ bs_add_test(test-index-persistence  Integration/test_index_persistence.cpp)
 bs_add_test(test-incremental-update Integration/test_incremental_update.cpp)
 bs_add_test(test-crash-isolation    Integration/test_crash_isolation.cpp)
 bs_add_test(test-index-backpressure Integration/test_index_backpressure.cpp)
+bs_add_test(test-query-service-core-improvements Integration/test_query_service_core_improvements.cpp)
 
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
