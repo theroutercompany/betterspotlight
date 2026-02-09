@@ -2,6 +2,7 @@
 
 #include "core/shared/types.h"
 #include "core/fs/bsignore_parser.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -39,7 +40,19 @@ public:
     bool isCloudArtifact(const std::string& filePath) const;
 
     // Load additional exclusion patterns from a .bsignore file.
-    void loadBsignore(const std::string& bsignorePath);
+    bool loadBsignore(const std::string& bsignorePath);
+
+    // Reload the current .bsignore file path. Returns false if no path was set.
+    bool reloadBsignore();
+
+    // Check whether a path is excluded by .bsignore patterns.
+    bool isBsignoreExcluded(const std::string& filePath) const;
+
+    // .bsignore metadata for observability.
+    const std::string& bsignorePath() const { return m_bsignorePath; }
+    int64_t bsignoreLastLoadedAtMs() const { return m_bsignoreLastLoadedAtMs; }
+    size_t bsignorePatternCount() const { return m_bsignorePatternCount; }
+    bool bsignoreLoaded() const { return m_bsignoreLoaded; }
 
     // Explicit roots to include even when they are dot-prefixed directories.
     // This is used to support opt-in indexing of hidden folders.
@@ -73,6 +86,10 @@ private:
     std::vector<std::string> m_sensitivePatterns;
     std::vector<std::string> m_explicitIncludeRoots;
     BsignoreParser m_bsignoreParser;
+    std::string m_bsignorePath;
+    int64_t m_bsignoreLastLoadedAtMs = 0;
+    size_t m_bsignorePatternCount = 0;
+    bool m_bsignoreLoaded = false;
 };
 
 } // namespace bs

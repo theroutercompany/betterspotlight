@@ -29,6 +29,9 @@ public:
     // Existing patterns are replaced.
     bool loadFromString(const std::string& content);
 
+    // Clear all loaded patterns.
+    void clear();
+
     // Test whether a file path matches any loaded pattern.
     // The path should be relative to the .bsignore location,
     // or an absolute path — patterns are matched against any
