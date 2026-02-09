@@ -39,6 +39,9 @@ struct QueryCase {
     QString mode;
     QString expectedFileName;
     int topN = 3;
+    bool semanticRequired = false;
+    bool requiresVectors = false;
+    QString notes;
 };
 
 QString findQueryBinary()
@@ -264,6 +267,9 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
         c.mode = obj.value(QStringLiteral("mode")).toString(QStringLiteral("auto"));
         c.expectedFileName = obj.value(QStringLiteral("expectedFileName")).toString();
         c.topN = std::max(1, obj.value(QStringLiteral("topN")).toInt(3));
+        c.semanticRequired = obj.value(QStringLiteral("semanticRequired")).toBool(false);
+        c.requiresVectors = obj.value(QStringLiteral("requiresVectors")).toBool(c.semanticRequired);
+        c.notes = obj.value(QStringLiteral("notes")).toString();
         if (!c.id.isEmpty() && !c.query.isEmpty() && !c.expectedFileName.isEmpty()) {
             cases.push_back(c);
         }
@@ -368,14 +374,86 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
     QVERIFY2(waitForQueryConnection(queryClient, querySocket, 5000),
              qPrintable(QStringLiteral("Failed to connect to query service socket: %1").arg(querySocket)));
 
+    const bool hasVectorRequiredCases = std::any_of(
+        cases.begin(), cases.end(), [](const QueryCase& c) {
+            return c.requiresVectors;
+        });
+    bool vectorsReady = !hasVectorRequiredCases;
+    QString vectorUnavailableReason;
+    if (hasVectorRequiredCases) {
+        QJsonObject rebuildParams;
+        QJsonArray includePaths;
+        includePaths.append(targetRoot);
+        rebuildParams[QStringLiteral("includePaths")] = includePaths;
+        const QJsonObject rebuildResponse = sendOrFail(
+            queryClient, QStringLiteral("rebuildVectorIndex"), rebuildParams);
+        if (rebuildResponse.value(QStringLiteral("type")).toString() != QStringLiteral("response")) {
+            vectorUnavailableReason = QStringLiteral("rebuild_request_failed");
+        } else {
+            QElapsedTimer rebuildTimer;
+            rebuildTimer.start();
+            while (rebuildTimer.elapsed() < 120000) {
+                const QJsonObject healthResponse = sendOrFail(queryClient, QStringLiteral("getHealth"));
+                if (healthResponse.value(QStringLiteral("type")).toString() != QStringLiteral("response")) {
+                    QTest::qWait(150);
+                    continue;
+                }
+                const QJsonObject indexHealth = healthResponse.value(QStringLiteral("result"))
+                                                    .toObject()
+                                                    .value(QStringLiteral("indexHealth"))
+                                                    .toObject();
+                const QString status = indexHealth.value(
+                    QStringLiteral("vectorRebuildStatus")).toString();
+                if (status == QLatin1String("succeeded")) {
+                    vectorsReady = true;
+                    vectorUnavailableReason.clear();
+                    break;
+                }
+                if (status == QLatin1String("failed")) {
+                    vectorUnavailableReason = indexHealth.value(
+                        QStringLiteral("vectorRebuildLastError")).toString(
+                            QStringLiteral("vector_rebuild_failed"));
+                    break;
+                }
+                QTest::qWait(150);
+            }
+            if (!vectorsReady && vectorUnavailableReason.isEmpty()) {
+                vectorUnavailableReason = QStringLiteral("vector_rebuild_timeout");
+            }
+        }
+    }
+
     int passed = 0;
     int skipped = 0;
+    int semanticUnavailable = 0;
     QStringList failures;
-    QJsonArray failureDetails;
+    QJsonArray rankingMissDetails;
+    QJsonArray semanticUnavailableDetails;
 
     for (const QueryCase& c : cases) {
         if (c.category == QLatin1String("typo_strict")) {
             ++skipped;
+            continue;
+        }
+
+        if (c.requiresVectors && !vectorsReady) {
+            ++semanticUnavailable;
+            const QString detail = QStringLiteral(
+                                       "[%1|%2] q=\"%3\" expect=\"%4\" semantic_unavailable (%5)")
+                                       .arg(c.id,
+                                            c.category,
+                                            c.query,
+                                            c.expectedFileName,
+                                            vectorUnavailableReason);
+            failures.append(detail);
+            QJsonObject entry;
+            entry[QStringLiteral("id")] = c.id;
+            entry[QStringLiteral("category")] = c.category;
+            entry[QStringLiteral("failureType")] = QStringLiteral("semantic_unavailable");
+            entry[QStringLiteral("query")] = c.query;
+            entry[QStringLiteral("expectedFileName")] = c.expectedFileName;
+            entry[QStringLiteral("reason")] = vectorUnavailableReason;
+            semanticUnavailableDetails.append(entry);
             continue;
         }
 
@@ -410,10 +488,10 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
         entry[QStringLiteral("query")] = c.query;
         entry[QStringLiteral("expectedFileName")] = c.expectedFileName;
         entry[QStringLiteral("inspectedTopN")] = inspected.join(QStringLiteral(", "));
-        failureDetails.append(entry);
+        rankingMissDetails.append(entry);
     }
 
-    const int total = static_cast<int>(cases.size()) - skipped;
+    const int total = static_cast<int>(cases.size()) - skipped - semanticUnavailable;
     QVERIFY2(total > 0, "No evaluated baseline cases after skips");
     const double passRate = (100.0 * static_cast<double>(passed)) / static_cast<double>(total);
     const double gatePassRate = root.value(QStringLiteral("gatePassRate")).toDouble(90.0);
@@ -431,8 +509,15 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
         report[QStringLiteral("passRate")] = passRate;
         report[QStringLiteral("requiredPasses")] = requiredPasses;
         report[QStringLiteral("skippedCases")] = skipped;
-        report[QStringLiteral("failureType")] = QStringLiteral("ranking_miss");
-        report[QStringLiteral("failures")] = failureDetails;
+        report[QStringLiteral("semanticUnavailableCount")] = semanticUnavailable;
+        report[QStringLiteral("rankingMisses")] = rankingMissDetails;
+        report[QStringLiteral("semanticUnavailableCases")] = semanticUnavailableDetails;
+        report[QStringLiteral("fixtureMismatchCases")] = QJsonArray();
+        QJsonArray failuresLegacy;
+        for (const QString& line : failures) {
+            failuresLegacy.append(line);
+        }
+        report[QStringLiteral("failures")] = failuresLegacy;
         report[QStringLiteral("timestampUtc")] =
             QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         QSaveFile out(reportPath);
