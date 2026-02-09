@@ -493,11 +493,17 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             return;
         }
 
+        if (m_stopRebuildRequested.load()) return;
+
         std::vector<std::vector<float>> embeddings = workerEmbeddingManager.embedBatch(texts);
+
+        if (m_stopRebuildRequested.load()) return;
+
         if (embeddings.size() != texts.size()) {
             embeddings.clear();
             embeddings.reserve(texts.size());
             for (const QString& text : texts) {
+                if (m_stopRebuildRequested.load()) return;
                 embeddings.push_back(workerEmbeddingManager.embed(text));
             }
         }
@@ -593,6 +599,13 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     stmt = nullptr;
     updateVectorRebuildProgress(runId, totalCandidates, processed,
                                 embeddedCount, skippedCount, failedCount);
+
+    if (m_stopRebuildRequested.load()) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Vector rebuild cancelled"));
+        closeResources();
+        return;
+    }
 
     QDir().mkpath(dataDir);
     const QString tmpIndexPath = indexPath + QStringLiteral(".tmp");

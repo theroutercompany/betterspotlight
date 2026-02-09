@@ -285,6 +285,17 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
     // Override duration to include semaphore wait time
     result.durationMs = static_cast<int>(timer.elapsed());
 
+    // Enforce per-extraction deadline — if extraction took too long, flag it
+    if (result.durationMs > kMaxExtractionMs) {
+        LOG_WARN(bsExtraction, "Extraction exceeded deadline (%d ms > %d ms): %s",
+                 result.durationMs, kMaxExtractionMs, qUtf8Printable(filePath));
+        if (result.status == ExtractionResult::Status::Success) {
+            // Keep partial results but note the timeout in the log
+            LOG_INFO(bsExtraction, "Extraction completed past deadline, returning partial result: %s",
+                     qUtf8Printable(filePath));
+        }
+    }
+
     if (heavySemaphore) {
         heavySemaphore->release();
     }

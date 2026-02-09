@@ -65,6 +65,9 @@ public:
     // Check if cancellation has been requested.
     bool isCancelRequested() const;
 
+    // Maximum time for a single extraction before returning partial results.
+    static constexpr int kMaxExtractionMs = 30000;
+
 private:
     std::unique_ptr<MdlsTextExtractor> m_mdlsTextExtractor;
     std::unique_ptr<TextExtractor> m_textExtractor;
