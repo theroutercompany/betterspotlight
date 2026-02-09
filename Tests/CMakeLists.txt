@@ -62,6 +62,11 @@ bs_add_test(test-rules-engine        Unit/test_rules_engine.cpp)
 # ── M3 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-model-registry    Unit/test_model_registry.cpp)
 
+# ── Wave 2: Cross-encoder + StructuredQuery signal tests ─────────
+bs_add_test(test-tokenizer-pair              Unit/test_tokenizer_pair.cpp)
+bs_add_test(test-cross-encoder-reranker      Unit/test_cross_encoder_reranker.cpp)
+bs_add_test(test-structured-query-boost      Unit/test_structured_query_boost.cpp)
+
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
 bs_add_test(test-embedding           Unit/test_embedding.cpp)
