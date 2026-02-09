@@ -74,6 +74,14 @@ public:
     std::optional<ItemRow> getItemByPath(const QString& path);
     std::optional<ItemRow> getItemById(int64_t id);
 
+    struct ItemAvailability {
+        bool contentAvailable = false;
+        QString availabilityStatus = QStringLiteral("available");
+        QString lastExtractionError;
+    };
+
+    std::optional<ItemAvailability> getItemAvailability(int64_t id);
+
     // ── Chunks + FTS5 (atomic) ──────────────────────────────
 
     // Insert chunks AND index them in FTS5 in one transaction.

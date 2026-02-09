@@ -24,6 +24,7 @@ class TypeAffinity;
 class VectorIndex;
 class VectorStore;
 class SearchMerger;
+class SocketClient;
 
 class QueryService : public ServiceBase {
     Q_OBJECT
@@ -66,6 +67,7 @@ private:
     std::unique_ptr<EmbeddingManager> m_embeddingManager;
     std::unique_ptr<VectorIndex> m_vectorIndex;
     std::unique_ptr<VectorStore> m_vectorStore;
+    std::unique_ptr<SocketClient> m_indexerClient;
 
     struct VectorRebuildState {
         enum class Status {

@@ -332,6 +332,7 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
 
     for (const auto& val : resultsArray) {
         QJsonObject obj = val.toObject();
+        const QJsonObject metadata = obj.value(QStringLiteral("metadata")).toObject();
 
         QVariantMap item;
         item[QStringLiteral("itemId")] = obj.value(QStringLiteral("itemId")).toInteger();
@@ -341,8 +342,12 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
         item[QStringLiteral("matchType")] = obj.value(QStringLiteral("matchType")).toString();
         item[QStringLiteral("score")] = obj.value(QStringLiteral("score")).toDouble();
         item[QStringLiteral("snippet")] = obj.value(QStringLiteral("snippet")).toString();
-        item[QStringLiteral("fileSize")] = obj.value(QStringLiteral("fileSize")).toInteger();
-        item[QStringLiteral("modifiedAt")] = obj.value(QStringLiteral("modifiedAt")).toString();
+        item[QStringLiteral("fileSize")] = metadata.value(QStringLiteral("fileSize")).toInteger();
+        item[QStringLiteral("modifiedAt")] = metadata.value(QStringLiteral("modificationDate")).toString();
+        item[QStringLiteral("contentAvailable")] =
+            obj.value(QStringLiteral("contentAvailable")).toBool(true);
+        item[QStringLiteral("availabilityStatus")] =
+            obj.value(QStringLiteral("availabilityStatus")).toString(QStringLiteral("available"));
 
         // Compute parent path for display
         QString path = item.value(QStringLiteral("path")).toString();

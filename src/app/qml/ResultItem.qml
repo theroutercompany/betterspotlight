@@ -81,22 +81,45 @@ Rectangle {
             }
         }
 
-        // Match type badge
-        Rectangle {
-            Layout.preferredWidth: matchTypeText.implicitWidth + 12
-            Layout.preferredHeight: 18
+        ColumnLayout {
             Layout.alignment: Qt.AlignVCenter
-            radius: 4
-            color: isSelected ? "#FFFFFF30" : "#E8E8E8"
-            visible: (itemData.matchType || "").length > 0
+            spacing: 4
 
-            Text {
-                id: matchTypeText
-                anchors.centerIn: parent
-                text: formatMatchType(itemData.matchType || "")
-                font.pixelSize: 9
-                font.weight: Font.Medium
-                color: isSelected ? "#FFFFFFCC" : "#666666"
+            // Match type badge
+            Rectangle {
+                Layout.preferredWidth: matchTypeText.implicitWidth + 12
+                Layout.preferredHeight: 18
+                Layout.alignment: Qt.AlignRight
+                radius: 4
+                color: isSelected ? "#FFFFFF30" : "#E8E8E8"
+                visible: (itemData.matchType || "").length > 0
+
+                Text {
+                    id: matchTypeText
+                    anchors.centerIn: parent
+                    text: formatMatchType(itemData.matchType || "")
+                    font.pixelSize: 9
+                    font.weight: Font.Medium
+                    color: isSelected ? "#FFFFFFCC" : "#666666"
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: availabilityText.implicitWidth + 12
+                Layout.preferredHeight: 18
+                Layout.alignment: Qt.AlignRight
+                radius: 4
+                visible: (itemData.availabilityStatus || "available") !== "available"
+                color: isSelected ? "#FFFFFF30" : "#FFE9D6"
+
+                Text {
+                    id: availabilityText
+                    anchors.centerIn: parent
+                    text: formatAvailability(itemData.availabilityStatus || "available")
+                    font.pixelSize: 9
+                    font.weight: Font.Medium
+                    color: isSelected ? "#FFFFFFCC" : "#8A4B00"
+                }
             }
         }
     }
@@ -139,6 +162,14 @@ Rectangle {
         case "Content":      return "content"
         case "Fuzzy":        return "fuzzy"
         default:             return matchType
+        }
+    }
+
+    function formatAvailability(status: string): string {
+        switch (status) {
+        case "offline_placeholder": return "offline"
+        case "extract_failed":      return "unavailable"
+        default:                    return status
         }
     }
 }

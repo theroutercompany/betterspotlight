@@ -1,5 +1,6 @@
 #include "query_service.h"
 #include "core/ipc/message.h"
+#include "core/ipc/socket_client.h"
 #include "core/query/query_normalizer.h"
 #include "core/query/query_parser.h"
 #include "core/shared/search_result.h"
@@ -30,6 +31,7 @@
 #include <QStandardPaths>
 
 #include <algorithm>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -78,6 +80,44 @@ enum class SearchQueryMode {
     Strict,
     Relaxed,
 };
+
+enum CandidateOrigin : uint8_t {
+    CandidateOriginStrict = 1 << 0,
+    CandidateOriginRelaxed = 1 << 1,
+    CandidateOriginNameFallback = 1 << 2,
+};
+
+struct RewriteDecision {
+    QString rewrittenQuery;
+    bool hasCandidate = false;
+    bool applied = false;
+    double confidence = 0.0;
+    QString reason = QStringLiteral("not_attempted");
+    QJsonArray correctedTokens;
+};
+
+double bestLexicalStrength(const std::vector<SQLiteStore::FtsHit>& hits)
+{
+    double best = 0.0;
+    for (const auto& hit : hits) {
+        best = std::max(best, std::max(0.0, -hit.bm25Score));
+    }
+    return best;
+}
+
+bool looksLikeNaturalLanguageQuery(const QSet<QString>& signalTokens)
+{
+    return signalTokens.size() >= 3;
+}
+
+QString normalizeFileTypeToken(const QString& token)
+{
+    QString normalized = token.trimmed().toLower();
+    if (normalized.startsWith(QLatin1Char('.'))) {
+        normalized.remove(0, 1);
+    }
+    return normalized;
+}
 
 SearchQueryMode parseSearchQueryMode(const QJsonObject& params)
 {
@@ -285,8 +325,14 @@ bool QueryService::ensureStoreOpen()
         return true;
     }
 
-    m_dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                + QStringLiteral("/betterspotlight");
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString envDataDir = env.value(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR")).trimmed();
+    if (!envDataDir.isEmpty()) {
+        m_dataDir = QDir::cleanPath(envDataDir);
+    } else {
+        m_dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                    + QStringLiteral("/betterspotlight");
+    }
     m_dbPath = m_dataDir + QStringLiteral("/index.db");
     m_vectorIndexPath = m_dataDir + QStringLiteral("/vectors.hnsw");
     m_vectorMetaPath = m_dataDir + QStringLiteral("/vectors.meta");
@@ -411,11 +457,18 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         const auto nq = QueryNormalizer::normalize(query);
         query = nq.normalized;
     }
+    const QString normalizedQueryBeforeParse = query;
     const auto parsed = QueryParser::parse(query);
     if (parsed.hasTypeHint) {
         LOG_INFO(bsIpc, "QueryParser: extracted types=[%s] from query='%s'",
                  qUtf8Printable(parsed.extractedTypes.join(QStringLiteral(","))),
                  qUtf8Printable(query));
+    }
+    if (!parsed.cleanedQuery.isEmpty()) {
+        query = parsed.cleanedQuery;
+    } else if (parsed.hasTypeHint) {
+        // Preserve query text for type-only inputs (e.g. "pdf") so search still runs.
+        query = normalizedQueryBeforeParse;
     }
     if (query.isEmpty()) {
         return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
@@ -436,14 +489,28 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const SearchQueryMode queryMode = parseSearchQueryMode(params);
 
     SearchOptions searchOptions;
+    const auto addFileTypeFilter = [&](const QString& rawType) {
+        const QString normalized = normalizeFileTypeToken(rawType);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        const bool alreadyPresent = std::any_of(
+            searchOptions.fileTypes.begin(),
+            searchOptions.fileTypes.end(),
+            [&](const QString& existing) {
+                return normalizeFileTypeToken(existing) == normalized;
+            });
+        if (!alreadyPresent) {
+            searchOptions.fileTypes.push_back(normalized);
+        }
+    };
     if (params.contains(QStringLiteral("filters"))) {
         const QJsonObject filters = params.value(QStringLiteral("filters")).toObject();
 
         if (filters.contains(QStringLiteral("fileTypes"))) {
             const QJsonArray types = filters.value(QStringLiteral("fileTypes")).toArray();
-            searchOptions.fileTypes.reserve(static_cast<size_t>(types.size()));
             for (const auto& t : types) {
-                searchOptions.fileTypes.push_back(t.toString());
+                addFileTypeFilter(t.toString());
             }
         }
         if (filters.contains(QStringLiteral("excludePaths"))) {
@@ -467,6 +534,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             searchOptions.maxSizeBytes = static_cast<int64_t>(
                 filters.value(QStringLiteral("maxSize")).toDouble());
         }
+    }
+
+    for (const QString& parsedType : parsed.filters.fileTypes) {
+        addFileTypeFilter(parsedType);
     }
     const bool hasSearchFilters = searchOptions.hasFilters();
 
@@ -511,6 +582,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     std::vector<SQLiteStore::FtsHit> hits;
     std::vector<SQLiteStore::FtsHit> strictHits;
     std::vector<SQLiteStore::FtsHit> relaxedHits;
+    std::unordered_map<int64_t, uint8_t> candidateOrigins;
+    candidateOrigins.reserve(static_cast<size_t>(limit * 6));
+    RewriteDecision rewriteDecision;
     QJsonArray correctedTokensDebug;
     QString rewrittenRelaxedQuery;
     QString classifyQuery = query;
@@ -527,93 +601,179 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             : m_store->searchByNameFuzzy(q, localLimit);
     };
 
-    auto buildTypoRewrittenQuery = [&]() -> QString {
+    const auto markOrigins = [&](const std::vector<SQLiteStore::FtsHit>& sourceHits,
+                                 uint8_t originFlag) {
+        for (const auto& hit : sourceHits) {
+            candidateOrigins[hit.fileId] |= originFlag;
+        }
+    };
+
+    auto buildTypoRewriteDecision = [&]() -> RewriteDecision {
+        RewriteDecision decision;
         QStringList queryTokens = tokenizeWords(query);
         if (queryTokens.isEmpty()) {
-            return query;
+            decision.reason = QStringLiteral("empty_query_tokens");
+            return decision;
         }
 
         const QSet<QString>& stopwords = queryStopwords();
-        int replacements = 0;
         for (int i = 0; i < queryTokens.size(); ++i) {
             const QString token = queryTokens.at(i);
             if (token.size() < 4 || stopwords.contains(token)) {
                 continue;
-            }
-            if (replacements >= 2) {
-                break;
             }
 
             if (m_typoLexicon.contains(token)) {
                 continue;
             }
 
-            const int maxDistance = token.size() >= 8 ? 2 : 1;
+            const int maxDistance = 1;
             const auto correction = m_typoLexicon.correct(token, maxDistance);
             if (correction.has_value()) {
                 QJsonObject replacement;
                 replacement[QStringLiteral("from")] = token;
                 replacement[QStringLiteral("to")] = correction->corrected;
-                correctedTokensDebug.append(replacement);
-
+                replacement[QStringLiteral("editDistance")] = correction->editDistance;
+                replacement[QStringLiteral("docCount")] =
+                    static_cast<qint64>(correction->docCount);
+                decision.correctedTokens.append(replacement);
                 queryTokens[i] = correction->corrected;
-                ++replacements;
+                decision.hasCandidate = true;
+
+                // Confidence is intentionally conservative in auto mode.
+                double confidence = 0.55;
+                if (correction->editDistance == 1) {
+                    confidence += 0.15;
+                }
+                if (correction->docCount >= 10) {
+                    confidence += 0.15;
+                } else if (correction->docCount >= 3) {
+                    confidence += 0.05;
+                }
+                if (!token.isEmpty() && !correction->corrected.isEmpty()
+                    && token.front().toLower() == correction->corrected.front().toLower()) {
+                    confidence += 0.10;
+                }
+                decision.confidence = std::min(1.0, confidence);
+                break; // Guardrail: at most one replacement.
             }
         }
 
-        if (replacements == 0) {
-            return query;
+        if (!decision.hasCandidate) {
+            decision.reason = QStringLiteral("no_corrections");
+            decision.rewrittenQuery = query;
+            return decision;
         }
-        return queryTokens.join(QLatin1Char(' '));
+
+        decision.rewrittenQuery = queryTokens.join(QLatin1Char(' '));
+        return decision;
     };
 
     switch (queryMode) {
     case SearchQueryMode::Strict:
         strictHits = runFtsSearch(query, ftsLimit, false);
         hits = strictHits;
+        markOrigins(strictHits, CandidateOriginStrict);
+        rewriteDecision.reason = QStringLiteral("strict_mode");
         break;
     case SearchQueryMode::Relaxed:
-        rewrittenRelaxedQuery = buildTypoRewrittenQuery();
+        rewriteDecision = buildTypoRewriteDecision();
+        if (rewriteDecision.hasCandidate && rewriteDecision.confidence >= 0.70) {
+            rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
+            rewriteDecision.applied = rewrittenRelaxedQuery != query;
+            rewriteDecision.reason = rewriteDecision.applied
+                ? QStringLiteral("relaxed_mode_high_confidence")
+                : QStringLiteral("relaxed_mode_unchanged");
+        } else if (rewriteDecision.hasCandidate) {
+            rewriteDecision.reason = QStringLiteral("low_confidence");
+            rewrittenRelaxedQuery = query;
+        } else {
+            rewrittenRelaxedQuery = query;
+        }
         classifyQuery = rewrittenRelaxedQuery;
         relaxedHits = runFtsSearch(
             rewrittenRelaxedQuery,
             std::max(ftsLimit * 2, limit * 4),
             true);
         hits = relaxedHits;
+        markOrigins(relaxedHits, CandidateOriginRelaxed);
         break;
     case SearchQueryMode::Auto:
     default:
         strictHits = runFtsSearch(query, ftsLimit, false);
         hits = strictHits;
-        // Always attempt typo-corrected relaxed search
-        rewrittenRelaxedQuery = buildTypoRewrittenQuery();
-        if (rewrittenRelaxedQuery != query) {
+        markOrigins(strictHits, CandidateOriginStrict);
+
+        rewriteDecision = buildTypoRewriteDecision();
+        const bool strictWeakOrEmpty = strictHits.empty() || bestLexicalStrength(strictHits) < 2.0;
+        if (rewriteDecision.hasCandidate
+            && rewriteDecision.confidence >= 0.70
+            && strictWeakOrEmpty) {
+            rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
+            rewriteDecision.applied = rewrittenRelaxedQuery != query;
+            rewriteDecision.reason = rewriteDecision.applied
+                ? QStringLiteral("strict_weak_or_empty")
+                : QStringLiteral("already_matching");
             classifyQuery = rewrittenRelaxedQuery;
             relaxedHits = runFtsSearch(
                 rewrittenRelaxedQuery,
                 std::max(ftsLimit * 2, limit * 4),
                 true);
             hits.insert(hits.end(), relaxedHits.begin(), relaxedHits.end());
+            markOrigins(relaxedHits, CandidateOriginRelaxed);
         } else if (strictHits.empty()) {
+            rewriteDecision.reason = rewriteDecision.hasCandidate
+                ? QStringLiteral("low_confidence")
+                : QStringLiteral("strict_empty_relaxed_original");
+            rewrittenRelaxedQuery = query;
             relaxedHits = runFtsSearch(
                 query,
                 std::max(ftsLimit * 2, limit * 4),
                 true);
             hits.insert(hits.end(), relaxedHits.begin(), relaxedHits.end());
+            markOrigins(relaxedHits, CandidateOriginRelaxed);
+        } else {
+            if (!rewriteDecision.hasCandidate) {
+                rewriteDecision.reason = QStringLiteral("no_corrections");
+            } else if (rewriteDecision.confidence < 0.70) {
+                rewriteDecision.reason = QStringLiteral("low_confidence");
+            } else {
+                rewriteDecision.reason = QStringLiteral("strict_hits_present");
+            }
         }
         break;
     }
+    correctedTokensDebug = rewriteDecision.correctedTokens;
 
-    // Fuzzy filename fallback when all FTS paths return empty
-    if (hits.empty()) {
-        auto nameHits = runNameSearch(nameFuzzyQuery, ftsLimit);
+    const int maxNameFallbackAdds = std::max(3, std::min(6, limit / 2));
+    int nameFallbackAdded = 0;
+    const auto appendNameFallbackHits = [&](const QString& q, int localLimit) {
+        if (nameFallbackAdded >= maxNameFallbackAdds) {
+            return;
+        }
+        auto nameHits = runNameSearch(q, localLimit);
         for (const auto& nh : nameHits) {
+            if (nameFallbackAdded >= maxNameFallbackAdds) {
+                break;
+            }
+            bool alreadyPresent = std::any_of(hits.begin(), hits.end(),
+                [&](const SQLiteStore::FtsHit& h) { return h.fileId == nh.fileId; });
+            if (alreadyPresent) {
+                continue;
+            }
             SQLiteStore::FtsHit fakeHit;
             fakeHit.fileId = nh.fileId;
             fakeHit.bm25Score = -50.0;
             fakeHit.snippet = QString();
             hits.push_back(fakeHit);
+            candidateOrigins[nh.fileId] |= CandidateOriginNameFallback;
+            ++nameFallbackAdded;
         }
+    };
+
+    // Fuzzy filename fallback when all FTS paths return empty.
+    if (hits.empty()) {
+        appendNameFallbackHits(nameFuzzyQuery, ftsLimit);
     }
 
     // Always merge fuzzy name matches so files with matching names but no
@@ -623,18 +783,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         QString rewrittenNameQuery = rewrittenRelaxedQuery.isEmpty() ? query : rewrittenRelaxedQuery;
         rewrittenNameQuery.replace(QLatin1Char('-'), QLatin1Char(' '));
         for (const QString& q : {nameFuzzyQuery, rewrittenNameQuery}) {
-            auto nameHits = runNameSearch(q, std::max(3, limit));
-            for (const auto& nh : nameHits) {
-                bool alreadyPresent = std::any_of(hits.begin(), hits.end(),
-                    [&](const SQLiteStore::FtsHit& h) { return h.fileId == nh.fileId; });
-                if (!alreadyPresent) {
-                    SQLiteStore::FtsHit fakeHit;
-                    fakeHit.fileId = nh.fileId;
-                    fakeHit.bm25Score = -50.0;
-                    fakeHit.snippet = QString();
-                    hits.push_back(fakeHit);
-                }
-            }
+            appendNameFallbackHits(q, std::max(3, limit));
         }
     }
 
@@ -817,6 +966,13 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     for (auto& sr : results) {
         double m2Boost = 0.0;
         const QString ext = QFileInfo(sr.path).suffix().toLower();
+        const uint8_t originBits = candidateOrigins.count(sr.itemId) > 0
+            ? candidateOrigins.at(sr.itemId)
+            : static_cast<uint8_t>(CandidateOriginStrict);
+        const bool hasStrictOrigin = (originBits & CandidateOriginStrict) != 0;
+        const bool hasRelaxedOrigin = (originBits & CandidateOriginRelaxed) != 0;
+        const bool hasNameFallbackOrigin = (originBits & CandidateOriginNameFallback) != 0;
+        const bool fallbackOnlyOrigin = hasNameFallbackOrigin && !hasStrictOrigin && !hasRelaxedOrigin;
 
         if (m_interactionTracker) {
             m2Boost += m_interactionTracker->getInteractionBoost(normalizedQuery, sr.itemId);
@@ -864,6 +1020,15 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                 m2Boost -= 22.0;
                 if (querySignalTokens.size() >= 4 && isNoteLikeTextExtension(ext)) {
                     m2Boost -= 8.0;
+                }
+            }
+
+            if (looksLikeNaturalLanguageQuery(querySignalTokens) && overlapCount == 0
+                && !hasStrictOrigin) {
+                // Prevent low-signal relaxed/fallback candidates from dominating noisy corpora.
+                m2Boost -= fallbackOnlyOrigin ? 24.0 : 14.0;
+                if (fallbackOnlyOrigin && sr.matchType == MatchType::Fuzzy) {
+                    m2Boost -= 6.0;
                 }
             }
         }
@@ -953,6 +1118,14 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         obj[QStringLiteral("metadata")] = metadata;
         obj[QStringLiteral("isPinned")] = sr.isPinned;
         obj[QStringLiteral("frequency")] = frequency;
+        const auto availability = m_store->getItemAvailability(sr.itemId);
+        if (availability.has_value()) {
+            obj[QStringLiteral("contentAvailable")] = availability->contentAvailable;
+            obj[QStringLiteral("availabilityStatus")] = availability->availabilityStatus;
+        } else {
+            obj[QStringLiteral("contentAvailable")] = true;
+            obj[QStringLiteral("availabilityStatus")] = QStringLiteral("available");
+        }
         resultsArray.append(obj);
     }
 
@@ -979,6 +1152,12 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("semanticCandidates")] =
             static_cast<int>(semanticResults.size());
         debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
+        debugInfo[QStringLiteral("queryAfterParse")] = query;
+        QJsonArray parsedTypes;
+        for (const QString& extractedType : parsed.extractedTypes) {
+            parsedTypes.append(normalizeFileTypeToken(extractedType));
+        }
+        debugInfo[QStringLiteral("parsedTypes")] = parsedTypes;
         QJsonObject filtersDebug;
         filtersDebug[QStringLiteral("hasFilters")] = hasSearchFilters;
         QJsonArray fileTypesDebug;
@@ -1007,6 +1186,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         debugInfo[QStringLiteral("filters")] = filtersDebug;
         debugInfo[QStringLiteral("correctedTokens")] = correctedTokensDebug;
+        debugInfo[QStringLiteral("rewriteApplied")] = rewriteDecision.applied;
+        debugInfo[QStringLiteral("rewriteConfidence")] = rewriteDecision.confidence;
+        debugInfo[QStringLiteral("rewriteReason")] = rewriteDecision.reason;
         if (!rewrittenRelaxedQuery.isEmpty() && rewrittenRelaxedQuery != query) {
             debugInfo[QStringLiteral("rewrittenQuery")] = rewrittenRelaxedQuery;
         }
@@ -1103,6 +1285,50 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                                       / static_cast<double>(rebuildStateCopy.totalCandidates))
                                    : 0.0;
 
+    int queuePending = 0;
+    int queueInProgress = 0;
+    int queueDropped = 0;
+    int queuePreparing = 0;
+    int queueWriting = 0;
+    int queueCoalesced = 0;
+    int queueStaleDropped = 0;
+    int queuePrepWorkers = 0;
+    int queueWriterBatchDepth = 0;
+    QString queueSource = QStringLiteral("unavailable");
+    QJsonArray queueRoots;
+
+    if (!m_indexerClient) {
+        m_indexerClient = std::make_unique<SocketClient>(this);
+    }
+
+    if (!m_indexerClient->isConnected()) {
+        const QString indexerSocketPath = ServiceBase::socketPath(QStringLiteral("indexer"));
+        m_indexerClient->connectToServer(indexerSocketPath, 150);
+    }
+
+    if (m_indexerClient->isConnected()) {
+        auto queueResponse = m_indexerClient->sendRequest(
+            QStringLiteral("getQueueStatus"), {}, 500);
+        if (queueResponse.has_value()
+            && queueResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
+            const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
+            queuePending = queueResult.value(QStringLiteral("pending")).toInt();
+            queueInProgress = queueResult.value(QStringLiteral("processing")).toInt();
+            queueDropped = queueResult.value(QStringLiteral("dropped")).toInt();
+            queuePreparing = queueResult.value(QStringLiteral("preparing")).toInt();
+            queueWriting = queueResult.value(QStringLiteral("writing")).toInt();
+            queueCoalesced = queueResult.value(QStringLiteral("coalesced")).toInt();
+            queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
+            queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
+            queueWriterBatchDepth = queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
+            queueRoots = queueResult.value(QStringLiteral("roots")).toArray();
+            queueSource = QStringLiteral("indexer_rpc");
+        } else {
+            queueSource = QStringLiteral("unavailable");
+            m_indexerClient->disconnect();
+        }
+    }
+
     QJsonObject indexHealth;
     indexHealth[QStringLiteral("overallStatus")] = overallStatus;
     indexHealth[QStringLiteral("isHealthy")] = health.isHealthy;
@@ -1116,16 +1342,23 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("ftsIndexSize")] = static_cast<qint64>(health.ftsIndexSize);
     indexHealth[QStringLiteral("vectorIndexSize")] = vectorIndexSize;
     indexHealth[QStringLiteral("itemsWithoutContent")] = static_cast<qint64>(health.itemsWithoutContent);
-    indexHealth[QStringLiteral("queuePending")] = 0;
-    indexHealth[QStringLiteral("queueInProgress")] = 0;
+    indexHealth[QStringLiteral("queuePending")] = queuePending;
+    indexHealth[QStringLiteral("queueInProgress")] = queueInProgress;
     indexHealth[QStringLiteral("queueEmbedding")] = 0;
-    indexHealth[QStringLiteral("queueDropped")] = 0;
+    indexHealth[QStringLiteral("queueDropped")] = queueDropped;
+    indexHealth[QStringLiteral("queuePreparing")] = queuePreparing;
+    indexHealth[QStringLiteral("queueWriting")] = queueWriting;
+    indexHealth[QStringLiteral("queueCoalesced")] = queueCoalesced;
+    indexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
+    indexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
+    indexHealth[QStringLiteral("queueWriterBatchDepth")] = queueWriterBatchDepth;
+    indexHealth[QStringLiteral("queueSource")] = queueSource;
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
     indexHealth[QStringLiteral("queryRewriteEnabled")] = true;
     indexHealth[QStringLiteral("recentErrors")] = recentErrors;
-    indexHealth[QStringLiteral("indexRoots")] = QJsonArray();
+    indexHealth[QStringLiteral("indexRoots")] = queueRoots;
     indexHealth[QStringLiteral("vectorRebuildStatus")] =
         vectorRebuildStatusToString(rebuildStateCopy.status);
     indexHealth[QStringLiteral("vectorRebuildRunId")] =
@@ -1144,8 +1377,32 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("vectorRebuildScopeCandidates")] =
         rebuildStateCopy.scopeCandidates;
 
+    bool includesHomeRoot = false;
+    const QString homePath = QDir::homePath();
+    for (const QJsonValue& rootValue : queueRoots) {
+        const QString rootPath = rootValue.toString();
+        if (rootPath == homePath) {
+            includesHomeRoot = true;
+            break;
+        }
+    }
+    const bool lowCoverage = contentCoveragePct < 50.0;
+    const bool highBacklog = queuePending > 2000;
+    if (includesHomeRoot && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("curated_roots_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots include the full home directory while coverage is low or backlog is high.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Prefer curated roots (Documents/Projects/Downloads) to reduce lexical noise and improve extraction coverage.");
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        indexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    }
+
     QJsonObject serviceHealth;
-    serviceHealth[QStringLiteral("indexerRunning")] = true;
+    serviceHealth[QStringLiteral("indexerRunning")] = (queueSource == QLatin1String("indexer_rpc"));
     serviceHealth[QStringLiteral("extractorRunning")] = true;
     serviceHealth[QStringLiteral("queryServiceRunning")] = true;
     serviceHealth[QStringLiteral("uptime")] = 0;

@@ -342,6 +342,53 @@ std::optional<SQLiteStore::ItemRow> SQLiteStore::getItemById(int64_t id)
     return result;
 }
 
+std::optional<SQLiteStore::ItemAvailability> SQLiteStore::getItemAvailability(int64_t id)
+{
+    const char* sql = R"(
+        SELECT
+            EXISTS(SELECT 1 FROM content c WHERE c.item_id = ?1 LIMIT 1) AS has_content,
+            (
+                SELECT f.error_message
+                FROM failures f
+                WHERE f.item_id = ?1 AND f.stage = 'extraction'
+                ORDER BY f.last_failed_at DESC
+                LIMIT 1
+            ) AS extraction_error
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return std::nullopt;
+    }
+    sqlite3_bind_int64(stmt, 1, id);
+
+    std::optional<ItemAvailability> result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        ItemAvailability availability;
+        availability.contentAvailable = sqlite3_column_int(stmt, 0) != 0;
+        const char* errorText = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        availability.lastExtractionError = errorText ? QString::fromUtf8(errorText) : QString();
+
+        if (!availability.contentAvailable && !availability.lastExtractionError.isEmpty()) {
+            const QString lowered = availability.lastExtractionError.toLower();
+            const bool looksOfflinePlaceholder =
+                lowered.contains(QStringLiteral("placeholder"))
+                || lowered.contains(QStringLiteral("not readable"))
+                || lowered.contains(QStringLiteral("does not exist or is not a regular file"))
+                || lowered.contains(QStringLiteral("failed to load pdf document"));
+            availability.availabilityStatus = looksOfflinePlaceholder
+                ? QStringLiteral("offline_placeholder")
+                : QStringLiteral("extract_failed");
+        } else {
+            availability.availabilityStatus = QStringLiteral("available");
+        }
+        result = availability;
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 // ── Chunks + FTS5 (atomic — THE critical path) ─────────────
 
 bool SQLiteStore::insertChunks(
