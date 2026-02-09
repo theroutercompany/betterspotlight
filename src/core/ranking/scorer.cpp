@@ -248,13 +248,16 @@ void Scorer::rankResults(std::vector<SearchResult>& results,
                                                       result.bm25RawScore);
         result.scoreBreakdown = breakdown;
 
-        // Final score: max(0, base + recency + frequency + context + pinned - junk)
+        // Final score: max(0, base + recency + frequency + context + pinned + semantic
+        //              + crossEncoder + structuredQuery - junk)
         const double finalScore = breakdown.baseMatchScore
                                   + breakdown.recencyBoost
                                   + breakdown.frequencyBoost
                                   + breakdown.contextBoost
                                   + breakdown.pinnedBoost
                                   + breakdown.semanticBoost
+                                  + breakdown.crossEncoderBoost
+                                  + breakdown.structuredQueryBoost
                                   - breakdown.junkPenalty;
         result.score = std::max(0.0, finalScore);
     }

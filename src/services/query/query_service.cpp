@@ -1,6 +1,7 @@
 #include "query_service.h"
 #include "core/ipc/message.h"
 #include "core/ipc/socket_client.h"
+#include "core/query/doctype_classifier.h"
 #include "core/query/query_normalizer.h"
 #include "core/query/query_parser.h"
 #include "core/query/rules_engine.h"
@@ -10,6 +11,7 @@
 #include "core/shared/search_options.h"
 #include "core/shared/logging.h"
 #include "core/ranking/match_classifier.h"
+#include "core/ranking/cross_encoder_reranker.h"
 
 #include <sqlite3.h>
 
@@ -537,6 +539,13 @@ void QueryService::initM2Modules()
         LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
     } else {
         LOG_INFO(bsIpc, "EmbeddingManager initialized");
+    }
+
+    m_crossEncoderReranker = std::make_unique<CrossEncoderReranker>(m_modelRegistry.get());
+    if (m_crossEncoderReranker->initialize()) {
+        LOG_INFO(bsIpc, "Cross-encoder reranker initialized");
+    } else {
+        LOG_WARN(bsIpc, "Cross-encoder reranker not available — skipping reranking");
     }
 }
 
@@ -1498,6 +1507,71 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
     }
 
+    // Cross-encoder reranking (soft boost, before M2 boosts)
+    if (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
+        RerankerConfig rerankerConfig;
+        rerankerConfig.weight = m_scorer.weights().crossEncoderWeight;
+        rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), 40);
+        m_crossEncoderReranker->rerank(originalRawQuery, results, rerankerConfig);
+    }
+
+    // StructuredQuery signal boosts (soft — rules engine only, nluConfidence=0.0)
+    {
+        const auto& weights = m_scorer.weights();
+        for (auto& candidate : results) {
+            double sqBoost = 0.0;
+
+            // Temporal: boost items whose modifiedAt falls within the temporal range
+            if (structured.temporal.has_value() && !candidate.modificationDate.isEmpty()) {
+                bool ok = false;
+                double modAt = candidate.modificationDate.toDouble(&ok);
+                if (!ok) {
+                    const QDateTime dt = QDateTime::fromString(candidate.modificationDate, Qt::ISODate);
+                    if (dt.isValid()) {
+                        modAt = static_cast<double>(dt.toSecsSinceEpoch());
+                        ok = true;
+                    }
+                }
+                if (ok) {
+                    if (modAt >= structured.temporal->startEpoch &&
+                        modAt <= structured.temporal->endEpoch) {
+                        sqBoost += static_cast<double>(weights.temporalBoostWeight);
+                    } else {
+                        const double rangeSize = structured.temporal->endEpoch - structured.temporal->startEpoch;
+                        if (modAt >= structured.temporal->startEpoch - rangeSize &&
+                            modAt <= structured.temporal->endEpoch + rangeSize) {
+                            sqBoost += static_cast<double>(weights.temporalNearWeight);
+                        }
+                    }
+                }
+            }
+
+            // DocType: boost items whose extension matches the intent
+            if (structured.docTypeIntent.has_value()) {
+                const auto exts = DoctypeClassifier::extensionsForIntent(*structured.docTypeIntent);
+                const QString ext = QFileInfo(candidate.path).suffix().toLower();
+                if (std::find(exts.begin(), exts.end(), ext) != exts.end()) {
+                    sqBoost += static_cast<double>(weights.docTypeIntentWeight);
+                }
+            }
+
+            // Entity: boost items whose name or path contains extracted entities
+            double entityBoost = 0.0;
+            for (const auto& entity : structured.entities) {
+                if (candidate.name.contains(entity.text, Qt::CaseInsensitive) ||
+                    candidate.path.contains(entity.text, Qt::CaseInsensitive)) {
+                    entityBoost += static_cast<double>(weights.entityMatchWeight);
+                }
+            }
+            sqBoost += std::min(entityBoost, static_cast<double>(weights.entityMatchCap));
+
+            if (sqBoost > 0.0) {
+                candidate.score += sqBoost;
+                candidate.scoreBreakdown.structuredQueryBoost = sqBoost;
+            }
+        }
+    }
+
     // M2: Apply interaction, path preference, and type affinity boosts
     QString normalizedQuery = InteractionTracker::normalizeQuery(query);
 
@@ -1813,6 +1887,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         sqDebug[QStringLiteral("keyTokens")] = keyTokensDebug;
         debugInfo[QStringLiteral("structuredQuery")] = sqDebug;
+        debugInfo[QStringLiteral("crossEncoderAvailable")] =
+            (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable());
         if (!rewrittenRelaxedQuery.isEmpty() && rewrittenRelaxedQuery != query) {
             debugInfo[QStringLiteral("rewrittenQuery")] = rewrittenRelaxedQuery;
         }

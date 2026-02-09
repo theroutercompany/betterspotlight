@@ -4,17 +4,20 @@ add_subdirectory(shared)
 add_subdirectory(fs)
 add_subdirectory(extraction)
 add_subdirectory(ipc)
-add_subdirectory(ranking)
 add_subdirectory(indexing)
 
-# M3: Model registry (manifest + session + tokenizer factory)
-add_subdirectory(models)
-
-# M2 modules (embedding, vector search, feedback)
+# M2 modules (embedding must precede models and ranking when ONNX enabled)
 if(BETTERSPOTLIGHT_WITH_ONNX)
     add_subdirectory(embedding)
     add_subdirectory(vector)
 endif()
+
+# M3: Model registry (manifest + session + tokenizer factory)
+add_subdirectory(models)
+
+# Ranking depends on models (cross-encoder reranker) and optionally embedding
+add_subdirectory(ranking)
+
 add_subdirectory(feedback)
 
 add_library(betterspotlight-core STATIC

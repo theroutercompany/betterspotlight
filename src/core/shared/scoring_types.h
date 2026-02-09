@@ -25,6 +25,14 @@ struct ScoringWeights {
     double semanticSimilarityThreshold = 0.7; // M2 only
     int pinnedBoostWeight = 200;
     int junkPenaltyWeight = 50;
+
+    // Wave 2: cross-encoder + structured query signal weights
+    float crossEncoderWeight = 35.0f;
+    float temporalBoostWeight = 12.0f;
+    float temporalNearWeight = 6.0f;
+    float docTypeIntentWeight = 10.0f;
+    float entityMatchWeight = 8.0f;
+    float entityMatchCap = 16.0f;
 };
 
 } // namespace bs

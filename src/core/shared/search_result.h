@@ -42,6 +42,8 @@ struct ScoreBreakdown {
     double pinnedBoost = 0.0;
     double junkPenalty = 0.0;
     double semanticBoost = 0.0;
+    double crossEncoderBoost = 0.0;
+    double structuredQueryBoost = 0.0;
 };
 
 struct SearchResult {
@@ -62,6 +64,7 @@ struct SearchResult {
     bool isPinned = false;
     int openCount = 0;
     QString lastOpenDate;
+    float crossEncoderScore = 0.0f;  // Raw sigmoid output (0-1)
     ScoreBreakdown scoreBreakdown;
 };
 

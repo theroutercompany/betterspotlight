@@ -83,4 +83,50 @@ std::optional<QString> DoctypeClassifier::classify(const QString& queryLower)
     return std::nullopt;
 }
 
+std::vector<QString> DoctypeClassifier::extensionsForIntent(const QString& intent)
+{
+    if (intent == QLatin1String("legal_document")) {
+        return {QStringLiteral("pdf"), QStringLiteral("doc"), QStringLiteral("docx")};
+    }
+    if (intent == QLatin1String("financial_document")) {
+        return {QStringLiteral("pdf"), QStringLiteral("xlsx"),
+                QStringLiteral("csv"), QStringLiteral("xls")};
+    }
+    if (intent == QLatin1String("job_document")) {
+        return {QStringLiteral("pdf"), QStringLiteral("doc"), QStringLiteral("docx")};
+    }
+    if (intent == QLatin1String("presentation")) {
+        return {QStringLiteral("pptx"), QStringLiteral("ppt"),
+                QStringLiteral("key"), QStringLiteral("pdf")};
+    }
+    if (intent == QLatin1String("image")) {
+        return {QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("png"),
+                QStringLiteral("heic"), QStringLiteral("gif"), QStringLiteral("webp"),
+                QStringLiteral("tiff")};
+    }
+    if (intent == QLatin1String("spreadsheet")) {
+        return {QStringLiteral("xlsx"), QStringLiteral("xls"),
+                QStringLiteral("csv"), QStringLiteral("numbers")};
+    }
+    if (intent == QLatin1String("notes")) {
+        return {QStringLiteral("md"), QStringLiteral("txt"), QStringLiteral("rtf")};
+    }
+    if (intent == QLatin1String("documentation")) {
+        return {QStringLiteral("pdf"), QStringLiteral("md"),
+                QStringLiteral("html"), QStringLiteral("txt")};
+    }
+    if (intent == QLatin1String("report")) {
+        return {QStringLiteral("pdf"), QStringLiteral("doc"),
+                QStringLiteral("docx"), QStringLiteral("md")};
+    }
+    if (intent == QLatin1String("application_form")) {
+        return {QStringLiteral("pdf"), QStringLiteral("doc"), QStringLiteral("docx")};
+    }
+    if (intent == QLatin1String("reference_material")) {
+        return {QStringLiteral("pdf"), QStringLiteral("doc"),
+                QStringLiteral("docx"), QStringLiteral("html")};
+    }
+    return {};
+}
+
 } // namespace bs

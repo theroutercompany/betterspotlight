@@ -17,6 +17,7 @@
 
 namespace bs {
 
+class CrossEncoderReranker;
 class EmbeddingManager;
 class EmbeddingPipeline;
 class ModelRegistry;
@@ -72,6 +73,7 @@ private:
     std::unique_ptr<EmbeddingManager> m_embeddingManager;
     std::unique_ptr<VectorIndex> m_vectorIndex;
     std::unique_ptr<VectorStore> m_vectorStore;
+    std::unique_ptr<CrossEncoderReranker> m_crossEncoderReranker;
     std::unique_ptr<SocketClient> m_indexerClient;
 
     struct VectorRebuildState {
