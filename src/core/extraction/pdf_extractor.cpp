@@ -2,6 +2,7 @@
 #include "core/shared/logging.h"
 
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 
 #if defined(BS_POPPLER_QT6)
@@ -12,6 +13,26 @@
 #endif
 
 namespace bs {
+
+namespace {
+
+bool looksLikeOfflinePlaceholder(const QFileInfo& info, const QString& filePath)
+{
+    if (info.size() <= 0) {
+        return false;
+    }
+
+    QFile probe(filePath);
+    if (!probe.open(QIODevice::ReadOnly)) {
+        return true;
+    }
+
+    const QByteArray sample = probe.read(4096);
+    probe.close();
+    return sample.isEmpty();
+}
+
+} // namespace
 
 bool PdfExtractor::supports(const QString& extension) const
 {
@@ -37,6 +58,16 @@ ExtractionResult PdfExtractor::extract(const QString& filePath)
     if (!info.isReadable()) {
         result.status = ExtractionResult::Status::Inaccessible;
         result.errorMessage = QStringLiteral("File is not readable");
+        result.durationMs = static_cast<int>(timer.elapsed());
+        return result;
+    }
+
+    if (looksLikeOfflinePlaceholder(info, filePath)) {
+        LOG_INFO(bsExtraction, "PDF placeholder detected before parser load: %s",
+                 qUtf8Printable(filePath));
+        result.status = ExtractionResult::Status::Inaccessible;
+        result.errorMessage =
+            QStringLiteral("File appears to be a cloud placeholder (size reported but no content readable)");
         result.durationMs = static_cast<int>(timer.elapsed());
         return result;
     }

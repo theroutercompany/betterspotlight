@@ -16,6 +16,23 @@
 
 namespace bs {
 
+namespace {
+
+bool isOptionalExtractorUnavailableMessage(const std::optional<QString>& errorMessage)
+{
+    if (!errorMessage.has_value()) {
+        return false;
+    }
+
+    const QString lowered = errorMessage.value().toLower();
+    return lowered.contains(QStringLiteral("pdf extraction unavailable"))
+        || lowered.contains(QStringLiteral("ocr extraction unavailable"))
+        || lowered.contains(QStringLiteral("poppler not found"))
+        || lowered.contains(QStringLiteral("tesseract not found"));
+}
+
+} // namespace
+
 // ── Construction ────────────────────────────────────────────
 
 Indexer::Indexer(SQLiteStore& store, ExtractionManager& extractor,
@@ -207,10 +224,12 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
     if (extraction.status != ExtractionResult::Status::Success
         || !extraction.content.has_value()) {
         if (extraction.status == ExtractionResult::Status::UnsupportedFormat) {
-            // Optional extractor backend not available (e.g., Poppler/Tesseract):
-            // keep metadata indexed without recording a hard failure.
-            prepared.nonExtractable = true;
-            return;
+            if (isOptionalExtractorUnavailableMessage(extraction.errorMessage)) {
+                // Optional extractor backend not available (e.g., Poppler/Tesseract):
+                // keep metadata indexed without recording a hard failure.
+                prepared.nonExtractable = true;
+                return;
+            }
         }
 
         prepared.failure = PreparedFailure{

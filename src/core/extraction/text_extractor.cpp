@@ -25,6 +25,22 @@ const QSet<QString>& officeExtensions()
     return exts;
 }
 
+bool looksLikeOfflinePlaceholder(const QFileInfo& info, const QString& filePath)
+{
+    if (info.size() <= 0) {
+        return false;
+    }
+
+    QFile probe(filePath);
+    if (!probe.open(QIODevice::ReadOnly)) {
+        return true;
+    }
+
+    const QByteArray sample = probe.read(4096);
+    probe.close();
+    return sample.isEmpty();
+}
+
 } // anonymous namespace
 
 const QSet<QString>& TextExtractor::supportedExtensions()
@@ -262,6 +278,16 @@ ExtractionResult TextExtractor::extract(const QString& filePath)
 
     const QString extension = info.suffix().toLower();
     if (officeExtensions().contains(extension)) {
+        if (looksLikeOfflinePlaceholder(info, filePath)) {
+            LOG_INFO(bsExtraction, "Office placeholder detected before textutil: %s",
+                     qUtf8Printable(filePath));
+            result.status = ExtractionResult::Status::Inaccessible;
+            result.errorMessage =
+                QStringLiteral("File appears to be a cloud placeholder (size reported but no content readable)");
+            result.durationMs = static_cast<int>(timer.elapsed());
+            return result;
+        }
+
         // macOS-native Office/RTF/ODT conversion path.
         QProcess textutil;
         QStringList args = {
@@ -285,7 +311,7 @@ ExtractionResult TextExtractor::extract(const QString& filePath)
         const bool ok = (textutil.exitStatus() == QProcess::NormalExit && exitCode == 0);
         if (!ok) {
             const QString stderrText = QString::fromUtf8(textutil.readAllStandardError()).trimmed();
-            result.status = ExtractionResult::Status::UnsupportedFormat;
+            result.status = ExtractionResult::Status::Unknown;
             result.errorMessage = stderrText.isEmpty()
                                       ? QStringLiteral("textutil conversion failed")
                                       : QStringLiteral("textutil conversion failed: %1")
