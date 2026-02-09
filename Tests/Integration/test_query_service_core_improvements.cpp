@@ -208,6 +208,10 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                                             .toObject();
         QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
                  QStringLiteral("unavailable"));
+        QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
+                 QStringLiteral("indexer_unavailable"));
+        QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);
+        QCOMPARE(indexHealth.value(QStringLiteral("expectedGapFailures")).toInt(), 1);
     }
 
     // Start fake indexer and verify queue parity fields.
@@ -252,6 +256,10 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                                             .toObject();
         QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
                  QStringLiteral("indexer_rpc"));
+        QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
+                 QStringLiteral("healthy"));
+        QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);
+        QCOMPARE(indexHealth.value(QStringLiteral("expectedGapFailures")).toInt(), 1);
         QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), 4200);
         QCOMPARE(indexHealth.value(QStringLiteral("queueInProgress")).toInt(), 2);
         QCOMPARE(indexHealth.value(QStringLiteral("queuePreparing")).toInt(), 2);

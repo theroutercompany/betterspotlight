@@ -29,6 +29,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
+#include <QVector>
 
 #include <algorithm>
 #include <cmath>
@@ -92,6 +93,8 @@ struct RewriteDecision {
     bool hasCandidate = false;
     bool applied = false;
     double confidence = 0.0;
+    double minCandidateConfidence = 0.0;
+    int candidatesConsidered = 0;
     QString reason = QStringLiteral("not_attempted");
     QJsonArray correctedTokens;
 };
@@ -103,6 +106,38 @@ double bestLexicalStrength(const std::vector<SQLiteStore::FtsHit>& hits)
         best = std::max(best, std::max(0.0, -hit.bm25Score));
     }
     return best;
+}
+
+double typoCandidateConfidence(const QString& sourceToken,
+                               const TypoLexicon::Correction& correction)
+{
+    double confidence = 0.50;
+    if (correction.editDistance == 1) {
+        confidence += 0.18;
+    } else if (correction.editDistance == 2) {
+        confidence += 0.08;
+    }
+
+    if (correction.docCount >= 20) {
+        confidence += 0.20;
+    } else if (correction.docCount >= 10) {
+        confidence += 0.15;
+    } else if (correction.docCount >= 5) {
+        confidence += 0.10;
+    } else if (correction.docCount >= 3) {
+        confidence += 0.05;
+    }
+
+    if (!sourceToken.isEmpty() && !correction.corrected.isEmpty()
+        && sourceToken.front().toLower() == correction.corrected.front().toLower()) {
+        confidence += 0.08;
+    }
+
+    if (sourceToken.size() >= 8 && correction.editDistance == 2) {
+        confidence += 0.04;
+    }
+
+    return std::clamp(confidence, 0.0, 1.0);
 }
 
 bool looksLikeNaturalLanguageQuery(const QSet<QString>& signalTokens)
@@ -698,7 +733,11 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
     };
 
-    auto buildTypoRewriteDecision = [&]() -> RewriteDecision {
+    constexpr double kRewriteAggregateThreshold = 0.72;
+    constexpr double kRewriteCandidateThreshold = 0.66;
+
+    auto buildTypoRewriteDecision = [&](int maxReplacements,
+                                        bool allowDistanceTwo) -> RewriteDecision {
         RewriteDecision decision;
         QStringList queryTokens = tokenizeWords(query);
         if (queryTokens.isEmpty()) {
@@ -707,6 +746,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
 
         const QSet<QString>& stopwords = queryStopwords();
+        QVector<double> appliedCandidateConfidences;
+        appliedCandidateConfidences.reserve(std::max(1, maxReplacements));
+        int appliedReplacements = 0;
         for (int i = 0; i < queryTokens.size(); ++i) {
             const QString token = queryTokens.at(i);
             if (token.size() < 4 || stopwords.contains(token)) {
@@ -717,35 +759,38 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                 continue;
             }
 
-            const int maxDistance = 1;
-            const auto correction = m_typoLexicon.correct(token, maxDistance);
-            if (correction.has_value()) {
-                QJsonObject replacement;
-                replacement[QStringLiteral("from")] = token;
-                replacement[QStringLiteral("to")] = correction->corrected;
-                replacement[QStringLiteral("editDistance")] = correction->editDistance;
-                replacement[QStringLiteral("docCount")] =
-                    static_cast<qint64>(correction->docCount);
-                decision.correctedTokens.append(replacement);
-                queryTokens[i] = correction->corrected;
-                decision.hasCandidate = true;
+            ++decision.candidatesConsidered;
+            std::optional<TypoLexicon::Correction> correction = m_typoLexicon.correct(token, 1);
+            if (!correction.has_value() && allowDistanceTwo && token.size() >= 8) {
+                const auto distTwo = m_typoLexicon.correct(token, 2);
+                if (distTwo.has_value() && distTwo->editDistance <= 2 && distTwo->docCount >= 5) {
+                    correction = distTwo;
+                }
+            }
+            if (!correction.has_value() || correction->corrected == token) {
+                continue;
+            }
 
-                // Confidence is intentionally conservative in auto mode.
-                double confidence = 0.55;
-                if (correction->editDistance == 1) {
-                    confidence += 0.15;
-                }
-                if (correction->docCount >= 10) {
-                    confidence += 0.15;
-                } else if (correction->docCount >= 3) {
-                    confidence += 0.05;
-                }
-                if (!token.isEmpty() && !correction->corrected.isEmpty()
-                    && token.front().toLower() == correction->corrected.front().toLower()) {
-                    confidence += 0.10;
-                }
-                decision.confidence = std::min(1.0, confidence);
-                break; // Guardrail: at most one replacement.
+            const double candidateConfidence = typoCandidateConfidence(token, correction.value());
+            if (candidateConfidence < kRewriteCandidateThreshold) {
+                continue;
+            }
+
+            QJsonObject replacement;
+            replacement[QStringLiteral("from")] = token;
+            replacement[QStringLiteral("to")] = correction->corrected;
+            replacement[QStringLiteral("editDistance")] = correction->editDistance;
+            replacement[QStringLiteral("docCount")] =
+                static_cast<qint64>(correction->docCount);
+            replacement[QStringLiteral("candidateConfidence")] = candidateConfidence;
+            decision.correctedTokens.append(replacement);
+            queryTokens[i] = correction->corrected;
+            decision.hasCandidate = true;
+            appliedCandidateConfidences.append(candidateConfidence);
+            ++appliedReplacements;
+
+            if (appliedReplacements >= std::max(1, maxReplacements)) {
+                break;
             }
         }
 
@@ -755,10 +800,20 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             return decision;
         }
 
+        double aggregate = 0.0;
+        double minCandidate = 1.0;
+        for (double value : appliedCandidateConfidences) {
+            aggregate += value;
+            minCandidate = std::min(minCandidate, value);
+        }
+        aggregate /= static_cast<double>(appliedCandidateConfidences.size());
+        decision.confidence = aggregate;
+        decision.minCandidateConfidence = minCandidate;
         decision.rewrittenQuery = queryTokens.join(QLatin1Char(' '));
         return decision;
     };
 
+    const int relaxedSearchLimit = std::max(ftsLimit * 2, limit * 4);
     switch (queryMode) {
     case SearchQueryMode::Strict:
         strictHits = runFtsSearch(query, ftsLimit, false);
@@ -766,72 +821,81 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         markOrigins(strictHits, CandidateOriginStrict);
         rewriteDecision.reason = QStringLiteral("strict_mode");
         break;
-    case SearchQueryMode::Relaxed:
-        rewriteDecision = buildTypoRewriteDecision();
-        if (rewriteDecision.hasCandidate && rewriteDecision.confidence >= 0.70) {
-            rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
-            rewriteDecision.applied = rewrittenRelaxedQuery != query;
-            rewriteDecision.reason = rewriteDecision.applied
-                ? QStringLiteral("relaxed_mode_high_confidence")
-                : QStringLiteral("relaxed_mode_unchanged");
+    case SearchQueryMode::Relaxed: {
+        rewriteDecision = buildTypoRewriteDecision(2, true);
+        const auto relaxedOriginalHits = runFtsSearch(query, relaxedSearchLimit, true);
+        relaxedHits = relaxedOriginalHits;
+        rewrittenRelaxedQuery = query;
+
+        if (rewriteDecision.hasCandidate
+            && rewriteDecision.confidence >= kRewriteAggregateThreshold
+            && rewriteDecision.rewrittenQuery != query) {
+            auto rewrittenHits = runFtsSearch(rewriteDecision.rewrittenQuery, relaxedSearchLimit, true);
+            if (bestLexicalStrength(rewrittenHits) >= bestLexicalStrength(relaxedOriginalHits)) {
+                rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
+                rewriteDecision.applied = true;
+                rewriteDecision.reason = QStringLiteral("relaxed_mode_high_confidence");
+                relaxedHits = std::move(rewrittenHits);
+            } else {
+                rewriteDecision.reason = QStringLiteral("rewritten_weaker_than_original");
+            }
         } else if (rewriteDecision.hasCandidate) {
             rewriteDecision.reason = QStringLiteral("low_confidence");
-            rewrittenRelaxedQuery = query;
         } else {
-            rewrittenRelaxedQuery = query;
+            rewriteDecision.reason = QStringLiteral("no_corrections");
         }
+
         classifyQuery = rewrittenRelaxedQuery;
-        relaxedHits = runFtsSearch(
-            rewrittenRelaxedQuery,
-            std::max(ftsLimit * 2, limit * 4),
-            true);
         hits = relaxedHits;
         markOrigins(relaxedHits, CandidateOriginRelaxed);
         break;
+    }
     case SearchQueryMode::Auto:
-    default:
+    default: {
         strictHits = runFtsSearch(query, ftsLimit, false);
         hits = strictHits;
         markOrigins(strictHits, CandidateOriginStrict);
 
-        rewriteDecision = buildTypoRewriteDecision();
         const bool strictWeakOrEmpty = strictHits.empty() || bestLexicalStrength(strictHits) < 2.0;
-        if (rewriteDecision.hasCandidate
-            && rewriteDecision.confidence >= 0.70
-            && strictWeakOrEmpty) {
-            rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
-            rewriteDecision.applied = rewrittenRelaxedQuery != query;
-            rewriteDecision.reason = rewriteDecision.applied
-                ? QStringLiteral("strict_weak_or_empty")
-                : QStringLiteral("already_matching");
-            classifyQuery = rewrittenRelaxedQuery;
-            relaxedHits = runFtsSearch(
-                rewrittenRelaxedQuery,
-                std::max(ftsLimit * 2, limit * 4),
-                true);
-            hits.insert(hits.end(), relaxedHits.begin(), relaxedHits.end());
-            markOrigins(relaxedHits, CandidateOriginRelaxed);
-        } else if (strictHits.empty()) {
-            rewriteDecision.reason = rewriteDecision.hasCandidate
-                ? QStringLiteral("low_confidence")
-                : QStringLiteral("strict_empty_relaxed_original");
+        rewriteDecision = buildTypoRewriteDecision(strictWeakOrEmpty ? 2 : 1, strictWeakOrEmpty);
+
+        if (strictWeakOrEmpty) {
+            const auto relaxedOriginalHits = runFtsSearch(query, relaxedSearchLimit, true);
+            relaxedHits = relaxedOriginalHits;
             rewrittenRelaxedQuery = query;
-            relaxedHits = runFtsSearch(
-                query,
-                std::max(ftsLimit * 2, limit * 4),
-                true);
+
+            if (rewriteDecision.hasCandidate
+                && rewriteDecision.confidence >= kRewriteAggregateThreshold
+                && rewriteDecision.rewrittenQuery != query) {
+                auto rewrittenHits = runFtsSearch(rewriteDecision.rewrittenQuery, relaxedSearchLimit, true);
+                if (bestLexicalStrength(rewrittenHits) >= bestLexicalStrength(relaxedOriginalHits)) {
+                    rewrittenRelaxedQuery = rewriteDecision.rewrittenQuery;
+                    rewriteDecision.applied = true;
+                    rewriteDecision.reason = QStringLiteral("strict_weak_or_empty");
+                    relaxedHits = std::move(rewrittenHits);
+                } else {
+                    rewriteDecision.reason = QStringLiteral("rewritten_weaker_than_original");
+                }
+            } else if (rewriteDecision.hasCandidate) {
+                rewriteDecision.reason = QStringLiteral("low_confidence");
+            } else {
+                rewriteDecision.reason = QStringLiteral("strict_empty_relaxed_original");
+            }
+
+            classifyQuery = rewrittenRelaxedQuery;
             hits.insert(hits.end(), relaxedHits.begin(), relaxedHits.end());
             markOrigins(relaxedHits, CandidateOriginRelaxed);
         } else {
             if (!rewriteDecision.hasCandidate) {
                 rewriteDecision.reason = QStringLiteral("no_corrections");
-            } else if (rewriteDecision.confidence < 0.70) {
+            } else if (rewriteDecision.confidence < kRewriteAggregateThreshold) {
                 rewriteDecision.reason = QStringLiteral("low_confidence");
             } else {
                 rewriteDecision.reason = QStringLiteral("strict_hits_present");
             }
         }
         break;
+    }
     }
     correctedTokensDebug = rewriteDecision.correctedTokens;
 
@@ -1018,9 +1082,18 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return true;
     };
 
+    const bool pathOrCodeLikeQuery = looksLikePathOrCodeQuery(queryLower);
+    const bool naturalLanguageQuery =
+        !pathOrCodeLikeQuery && looksLikeNaturalLanguageQuery(querySignalTokens);
+    const float semanticThreshold = naturalLanguageQuery ? 0.62f : 0.70f;
+    const float semanticOnlyFloor = naturalLanguageQuery ? 0.08f : 0.15f;
+    const int semanticOnlyCap = naturalLanguageQuery
+        ? std::min(6, limit)
+        : std::min(3, limit / 2);
+    constexpr float kSemanticOnlySafetySimilarity = 0.78f;
+
     std::vector<SemanticResult> semanticResults;
-    constexpr float kSemanticThreshold = 0.7f;
-    constexpr float kSemanticOnlyFloor = 0.15f;
+    std::unordered_map<int64_t, float> semanticSimilarityByItemId;
     if (m_embeddingManager && m_embeddingManager->isAvailable()) {
         std::vector<float> queryVec = m_embeddingManager->embedQuery(query);
         if (!queryVec.empty()) {
@@ -1031,12 +1104,12 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
                 for (const auto& hit : knnHits) {
                     float cosineSim = 1.0f - hit.distance;
-                    if (cosineSim < kSemanticThreshold) {
+                    if (cosineSim < semanticThreshold) {
                         continue;
                     }
                     const float normalizedSemantic = SearchMerger::normalizeSemanticScore(
-                        cosineSim, kSemanticThreshold);
-                    if (normalizedSemantic <= kSemanticOnlyFloor) {
+                        cosineSim, semanticThreshold);
+                    if (normalizedSemantic <= semanticOnlyFloor) {
                         continue;
                     }
                     auto itemIdOpt = m_vectorStore->getItemId(hit.label);
@@ -1056,6 +1129,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                     sr.itemId = itemIdOpt.value();
                     sr.cosineSimilarity = cosineSim;
                     semanticResults.push_back(sr);
+                    semanticSimilarityByItemId[sr.itemId] = cosineSim;
                 }
             }
         }
@@ -1063,17 +1137,51 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     if (!semanticResults.empty()) {
         MergeConfig mergeConfig;
-        mergeConfig.similarityThreshold = kSemanticThreshold;
+        mergeConfig.similarityThreshold = semanticThreshold;
         mergeConfig.maxResults = std::max(limit * 2, limit);
         results = SearchMerger::merge(results, semanticResults, mergeConfig);
 
-        const int semanticOnlyCap = std::min(3, limit / 2);
         int semanticOnlyAdded = 0;
         std::vector<SearchResult> cappedResults;
         cappedResults.reserve(results.size());
-        for (const auto& sr : results) {
+        for (const auto& raw : results) {
+            SearchResult sr = raw;
             const bool semanticOnly = lexicalItemIds.find(sr.itemId) == lexicalItemIds.end();
             if (semanticOnly) {
+                float semanticSimilarity = 0.0f;
+                auto simIt = semanticSimilarityByItemId.find(sr.itemId);
+                if (simIt != semanticSimilarityByItemId.end()) {
+                    semanticSimilarity = simIt->second;
+                }
+
+                bool allowSemanticOnly = semanticSimilarity >= kSemanticOnlySafetySimilarity;
+                if (!allowSemanticOnly) {
+                    if (sr.path.isEmpty() || sr.name.isEmpty()) {
+                        auto itemOpt = m_store->getItemById(sr.itemId);
+                        if (itemOpt.has_value()) {
+                            sr.path = itemOpt->path;
+                            sr.name = itemOpt->name;
+                            sr.kind = itemOpt->kind;
+                            sr.fileSize = itemOpt->size;
+                            sr.isPinned = itemOpt->isPinned;
+                        }
+                    }
+
+                    if (!querySignalTokens.isEmpty()) {
+                        const QStringList overlapTokens = tokenizeWords(
+                            (sr.name + QLatin1Char(' ') + QFileInfo(sr.path).absolutePath()).toLower());
+                        for (const QString& token : overlapTokens) {
+                            if (querySignalTokens.contains(token)) {
+                                allowSemanticOnly = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!allowSemanticOnly) {
+                    continue;
+                }
                 if (semanticOnlyAdded >= semanticOnlyCap) {
                     continue;
                 }
@@ -1301,6 +1409,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("semanticCandidates")] =
             static_cast<int>(semanticResults.size());
         debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
+        debugInfo[QStringLiteral("semanticThresholdApplied")] = semanticThreshold;
+        debugInfo[QStringLiteral("semanticOnlyFloorApplied")] = semanticOnlyFloor;
+        debugInfo[QStringLiteral("semanticOnlyCapApplied")] = semanticOnlyCap;
         debugInfo[QStringLiteral("queryAfterParse")] = query;
         QJsonArray parsedTypes;
         for (const QString& extractedType : parsed.extractedTypes) {
@@ -1342,6 +1453,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("correctedTokens")] = correctedTokensDebug;
         debugInfo[QStringLiteral("rewriteApplied")] = rewriteDecision.applied;
         debugInfo[QStringLiteral("rewriteConfidence")] = rewriteDecision.confidence;
+        debugInfo[QStringLiteral("rewriteMinCandidateConfidence")] =
+            rewriteDecision.minCandidateConfidence;
+        debugInfo[QStringLiteral("rewriteCandidatesConsidered")] =
+            rewriteDecision.candidatesConsidered;
         debugInfo[QStringLiteral("rewriteReason")] = rewriteDecision.reason;
         debugInfo[QStringLiteral("plannerApplied")] = plannerApplied;
         debugInfo[QStringLiteral("plannerReason")] = plannerReason;
@@ -1403,6 +1518,7 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                     OR f.error_message = 'File is not readable'
                     OR f.error_message = 'Failed to load PDF document'
                     OR f.error_message = 'PDF is encrypted or password-protected'
+                    OR f.error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
                 )
             )
             ORDER BY f.last_failed_at DESC
@@ -1426,15 +1542,6 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     {
         std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
         rebuildStateCopy = m_vectorRebuildState;
-    }
-
-    QString overallStatus = QStringLiteral("healthy");
-    if (rebuildStateCopy.status == VectorRebuildState::Status::Running) {
-        overallStatus = QStringLiteral("rebuilding");
-    } else if (!health.isHealthy) {
-        overallStatus = QStringLiteral("degraded");
-    } else if (health.totalIndexedItems == 0) {
-        overallStatus = QStringLiteral("rebuilding");
     }
 
     const double progressPct = rebuildStateCopy.totalCandidates > 0
@@ -1486,13 +1593,30 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         }
     }
 
+    QString overallStatus = QStringLiteral("healthy");
+    QString healthStatusReason = QStringLiteral("healthy");
+    if (rebuildStateCopy.status == VectorRebuildState::Status::Running
+        || health.totalIndexedItems == 0) {
+        overallStatus = QStringLiteral("rebuilding");
+        healthStatusReason = QStringLiteral("rebuilding");
+    } else if (queueSource != QLatin1String("indexer_rpc")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_unavailable");
+    } else if (health.criticalFailures > 0) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("degraded_critical_failures");
+    }
+
     QJsonObject indexHealth;
     indexHealth[QStringLiteral("overallStatus")] = overallStatus;
+    indexHealth[QStringLiteral("healthStatusReason")] = healthStatusReason;
     indexHealth[QStringLiteral("isHealthy")] = health.isHealthy;
     indexHealth[QStringLiteral("totalIndexedItems")] = static_cast<qint64>(health.totalIndexedItems);
     indexHealth[QStringLiteral("totalChunks")] = static_cast<qint64>(health.totalChunks);
     indexHealth[QStringLiteral("totalEmbeddedVectors")] = totalEmbeddedVectors;
     indexHealth[QStringLiteral("totalFailures")] = static_cast<qint64>(health.totalFailures);
+    indexHealth[QStringLiteral("criticalFailures")] = static_cast<qint64>(health.criticalFailures);
+    indexHealth[QStringLiteral("expectedGapFailures")] = static_cast<qint64>(health.expectedGapFailures);
     indexHealth[QStringLiteral("lastIndexTime")] = health.lastIndexTime;
     indexHealth[QStringLiteral("lastScanTime")] = lastScanTimeIso;
     indexHealth[QStringLiteral("indexAge")] = health.indexAge;
