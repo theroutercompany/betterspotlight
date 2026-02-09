@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(BetterSpotlight VERSION 0.1.0 LANGUAGES C CXX)
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -42,6 +46,7 @@ target_compile_options(sqlite3 PRIVATE -w)
 
 # ---------- Optional Dependencies ----------
 option(BETTERSPOTLIGHT_WITH_ONNX "Enable ONNX Runtime for semantic search" ON)
+option(BETTERSPOTLIGHT_ENABLE_SPARKLE "Enable Sparkle update framework integration" OFF)
 option(BETTERSPOTLIGHT_FETCH_MODELS
        "Fetch embedding model assets into data/models when missing"
        ON)

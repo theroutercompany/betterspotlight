@@ -4,6 +4,7 @@
 #include "service_manager.h"
 #include "settings_controller.h"
 #include "status_bar_bridge.h"
+#include "update_manager.h"
 #include "core/shared/logging.h"
 
 #include <QApplication>
@@ -44,14 +45,31 @@ int main(int argc, char* argv[])
     bs::SearchController searchController;
     bs::OnboardingController onboardingController;
     bs::SettingsController settingsController;
+    bs::UpdateManager updateManager;
 
     // Wire the search controller to the supervisor for IPC
     searchController.setSupervisor(serviceManager.supervisor());
 
     // Load and keep global hotkey in sync with persisted settings.
-    hotkeyManager.setHotkey(settingsController.hotkey());
+    bool hotkeySyncInProgress = false;
+    const auto syncHotkeyFromSettings = [&]() {
+        if (hotkeySyncInProgress) {
+            return;
+        }
+
+        hotkeySyncInProgress = true;
+        const QString requestedHotkey = settingsController.hotkey();
+        if (!hotkeyManager.applyHotkey(requestedHotkey)) {
+            const QString activeHotkey = hotkeyManager.hotkey();
+            if (!activeHotkey.isEmpty() && activeHotkey != requestedHotkey) {
+                settingsController.setHotkey(activeHotkey);
+            }
+        }
+        hotkeySyncInProgress = false;
+    };
+    syncHotkeyFromSettings();
     QObject::connect(&settingsController, &bs::SettingsController::hotkeyChanged,
-                     [&]() { hotkeyManager.setHotkey(settingsController.hotkey()); });
+                     &app, syncHotkeyFromSettings);
 
     // Wire settings actions to indexer IPC commands.
     QObject::connect(&settingsController, &bs::SettingsController::indexingPaused,
@@ -66,6 +84,12 @@ int main(int argc, char* argv[])
                      &serviceManager, &bs::ServiceManager::clearExtractionCache);
     QObject::connect(&settingsController, &bs::SettingsController::reindexFolderRequested,
                      &serviceManager, &bs::ServiceManager::reindexPath);
+    QObject::connect(&settingsController, &bs::SettingsController::checkForUpdatesChanged,
+                     &app, [&]() {
+        updateManager.setAutomaticallyChecks(settingsController.checkForUpdates());
+    });
+    updateManager.setAutomaticallyChecks(settingsController.checkForUpdates());
+    updateManager.initialize();
 
     // --- Set up the system tray icon (C++ for reliability on macOS) ---
 
@@ -93,6 +117,7 @@ int main(int argc, char* argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("searchControllerObj"), &searchController);
     engine.rootContext()->setContextProperty(QStringLiteral("onboardingControllerObj"), &onboardingController);
     engine.rootContext()->setContextProperty(QStringLiteral("settingsControllerObj"), &settingsController);
+    engine.rootContext()->setContextProperty(QStringLiteral("updateManagerObj"), &updateManager);
 
     // StatusBarBridge has proper Q_OBJECT signals that QML Connections can bind to
     bs::StatusBarBridge statusBarBridge;
@@ -150,12 +175,18 @@ int main(int argc, char* argv[])
                              QSystemTrayIcon::Warning, 5000);
     });
 
-    // --- Register the global hotkey ---
-
-    if (!hotkeyManager.registerHotkey()) {
-        qWarning() << "Failed to register global hotkey. "
-                       "The hotkey may be in use by another application.";
-    }
+    QObject::connect(&hotkeyManager, &bs::HotkeyManager::hotkeyConflictDetected,
+                     [&](const QString& attempted, const QString& error, const QStringList& suggestions) {
+        QString message =
+            QStringLiteral("Hotkey '%1' is unavailable. %2").arg(attempted, error);
+        if (!suggestions.isEmpty()) {
+            message += QStringLiteral(" Try: %1").arg(suggestions.join(QStringLiteral(", ")));
+        }
+        trayIcon.showMessage(QStringLiteral("BetterSpotlight"),
+                             message,
+                             QSystemTrayIcon::Warning,
+                             7000);
+    });
 
     // --- Start services ---
 

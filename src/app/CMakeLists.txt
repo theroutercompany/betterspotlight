@@ -8,6 +8,8 @@ qt_add_executable(betterspotlight
     hotkey_manager.cpp
     search_controller.h
     search_controller.cpp
+    update_manager.h
+    update_manager.mm
     status_bar_bridge.h
     onboarding_controller.h
     onboarding_controller.cpp
@@ -61,6 +63,16 @@ target_link_libraries(betterspotlight PRIVATE
     Qt6::Network
     "-framework Carbon"
 )
+
+if(APPLE AND BETTERSPOTLIGHT_ENABLE_SPARKLE)
+    find_library(SPARKLE_FRAMEWORK Sparkle)
+    if(SPARKLE_FRAMEWORK)
+        target_link_libraries(betterspotlight PRIVATE ${SPARKLE_FRAMEWORK})
+        target_compile_definitions(betterspotlight PRIVATE BETTERSPOTLIGHT_ENABLE_SPARKLE=1)
+    else()
+        message(WARNING "BETTERSPOTLIGHT_ENABLE_SPARKLE is ON but Sparkle.framework was not found. Building without Sparkle support.")
+    endif()
+endif()
 
 set_target_properties(betterspotlight PROPERTIES
     MACOSX_BUNDLE TRUE

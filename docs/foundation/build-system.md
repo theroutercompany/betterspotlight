@@ -1565,6 +1565,36 @@ spctl -a -t exec -vvv build/src/app/betterspotlight.app
 
 ---
 
+## Milestone 3 Sparkle/Notarization Addendum (2026-02-09)
+
+Wave D introduces an Objective-C++ updater bridge:
+
+- `/Users/rexliu/betterspotlight/src/app/update_manager.h`
+- `/Users/rexliu/betterspotlight/src/app/update_manager.mm`
+
+Build switch:
+
+- `BETTERSPOTLIGHT_ENABLE_SPARKLE=ON` to link Sparkle when available.
+- Default remains OFF for local/dev builds.
+
+Release checklist updates:
+
+1. Build with Sparkle enabled:
+   - `cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBETTERSPOTLIGHT_ENABLE_SPARKLE=ON`
+2. Ensure Sparkle plist values are production-ready:
+   - `SUFeedURL`
+   - `SUPublicEDKey`
+3. Sign app + embedded frameworks (including Sparkle) with hardened runtime.
+4. Submit DMG for notarization and staple ticket.
+5. Validate in-app update action from Settings (`Check Now`) on a signed artifact.
+
+Safety notes:
+
+- If Sparkle.framework is unavailable, build falls back to non-Sparkle mode and reports `sparkle_not_enabled`.
+- Do not promote Wave D to release branches until appcast hosting + signing credentials are validated in CI.
+
+---
+
 ## Related Documents
 
 - [Architecture Overview](./architecture-overview.md)
