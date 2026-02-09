@@ -1110,6 +1110,212 @@ std::optional<SQLiteStore::FrequencyRow> SQLiteStore::getFrequency(int64_t itemI
     return result;
 }
 
+
+// ── Joined FTS5 Search ──────────────────────────────────────
+
+std::vector<SQLiteStore::FtsJoinedHit> SQLiteStore::searchFts5Joined(
+    const QString& query, int limit, bool relaxed, const SearchOptions& options)
+{
+    const QString sanitized = relaxed ? sanitizeFtsQueryRelaxed(query)
+                                      : sanitizeFtsQueryStrict(query);
+    if (sanitized.isEmpty()) {
+        LOG_DEBUG(bsIndex, "FTS5 joined search skipped after sanitization");
+        return {};
+    }
+
+    // Build dynamic SQL with JOIN and optional filters
+    QString sql = QStringLiteral(
+        "SELECT si.file_id, si.chunk_id, si.rank,"
+        " snippet(search_index, 2, '<b>', '</b>', '...', 32),"
+        " i.path, i.name, i.kind, i.size, i.modified_at,"
+        " i.parent_path, i.is_pinned, i.content_hash"
+        " FROM search_index si"
+        " JOIN items i ON i.id = si.file_id"
+        " WHERE search_index MATCH ?1");
+
+    int bindIndex = 2;
+    std::vector<QByteArray> boundStrings;
+
+    if (options.modifiedAfter.has_value()) {
+        sql += QStringLiteral(" AND i.modified_at >= ?%1").arg(bindIndex++);
+    }
+    if (options.modifiedBefore.has_value()) {
+        sql += QStringLiteral(" AND i.modified_at <= ?%1").arg(bindIndex++);
+    }
+    if (options.minSizeBytes.has_value()) {
+        sql += QStringLiteral(" AND i.size >= ?%1").arg(bindIndex++);
+    }
+    if (options.maxSizeBytes.has_value()) {
+        sql += QStringLiteral(" AND i.size <= ?%1").arg(bindIndex++);
+    }
+
+    // Normalize file types: strip leading dot, lowercase
+    std::vector<QString> normalizedFileTypes;
+    for (const QString& fileType : options.fileTypes) {
+        QString normalized = fileType.trimmed().toLower();
+        if (normalized.startsWith(QLatin1Char('.'))) {
+            normalized = normalized.mid(1);
+        }
+        if (!normalized.isEmpty()) {
+            normalizedFileTypes.push_back(normalized);
+        }
+    }
+
+    if (!normalizedFileTypes.empty()) {
+        QStringList placeholders;
+        placeholders.reserve(static_cast<int>(normalizedFileTypes.size()));
+        for (size_t i = 0; i < normalizedFileTypes.size(); ++i) {
+            placeholders.push_back(QStringLiteral("?%1").arg(bindIndex++));
+        }
+        sql += QStringLiteral(" AND i.extension IN (")
+             + placeholders.join(QStringLiteral(", "))
+             + QStringLiteral(")");
+    }
+
+    if (!options.includePaths.empty()) {
+        QStringList pathConds;
+        pathConds.reserve(static_cast<int>(options.includePaths.size()));
+        for (size_t i = 0; i < options.includePaths.size(); ++i) {
+            if (!options.includePaths[i].isEmpty()) {
+                pathConds.push_back(QStringLiteral("i.path LIKE ?%1").arg(bindIndex++));
+            }
+        }
+        if (!pathConds.isEmpty()) {
+            sql += QStringLiteral(" AND (")
+                 + pathConds.join(QStringLiteral(" OR "))
+                 + QStringLiteral(")");
+        }
+    }
+
+    for (size_t i = 0; i < options.excludePaths.size(); ++i) {
+        if (!options.excludePaths[i].isEmpty()) {
+            sql += QStringLiteral(" AND i.path NOT LIKE ?%1").arg(bindIndex++);
+        }
+    }
+
+    sql += QStringLiteral(" ORDER BY si.rank LIMIT ?%1").arg(bindIndex);
+
+    sqlite3_stmt* stmt = nullptr;
+    const QByteArray sqlUtf8 = sql.toUtf8();
+    if (sqlite3_prepare_v2(m_db, sqlUtf8.constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "FTS5 joined search prepare: %s", sqlite3_errmsg(m_db));
+        return {};
+    }
+
+    // Bind parameters
+    int idx = 1;
+    const QByteArray queryUtf8 = sanitized.toUtf8();
+    sqlite3_bind_text(stmt, idx++, queryUtf8.constData(), -1, SQLITE_STATIC);
+
+    if (options.modifiedAfter.has_value()) {
+        sqlite3_bind_double(stmt, idx++, options.modifiedAfter.value());
+    }
+    if (options.modifiedBefore.has_value()) {
+        sqlite3_bind_double(stmt, idx++, options.modifiedBefore.value());
+    }
+    if (options.minSizeBytes.has_value()) {
+        sqlite3_bind_int64(stmt, idx++, options.minSizeBytes.value());
+    }
+    if (options.maxSizeBytes.has_value()) {
+        sqlite3_bind_int64(stmt, idx++, options.maxSizeBytes.value());
+    }
+
+    for (const QString& ext : normalizedFileTypes) {
+        boundStrings.push_back(ext.toUtf8());
+        sqlite3_bind_text(stmt, idx++, boundStrings.back().constData(), -1, SQLITE_STATIC);
+    }
+
+    for (const QString& includePath : options.includePaths) {
+        if (!includePath.isEmpty()) {
+            boundStrings.push_back((includePath + QStringLiteral("%")).toUtf8());
+            sqlite3_bind_text(stmt, idx++, boundStrings.back().constData(), -1, SQLITE_STATIC);
+        }
+    }
+
+    for (const QString& excludePath : options.excludePaths) {
+        if (!excludePath.isEmpty()) {
+            boundStrings.push_back((excludePath + QStringLiteral("%")).toUtf8());
+            sqlite3_bind_text(stmt, idx++, boundStrings.back().constData(), -1, SQLITE_STATIC);
+        }
+    }
+
+    sqlite3_bind_int(stmt, idx, std::max(1, limit));
+
+    // Step through results
+    std::vector<FtsJoinedHit> hits;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        FtsJoinedHit hit;
+        hit.fileId = sqlite3_column_int64(stmt, 0);
+        const char* cid = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        hit.chunkId = cid ? QString::fromUtf8(cid) : QString();
+        hit.bm25Score = sqlite3_column_double(stmt, 2);
+        const char* snip = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        hit.snippet = snip ? QString::fromUtf8(snip) : QString();
+        const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        hit.path = path ? QString::fromUtf8(path) : QString();
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        hit.name = name ? QString::fromUtf8(name) : QString();
+        const char* kind = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+        hit.kind = kind ? QString::fromUtf8(kind) : QString();
+        hit.size = sqlite3_column_int64(stmt, 7);
+        hit.modifiedAt = sqlite3_column_double(stmt, 8);
+        const char* parentPath = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        hit.parentPath = parentPath ? QString::fromUtf8(parentPath) : QString();
+        hit.isPinned = sqlite3_column_int(stmt, 10) != 0;
+        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 11));
+        hit.contentHash = hash ? QString::fromUtf8(hash) : QString();
+        hits.push_back(std::move(hit));
+    }
+    sqlite3_finalize(stmt);
+    return hits;
+}
+
+// ── Batch Frequencies ───────────────────────────────────────
+
+std::unordered_map<int64_t, SQLiteStore::FrequencyRow> SQLiteStore::getFrequenciesBatch(
+    const std::vector<int64_t>& itemIds)
+{
+    if (itemIds.empty()) {
+        return {};
+    }
+
+    // Build: SELECT item_id, open_count, last_opened_at, total_interactions
+    //        FROM frequencies WHERE item_id IN (?, ?, ...)
+    QString sql = QStringLiteral(
+        "SELECT item_id, open_count, last_opened_at, total_interactions"
+        " FROM frequencies WHERE item_id IN (");
+
+    QStringList placeholders;
+    placeholders.reserve(static_cast<int>(itemIds.size()));
+    for (size_t i = 0; i < itemIds.size(); ++i) {
+        placeholders.push_back(QStringLiteral("?%1").arg(static_cast<int>(i) + 1));
+    }
+    sql += placeholders.join(QStringLiteral(", ")) + QStringLiteral(")");
+
+    sqlite3_stmt* stmt = nullptr;
+    const QByteArray sqlUtf8 = sql.toUtf8();
+    if (sqlite3_prepare_v2(m_db, sqlUtf8.constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "Batch frequencies prepare: %s", sqlite3_errmsg(m_db));
+        return {};
+    }
+
+    for (size_t i = 0; i < itemIds.size(); ++i) {
+        sqlite3_bind_int64(stmt, static_cast<int>(i) + 1, itemIds[i]);
+    }
+
+    std::unordered_map<int64_t, FrequencyRow> result;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const int64_t itemId = sqlite3_column_int64(stmt, 0);
+        FrequencyRow row;
+        row.openCount = sqlite3_column_int(stmt, 1);
+        row.lastOpenedAt = sqlite3_column_double(stmt, 2);
+        row.totalInteractions = sqlite3_column_int(stmt, 3);
+        result[itemId] = row;
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
 // ── Feedback aggregation ────────────────────────────────────
 
 bool SQLiteStore::aggregateFeedback()

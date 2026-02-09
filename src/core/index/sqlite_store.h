@@ -6,6 +6,7 @@
 #include "core/shared/search_options.h"
 #include <QString>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -104,6 +105,22 @@ public:
         QString snippet;
     };
 
+    struct FtsJoinedHit {
+        int64_t fileId = 0;
+        QString chunkId;
+        double bm25Score = 0.0;
+        QString snippet;
+        // Hydrated from JOIN with items table:
+        QString path;
+        QString name;
+        QString kind;
+        int64_t size = 0;
+        double modifiedAt = 0.0;
+        QString parentPath;
+        bool isPinned = false;
+        QString contentHash;
+    };
+
     struct NameHit {
         int64_t fileId = 0;
         QString name;
@@ -113,6 +130,13 @@ public:
     std::vector<FtsHit> searchFts5(const QString& query, int limit = 20, bool relaxed = false);
     std::vector<FtsHit> searchFts5(const QString& query, int limit, bool relaxed,
                                    const SearchOptions& options);
+
+    // FTS5 search with JOIN to items table — returns hydrated results in one query.
+    // Filters are applied in SQL, not post-hoc.
+    std::vector<FtsJoinedHit> searchFts5Joined(
+        const QString& query, int limit, bool relaxed,
+        const SearchOptions& options = {});
+
     std::vector<NameHit> searchByNameFuzzy(const QString& query, int limit = 20);
     std::vector<NameHit> searchByNameFuzzy(const QString& query, int limit,
                                            const SearchOptions& options);
@@ -139,6 +163,10 @@ public:
     };
 
     std::optional<FrequencyRow> getFrequency(int64_t itemId);
+
+    // Batch fetch frequencies for multiple items in one query.
+    std::unordered_map<int64_t, FrequencyRow> getFrequenciesBatch(
+        const std::vector<int64_t>& itemIds);
 
     // ── Feedback aggregation ──────────────────────────────
 

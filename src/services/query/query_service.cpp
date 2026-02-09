@@ -3,6 +3,9 @@
 #include "core/ipc/socket_client.h"
 #include "core/query/query_normalizer.h"
 #include "core/query/query_parser.h"
+#include "core/query/rules_engine.h"
+#include "core/query/stopwords.h"
+#include "core/query/structured_query.h"
 #include "core/shared/search_result.h"
 #include "core/shared/search_options.h"
 #include "core/shared/logging.h"
@@ -11,6 +14,7 @@
 #include <sqlite3.h>
 
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 #include "core/vector/vector_index.h"
 #include "core/vector/vector_store.h"
 #include "core/vector/search_merger.h"
@@ -281,39 +285,7 @@ SearchQueryMode parseSearchQueryMode(const QJsonObject& params)
     return SearchQueryMode::Auto;
 }
 
-const QSet<QString>& queryStopwords()
-{
-    static const QSet<QString> stopwords = {
-        QStringLiteral("a"),
-        QStringLiteral("an"),
-        QStringLiteral("any"),
-        QStringLiteral("and"),
-        QStringLiteral("are"),
-        QStringLiteral("at"),
-        QStringLiteral("for"),
-        QStringLiteral("from"),
-        QStringLiteral("how"),
-        QStringLiteral("in"),
-        QStringLiteral("is"),
-        QStringLiteral("it"),
-        QStringLiteral("my"),
-        QStringLiteral("of"),
-        QStringLiteral("on"),
-        QStringLiteral("or"),
-        QStringLiteral("that"),
-        QStringLiteral("there"),
-        QStringLiteral("the"),
-        QStringLiteral("to"),
-        QStringLiteral("what"),
-        QStringLiteral("when"),
-        QStringLiteral("where"),
-        QStringLiteral("which"),
-        QStringLiteral("who"),
-        QStringLiteral("why"),
-        QStringLiteral("with"),
-    };
-    return stopwords;
-}
+// queryStopwords() is now shared via core/query/stopwords.h
 
 QStringList tokenizeWords(const QString& text)
 {
@@ -557,51 +529,10 @@ void QueryService::initM2Modules()
         m_vectorIndex = std::move(loadedVectorIndex);
     }
 
-    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString modelsDir = ModelRegistry::resolveModelsDir();
+    m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
 
-    QStringList modelDirs;
-    const QString envModelDir =
-        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
-    if (!envModelDir.isEmpty()) {
-        modelDirs << QDir::cleanPath(envModelDir);
-    }
-
-    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"));
-    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"));
-    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"));
-    modelDirs << QDir::cleanPath(appDir + QStringLiteral("/../../../../data/models"));
-#ifdef BETTERSPOTLIGHT_SOURCE_DIR
-    modelDirs << QDir::cleanPath(QString::fromUtf8(BETTERSPOTLIGHT_SOURCE_DIR)
-                                 + QStringLiteral("/data/models"));
-#endif
-    modelDirs.removeDuplicates();
-
-    QString modelPath;
-    QString vocabPath;
-    for (const QString& dir : modelDirs) {
-        const QString onnx = dir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-        const QString vocab = dir + QStringLiteral("/vocab.txt");
-        if (QFile::exists(onnx) && QFile::exists(vocab)) {
-            modelPath = onnx;
-            vocabPath = vocab;
-            break;
-        }
-    }
-
-    if (modelPath.isEmpty()) {
-        LOG_WARN(bsIpc, "Embedding assets missing. Searched model dirs: %s",
-                 qPrintable(modelDirs.join(QStringLiteral(", "))));
-        const QString fallbackDir = modelDirs.isEmpty()
-                                        ? QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"))
-                                        : modelDirs.first();
-        modelPath = fallbackDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-        vocabPath = fallbackDir + QStringLiteral("/vocab.txt");
-    }
-
-    m_embeddingModelPath = modelPath;
-    m_embeddingVocabPath = vocabPath;
-
-    m_embeddingManager = std::make_unique<EmbeddingManager>(modelPath, vocabPath);
+    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get());
     if (!m_embeddingManager->initialize()) {
         LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
     } else {
@@ -890,6 +821,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     const QString queryLower = query.toLower();
     const QueryHints queryHints = parseQueryHints(queryLower);
+
+    // Stage 0: Query understanding (rules engine)
+    const StructuredQuery structured = RulesEngine::analyze(originalRawQuery);
+
     const QStringList queryTokensRaw = tokenizeWords(queryLower);
     QSet<QString> highSignalShortTokens;
     {
@@ -975,10 +910,26 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     QString classifyQuery = query;
     QString nameFuzzyQuery = query;
     nameFuzzyQuery.replace(QLatin1Char('-'), QLatin1Char(' '));
+    // Hydrated item cache: populated by searchFts5Joined, avoids N+1 getItemById calls.
+    std::unordered_map<int64_t, SQLiteStore::FtsJoinedHit> hydratedItemCache;
+    hydratedItemCache.reserve(static_cast<size_t>(limit * 6));
+
     const auto runFtsSearch = [&](const QString& q, int localLimit, bool relaxedMode) {
-        return hasSearchFilters
-            ? m_store->searchFts5(q, localLimit, relaxedMode, searchOptions)
-            : m_store->searchFts5(q, localLimit, relaxedMode);
+        auto joinedHits = m_store->searchFts5Joined(q, localLimit, relaxedMode, searchOptions);
+        std::vector<SQLiteStore::FtsHit> ftsHits;
+        ftsHits.reserve(joinedHits.size());
+        for (auto& jh : joinedHits) {
+            if (hydratedItemCache.find(jh.fileId) == hydratedItemCache.end()) {
+                hydratedItemCache.emplace(jh.fileId, jh);
+            }
+            SQLiteStore::FtsHit fh;
+            fh.fileId = jh.fileId;
+            fh.chunkId = jh.chunkId;
+            fh.bm25Score = jh.bm25Score;
+            fh.snippet = jh.snippet;
+            ftsHits.push_back(std::move(fh));
+        }
+        return ftsHits;
     };
     const auto runNameSearch = [&](const QString& q, int localLimit) {
         return hasSearchFilters
@@ -1209,6 +1160,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     // Build SearchResult list from FTS hits.
     // Deduplicate by itemId and keep the strongest lexical chunk per file.
+    // Uses hydratedItemCache from searchFts5Joined to avoid N+1 getItemById calls.
     std::vector<SearchResult> results;
     results.reserve(hits.size());
     std::unordered_map<int64_t, size_t> bestHitByItem;
@@ -1216,62 +1168,90 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     QString classifyMatchQuery = classifyQuery;
     classifyMatchQuery.replace(QLatin1Char('-'), QLatin1Char(' '));
 
-    for (const auto& hit : hits) {
-        auto itemOpt = m_store->getItemById(hit.fileId);
-        if (!itemOpt.has_value()) {
-            continue;
+    // Batch-fetch frequencies for all candidate items (replaces per-item getFrequency)
+    std::vector<int64_t> candidateItemIds;
+    candidateItemIds.reserve(hits.size());
+    {
+        std::unordered_set<int64_t> seen;
+        seen.reserve(hits.size());
+        for (const auto& hit : hits) {
+            if (seen.insert(hit.fileId).second) {
+                candidateItemIds.push_back(hit.fileId);
+            }
         }
+    }
+    const auto freqMap = m_store->getFrequenciesBatch(candidateItemIds);
 
-        const auto& item = itemOpt.value();
-        if (isExcludedByBsignore(item.path)) {
+    for (const auto& hit : hits) {
+        // Try hydrated cache first (populated by searchFts5Joined)
+        auto cachedIt = hydratedItemCache.find(hit.fileId);
+        if (cachedIt == hydratedItemCache.end()) {
+            // Fallback for items not in cache (e.g., name fallback hits)
+            auto itemOpt = m_store->getItemById(hit.fileId);
+            if (!itemOpt.has_value()) {
+                continue;
+            }
+            SQLiteStore::FtsJoinedHit jh;
+            jh.fileId = itemOpt->id;
+            jh.path = itemOpt->path;
+            jh.name = itemOpt->name;
+            jh.kind = itemOpt->kind;
+            jh.size = itemOpt->size;
+            jh.modifiedAt = itemOpt->modifiedAt;
+            jh.isPinned = itemOpt->isPinned;
+            cachedIt = hydratedItemCache.emplace(hit.fileId, std::move(jh)).first;
+        }
+        const auto& cachedItem = cachedIt->second;
+
+        if (isExcludedByBsignore(cachedItem.path)) {
             continue;
         }
 
         SearchResult sr;
-        sr.itemId = item.id;
-        sr.path = item.path;
-        sr.name = item.name;
-        sr.kind = item.kind;
+        sr.itemId = cachedItem.fileId;
+        sr.path = cachedItem.path;
+        sr.name = cachedItem.name;
+        sr.kind = cachedItem.kind;
         sr.bm25RawScore = hit.bm25Score;
         sr.snippet = hit.snippet;
         sr.highlights = parseHighlights(sr.snippet);
-        sr.fileSize = item.size;
+        sr.fileSize = cachedItem.size;
 
         // Format modification date as ISO 8601
-        if (item.modifiedAt > 0.0) {
+        if (cachedItem.modifiedAt > 0.0) {
             sr.modificationDate = QDateTime::fromMSecsSinceEpoch(
-                static_cast<qint64>(item.modifiedAt * 1000.0)).toUTC().toString(Qt::ISODate);
+                static_cast<qint64>(cachedItem.modifiedAt * 1000.0)).toUTC().toString(Qt::ISODate);
         }
 
-        sr.isPinned = item.isPinned;
+        sr.isPinned = cachedItem.isPinned;
 
-        // Query frequency data for this item
-        auto freqOpt = m_store->getFrequency(item.id);
-        if (freqOpt.has_value()) {
-            sr.openCount = freqOpt->openCount;
-            if (freqOpt->lastOpenedAt > 0.0) {
+        // Look up frequency from batch result
+        auto freqIt = freqMap.find(cachedItem.fileId);
+        if (freqIt != freqMap.end()) {
+            sr.openCount = freqIt->second.openCount;
+            if (freqIt->second.lastOpenedAt > 0.0) {
                 sr.lastOpenDate = QDateTime::fromMSecsSinceEpoch(
-                    static_cast<qint64>(freqOpt->lastOpenedAt * 1000.0))
+                    static_cast<qint64>(freqIt->second.lastOpenedAt * 1000.0))
                     .toUTC().toString(Qt::ISODate);
             }
         }
 
         // Classify match type for name/path matches
-        sr.matchType = MatchClassifier::classify(classifyMatchQuery, item.name, item.path);
+        sr.matchType = MatchClassifier::classify(classifyMatchQuery, cachedItem.name, cachedItem.path);
         if (sr.matchType == MatchType::Fuzzy) {
             if (hit.bm25Score == -1.0) {
                 // Fuzzy filename fallback does not expose exact edit distance yet.
                 sr.fuzzyDistance = 1;
             } else {
-                const QString baseName = QFileInfo(item.name).completeBaseName();
+                const QString baseName = QFileInfo(cachedItem.name).completeBaseName();
                 sr.fuzzyDistance = MatchClassifier::editDistance(classifyMatchQuery, baseName);
             }
         }
 
         const double lexicalStrength = std::max(0.0, -hit.bm25Score);
-        auto existingIt = bestHitByItem.find(item.id);
+        auto existingIt = bestHitByItem.find(cachedItem.fileId);
         if (existingIt == bestHitByItem.end()) {
-            bestHitByItem[item.id] = results.size();
+            bestHitByItem[cachedItem.fileId] = results.size();
             results.push_back(std::move(sr));
             continue;
         }
@@ -1800,6 +1780,39 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("rewriteReason")] = rewriteDecision.reason;
         debugInfo[QStringLiteral("plannerApplied")] = plannerApplied;
         debugInfo[QStringLiteral("plannerReason")] = plannerReason;
+
+        // Stage 0 structured query diagnostics
+        QJsonObject sqDebug;
+        sqDebug[QStringLiteral("cleanedQuery")] = structured.cleanedQuery;
+        sqDebug[QStringLiteral("nluConfidence")] = static_cast<double>(structured.nluConfidence);
+        if (structured.temporal) {
+            QJsonObject temporal;
+            temporal[QStringLiteral("startEpoch")] = structured.temporal->startEpoch;
+            temporal[QStringLiteral("endEpoch")] = structured.temporal->endEpoch;
+            sqDebug[QStringLiteral("temporal")] = temporal;
+        }
+        QJsonArray entitiesDebug;
+        for (const auto& e : structured.entities) {
+            QJsonObject ent;
+            ent[QStringLiteral("text")] = e.text;
+            ent[QStringLiteral("type")] = static_cast<int>(e.type);
+            entitiesDebug.append(ent);
+        }
+        sqDebug[QStringLiteral("entities")] = entitiesDebug;
+        if (structured.docTypeIntent) {
+            sqDebug[QStringLiteral("docTypeIntent")] = *structured.docTypeIntent;
+        }
+        QJsonArray locationHintsDebug;
+        for (const auto& loc : structured.locationHints) {
+            locationHintsDebug.append(loc);
+        }
+        sqDebug[QStringLiteral("locationHints")] = locationHintsDebug;
+        QJsonArray keyTokensDebug;
+        for (const auto& tok : structured.keyTokens) {
+            keyTokensDebug.append(tok);
+        }
+        sqDebug[QStringLiteral("keyTokens")] = keyTokensDebug;
+        debugInfo[QStringLiteral("structuredQuery")] = sqDebug;
         if (!rewrittenRelaxedQuery.isEmpty() && rewrittenRelaxedQuery != query) {
             debugInfo[QStringLiteral("rewrittenQuery")] = rewrittenRelaxedQuery;
         }

@@ -19,6 +19,7 @@ namespace bs {
 
 class EmbeddingManager;
 class EmbeddingPipeline;
+class ModelRegistry;
 class InteractionTracker;
 class FeedbackAggregator;
 class PathPreferences;
@@ -53,7 +54,7 @@ private:
     QJsonObject handleExportInteractionData(uint64_t id, const QJsonObject& params);
     QJsonObject handleRebuildVectorIndex(uint64_t id, const QJsonObject& params);
     void runVectorRebuildWorker(uint64_t runId, QString dbPath, QString dataDir,
-                                QString modelPath, QString vocabPath,
+                                QString modelsDir,
                                 QString indexPath, QString metaPath,
                                 QStringList includePaths);
 
@@ -67,6 +68,7 @@ private:
     std::unique_ptr<FeedbackAggregator> m_feedbackAggregator;
     std::unique_ptr<PathPreferences> m_pathPreferences;
     std::unique_ptr<TypeAffinity> m_typeAffinity;
+    std::unique_ptr<ModelRegistry> m_modelRegistry;
     std::unique_ptr<EmbeddingManager> m_embeddingManager;
     std::unique_ptr<VectorIndex> m_vectorIndex;
     std::unique_ptr<VectorStore> m_vectorStore;
@@ -110,8 +112,6 @@ private:
     QString m_dbPath;
     QString m_vectorIndexPath;
     QString m_vectorMetaPath;
-    QString m_embeddingModelPath;
-    QString m_embeddingVocabPath;
 
     // Opens the store if not already open. Returns true on success.
     bool ensureStoreOpen();

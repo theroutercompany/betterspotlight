@@ -1,7 +1,5 @@
 #pragma once
 
-#include "core/embedding/tokenizer.h"
-
 #include <QString>
 
 #include <memory>
@@ -9,9 +7,12 @@
 
 namespace bs {
 
+class ModelRegistry;
+class WordPieceTokenizer;
+
 class EmbeddingManager {
 public:
-    EmbeddingManager(const QString& modelPath, const QString& vocabPath);
+    explicit EmbeddingManager(ModelRegistry* registry);
     ~EmbeddingManager();
 
     EmbeddingManager(const EmbeddingManager&) = delete;
@@ -27,15 +28,15 @@ public:
     std::vector<std::vector<float>> embedBatch(const std::vector<QString>& texts);
 
 private:
-    static constexpr int kEmbeddingSize = 384;
-
     std::vector<float> normalizeEmbedding(std::vector<float> embedding) const;
 
     class Impl;
     std::unique_ptr<Impl> m_impl;
 
-    QString m_modelPath;
-    WordPieceTokenizer m_tokenizer;
+    ModelRegistry* m_registry = nullptr;
+    std::unique_ptr<WordPieceTokenizer> m_tokenizer;
+    int m_embeddingSize = 0;
+    QString m_queryPrefix;
     bool m_available = false;
 };
 

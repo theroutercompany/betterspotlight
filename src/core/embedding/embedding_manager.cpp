@@ -1,13 +1,16 @@
+#include "core/embedding/embedding_manager.h"
+#include "core/embedding/tokenizer.h"
+#include "core/models/model_registry.h"
+#include "core/models/model_session.h"
+#include "core/models/model_manifest.h"
+#include "core/models/tokenizer_factory.h"
+
 #include <QDebug>
-#include <QFile>
 
 #include <cmath>
 
-#include "core/embedding/embedding_manager.h"
-
 #if defined(ONNXRUNTIME_FOUND) && __has_include(<onnxruntime_cxx_api.h>)
 #define BS_WITH_ONNX 1
-#include <dlfcn.h>
 #include <onnxruntime_cxx_api.h>
 #else
 #define BS_WITH_ONNX 0
@@ -15,48 +18,17 @@
 
 namespace bs {
 
-namespace {
-
-const QString kBgeQueryPrefix = QStringLiteral(
-    "Represent this sentence for searching relevant passages: ");
-
-#if BS_WITH_ONNX
-constexpr uint32_t kCoreMlFlagUseCpuAndGpu = 0U;
-
-#ifdef ORT_COREML_FLAG_CREATE_MLPROGRAM
-constexpr uint32_t kCoreMlFlagCreateMlProgram = ORT_COREML_FLAG_CREATE_MLPROGRAM;
-#elif defined(COREML_FLAG_CREATE_MLPROGRAM)
-constexpr uint32_t kCoreMlFlagCreateMlProgram = COREML_FLAG_CREATE_MLPROGRAM;
-#else
-constexpr uint32_t kCoreMlFlagCreateMlProgram = 0U;
-#endif
-
-using AppendCoreMlProviderFn = OrtStatus* (*)(OrtSessionOptions* options, uint32_t coremlFlags);
-#endif
-
-#if BS_WITH_ONNX
-Ort::Env& ortEnvironment()
-{
-    static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "betterspotlight-embedding");
-    return env;
-}
-#endif
-
-} // anonymous namespace
-
 class EmbeddingManager::Impl {
 public:
 #if BS_WITH_ONNX
-    Ort::SessionOptions sessionOptions;
-    std::unique_ptr<Ort::Session> session;
+    Ort::Session* session = nullptr;  // Borrowed from ModelSession — NOT owned
     std::string outputName;
 #endif
 };
 
-EmbeddingManager::EmbeddingManager(const QString& modelPath, const QString& vocabPath)
+EmbeddingManager::EmbeddingManager(ModelRegistry* registry)
     : m_impl(std::make_unique<Impl>())
-    , m_modelPath(modelPath)
-    , m_tokenizer(vocabPath)
+    , m_registry(registry)
 {
 }
 
@@ -65,90 +37,54 @@ EmbeddingManager::~EmbeddingManager() = default;
 bool EmbeddingManager::initialize()
 {
 #if BS_WITH_ONNX
-    if (!m_tokenizer.isLoaded()) {
-        qWarning() << "EmbeddingManager initialize failed: tokenizer vocab not loaded";
+    if (!m_registry) {
+        qWarning() << "EmbeddingManager initialize failed: null registry";
         m_available = false;
         return false;
     }
 
-    if (m_modelPath.isEmpty() || !QFile::exists(m_modelPath)) {
-        qWarning() << "EmbeddingManager initialize failed: model file missing at" << m_modelPath;
+    ModelSession* modelSession = m_registry->getSession("bi-encoder");
+    if (!modelSession || !modelSession->isAvailable()) {
+        qWarning() << "EmbeddingManager initialize failed: bi-encoder session unavailable";
         m_available = false;
         return false;
     }
 
-    try {
-        m_impl->sessionOptions.SetIntraOpNumThreads(2);
-        m_impl->sessionOptions.SetInterOpNumThreads(1);
-        m_impl->sessionOptions.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
-        m_impl->sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    const ModelManifestEntry& entry = modelSession->manifest();
 
-        const uint32_t coremlFlags = kCoreMlFlagUseCpuAndGpu | kCoreMlFlagCreateMlProgram;
-        AppendCoreMlProviderFn appendCoreMlProvider = reinterpret_cast<AppendCoreMlProviderFn>(
-            dlsym(RTLD_DEFAULT, "OrtSessionOptionsAppendExecutionProvider_CoreML"));
-        if (appendCoreMlProvider != nullptr) {
-            OrtSessionOptions* rawOptions = m_impl->sessionOptions;
-            OrtStatus* coremlStatus = appendCoreMlProvider(rawOptions, coremlFlags);
-            if (coremlStatus != nullptr) {
-                const OrtApi& api = Ort::GetApi();
-                qWarning() << "CoreML EP unavailable, falling back to CPU:"
-                           << api.GetErrorMessage(coremlStatus);
-                api.ReleaseStatus(coremlStatus);
-            }
-        } else {
-            qWarning() << "CoreML EP symbol not found, using CPU provider";
-        }
-
-        m_impl->session = std::make_unique<Ort::Session>(
-            ortEnvironment(), m_modelPath.toUtf8().constData(), m_impl->sessionOptions);
-
-        const size_t inputCount = m_impl->session->GetInputCount();
-        const size_t outputCount = m_impl->session->GetOutputCount();
-        if (inputCount < 3 || outputCount < 1) {
-            qWarning() << "EmbeddingManager initialize failed: unexpected model IO counts"
-                       << inputCount << outputCount;
-            m_impl->session.reset();
-            m_available = false;
-            return false;
-        }
-
-        Ort::AllocatorWithDefaultOptions allocator;
-        bool sawInputIds = false;
-        bool sawAttentionMask = false;
-        bool sawTokenTypeIds = false;
-
-        for (size_t i = 0; i < inputCount; ++i) {
-            Ort::AllocatedStringPtr inputName = m_impl->session->GetInputNameAllocated(i, allocator);
-            const std::string name = inputName.get() ? inputName.get() : "";
-            sawInputIds = sawInputIds || (name == "input_ids");
-            sawAttentionMask = sawAttentionMask || (name == "attention_mask");
-            sawTokenTypeIds = sawTokenTypeIds || (name == "token_type_ids");
-        }
-
-        if (!sawInputIds || !sawAttentionMask || !sawTokenTypeIds) {
-            qWarning() << "EmbeddingManager initialize failed: required inputs missing";
-            m_impl->session.reset();
-            m_available = false;
-            return false;
-        }
-
-        Ort::AllocatedStringPtr outputName = m_impl->session->GetOutputNameAllocated(0, allocator);
-        if (!outputName || outputName.get()[0] == '\0') {
-            qWarning() << "EmbeddingManager initialize failed: model output name missing";
-            m_impl->session.reset();
-            m_available = false;
-            return false;
-        }
-        m_impl->outputName = outputName.get();
-
-        m_available = true;
-        return true;
-    } catch (const Ort::Exception& ex) {
-        qWarning() << "EmbeddingManager initialize failed:" << ex.what();
+    m_tokenizer = TokenizerFactory::create(entry, m_registry->modelsDir());
+    if (!m_tokenizer || !m_tokenizer->isLoaded()) {
+        qWarning() << "EmbeddingManager initialize failed: tokenizer creation failed";
+        m_available = false;
+        return false;
     }
 
-    m_available = false;
-    return false;
+    m_embeddingSize = entry.dimensions;
+    if (m_embeddingSize <= 0) {
+        qWarning() << "EmbeddingManager initialize failed: invalid dimensions" << m_embeddingSize;
+        m_available = false;
+        return false;
+    }
+
+    m_queryPrefix = entry.queryPrefix;
+
+    m_impl->session = static_cast<Ort::Session*>(modelSession->rawSession());
+    if (!m_impl->session) {
+        qWarning() << "EmbeddingManager initialize failed: null ONNX session";
+        m_available = false;
+        return false;
+    }
+
+    const auto& outputNames = modelSession->outputNames();
+    if (outputNames.empty()) {
+        qWarning() << "EmbeddingManager initialize failed: no output names";
+        m_available = false;
+        return false;
+    }
+    m_impl->outputName = outputNames.front();
+
+    m_available = true;
+    return true;
 #else
     qWarning() << "EmbeddingManager initialize skipped: ONNX Runtime not enabled";
     m_available = false;
@@ -190,17 +126,17 @@ std::vector<float> EmbeddingManager::embed(const QString& text)
 
 std::vector<float> EmbeddingManager::embedQuery(const QString& text)
 {
-    return embed(kBgeQueryPrefix + text);
+    return embed(m_queryPrefix + text);
 }
 
 std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<QString>& texts)
 {
 #if BS_WITH_ONNX
-    if (!m_available || !m_impl->session || texts.empty()) {
+    if (!m_available || !m_impl->session || !m_tokenizer || texts.empty()) {
         return {};
     }
 
-    const BatchTokenizerOutput tokenized = m_tokenizer.tokenizeBatch(texts);
+    const BatchTokenizerOutput tokenized = m_tokenizer->tokenizeBatch(texts);
     if (tokenized.batchSize <= 0 || tokenized.seqLength <= 0) {
         return {};
     }
@@ -271,11 +207,11 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
         std::vector<std::vector<float>> embeddings;
         embeddings.reserve(static_cast<size_t>(tokenized.batchSize));
 
-        if (shape.size() == 2 && shape[0] == tokenized.batchSize && shape[1] == kEmbeddingSize) {
+        if (shape.size() == 2 && shape[0] == tokenized.batchSize && shape[1] == m_embeddingSize) {
             for (int i = 0; i < tokenized.batchSize; ++i) {
-                std::vector<float> embedding(static_cast<size_t>(kEmbeddingSize));
-                const float* row = data + static_cast<size_t>(i * kEmbeddingSize);
-                for (int j = 0; j < kEmbeddingSize; ++j) {
+                std::vector<float> embedding(static_cast<size_t>(m_embeddingSize));
+                const float* row = data + static_cast<size_t>(i * m_embeddingSize);
+                for (int j = 0; j < m_embeddingSize; ++j) {
                     embedding[static_cast<size_t>(j)] = row[static_cast<size_t>(j)];
                 }
                 embeddings.push_back(normalizeEmbedding(std::move(embedding)));
@@ -284,13 +220,13 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
         }
 
         if (shape.size() == 3 && shape[0] == tokenized.batchSize
-            && shape[2] == kEmbeddingSize && shape[1] >= 1) {
+            && shape[2] == m_embeddingSize && shape[1] >= 1) {
             const int64_t seqLen = shape[1];
             const int64_t hidden = shape[2];
             for (int i = 0; i < tokenized.batchSize; ++i) {
-                std::vector<float> embedding(static_cast<size_t>(kEmbeddingSize));
+                std::vector<float> embedding(static_cast<size_t>(m_embeddingSize));
                 const float* cls = data + static_cast<size_t>(i * seqLen * hidden);
-                for (int j = 0; j < kEmbeddingSize; ++j) {
+                for (int j = 0; j < m_embeddingSize; ++j) {
                     embedding[static_cast<size_t>(j)] = cls[static_cast<size_t>(j)];
                 }
                 embeddings.push_back(normalizeEmbedding(std::move(embedding)));

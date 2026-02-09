@@ -7,6 +7,9 @@ add_subdirectory(ipc)
 add_subdirectory(ranking)
 add_subdirectory(indexing)
 
+# M3: Model registry (manifest + session + tokenizer factory)
+add_subdirectory(models)
+
 # M2 modules (embedding, vector search, feedback)
 if(BETTERSPOTLIGHT_WITH_ONNX)
     add_subdirectory(embedding)
@@ -20,6 +23,11 @@ add_library(betterspotlight-core STATIC
     index/typo_lexicon.cpp
     query/query_normalizer.cpp
     query/query_parser.cpp
+    query/temporal_parser.cpp
+    query/entity_extractor.cpp
+    query/doctype_classifier.cpp
+    query/rules_engine.cpp
+    query/stopwords.cpp
 )
 
 target_include_directories(betterspotlight-core PUBLIC
@@ -34,6 +42,7 @@ target_link_libraries(betterspotlight-core PUBLIC
     betterspotlight-core-ranking
     betterspotlight-core-indexing
     betterspotlight-core-feedback
+    betterspotlight-core-models
     sqlite3
     Qt6::Core
 )

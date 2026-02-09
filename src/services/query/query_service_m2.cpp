@@ -7,6 +7,7 @@
 #include "core/ipc/message.h"
 #include "core/shared/logging.h"
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 #include "core/vector/vector_index.h"
 #include "core/vector/vector_store.h"
 
@@ -207,7 +208,7 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
                                      QStringLiteral("Vector store is not initialized"));
     }
 
-    if (m_dbPath.isEmpty() || m_embeddingModelPath.isEmpty() || m_embeddingVocabPath.isEmpty()) {
+    if (m_dbPath.isEmpty() || !m_modelRegistry) {
         return IpcMessage::makeError(id, IpcErrorCode::InternalError,
                                      QStringLiteral("Vector rebuild is not configured"));
     }
@@ -253,7 +254,7 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
     joinVectorRebuildThread();
     m_vectorRebuildThread = std::thread(
         &QueryService::runVectorRebuildWorker, this, runId, m_dbPath, m_dataDir,
-        m_embeddingModelPath, m_embeddingVocabPath, m_vectorIndexPath, m_vectorMetaPath,
+        m_modelRegistry->modelsDir(), m_vectorIndexPath, m_vectorMetaPath,
         includePaths);
 
     QJsonObject result;
@@ -267,8 +268,7 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
 void QueryService::runVectorRebuildWorker(uint64_t runId,
                                           QString dbPath,
                                           QString dataDir,
-                                          QString modelPath,
-                                          QString vocabPath,
+                                          QString modelsDir,
                                           QString indexPath,
                                           QString metaPath,
                                           QStringList includePaths)
@@ -348,7 +348,8 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     }
     sqlite3_busy_timeout(db, 5000);
 
-    EmbeddingManager workerEmbeddingManager(modelPath, vocabPath);
+    ModelRegistry workerRegistry(modelsDir);
+    EmbeddingManager workerEmbeddingManager(&workerRegistry);
     if (!workerEmbeddingManager.initialize()) {
         updateFailedState(QStringLiteral("Embedding model is unavailable"));
         closeResources();
