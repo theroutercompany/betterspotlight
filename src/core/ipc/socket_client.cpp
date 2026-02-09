@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTimer>
 
 namespace bs {
 
@@ -140,6 +141,13 @@ void SocketClient::onReadyRead()
 {
     m_readBuffer.append(m_socket->readAll());
 
+    if (m_readBuffer.size() > kMaxReadBufferSize) {
+        qCCritical(bsIpc, "Read buffer exceeded %d bytes, disconnecting", kMaxReadBufferSize);
+        m_readBuffer.clear();
+        m_socket->disconnectFromServer();
+        return;
+    }
+
     while (true) {
         auto result = IpcMessage::decode(m_readBuffer);
         if (!result) break;
@@ -188,6 +196,63 @@ void SocketClient::onDisconnected()
     }
 
     emit disconnected();
+
+    // Attempt auto-reconnect if enabled
+    if (m_autoReconnectEnabled) {
+        m_reconnectAttempt = 0;
+        attemptReconnect();
+    }
+}
+
+void SocketClient::enableAutoReconnect(const QString& socketPath,
+                                        int maxAttempts,
+                                        int baseDelayMs)
+{
+    m_autoReconnectEnabled = true;
+    m_reconnectSocketPath = socketPath;
+    m_reconnectMaxAttempts = maxAttempts;
+    m_reconnectBaseDelayMs = baseDelayMs;
+    m_reconnectAttempt = 0;
+}
+
+void SocketClient::disableAutoReconnect()
+{
+    m_autoReconnectEnabled = false;
+    m_reconnectAttempt = 0;
+}
+
+void SocketClient::attemptReconnect()
+{
+    if (!m_autoReconnectEnabled) return;
+
+    if (m_reconnectAttempt >= m_reconnectMaxAttempts) {
+        qCWarning(bsIpc, "Auto-reconnect exhausted %d attempts for %s",
+                  m_reconnectMaxAttempts, qPrintable(m_reconnectSocketPath));
+        emit errorOccurred(QStringLiteral("Auto-reconnect failed after %1 attempts")
+                               .arg(m_reconnectMaxAttempts));
+        return;
+    }
+
+    // Exponential backoff: base * 2^attempt (500ms, 1s, 2s, 4s, 8s)
+    int delay = m_reconnectBaseDelayMs * (1 << m_reconnectAttempt);
+    ++m_reconnectAttempt;
+
+    qCInfo(bsIpc, "Auto-reconnect attempt %d/%d in %dms for %s",
+           m_reconnectAttempt, m_reconnectMaxAttempts, delay,
+           qPrintable(m_reconnectSocketPath));
+
+    QTimer::singleShot(delay, this, [this]() {
+        if (!m_autoReconnectEnabled) return;
+        if (isConnected()) return;
+
+        if (connectToServer(m_reconnectSocketPath, 3000)) {
+            qCInfo(bsIpc, "Auto-reconnect succeeded on attempt %d", m_reconnectAttempt);
+            m_reconnectAttempt = 0;
+            emit reconnected();
+        } else {
+            attemptReconnect();
+        }
+    });
 }
 
 } // namespace bs

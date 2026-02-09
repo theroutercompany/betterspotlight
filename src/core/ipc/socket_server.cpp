@@ -109,6 +109,18 @@ void SocketServer::onClientReadyRead()
     if (!client) return;
 
     m_readBuffers[client].append(client->readAll());
+
+    if (m_readBuffers[client].size() > kMaxReadBufferSize) {
+        qCCritical(bsIpc, "Client read buffer exceeded %d bytes, disconnecting client",
+                   kMaxReadBufferSize);
+        m_readBuffers.remove(client);
+        m_clients.removeOne(client);
+        client->disconnectFromServer();
+        client->deleteLater();
+        emit clientDisconnected();
+        return;
+    }
+
     processBuffer(client);
 }
 

@@ -195,6 +195,21 @@ void Supervisor::heartbeat()
     bool allReady = true;
     bool anyChanged = false;
 
+    // Reset crash counter for services that have been stable since being blacklisted
+    {
+        const int64_t now = QDateTime::currentSecsSinceEpoch();
+        for (auto& svc : m_services) {
+            if (svc->info.crashCount >= kMaxCrashesBeforeGiveUp
+                && now - svc->info.lastCrashTime > kCrashWindowSeconds * 2) {
+                qCInfo(bsIpc, "Resetting crash counter for '%s' (stable for %llds)",
+                       qPrintable(svc->info.name), now - svc->info.lastCrashTime);
+                svc->info.crashCount = 0;
+                svc->info.firstCrashTime = 0;
+                restartService(*svc);
+            }
+        }
+    }
+
     for (auto& svc : m_services) {
         if (!svc->process || svc->process->state() != QProcess::Running) {
             allReady = false;

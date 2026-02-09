@@ -211,6 +211,13 @@ public:
     // Returns true if database passes PRAGMA integrity_check
     bool integrityCheck() const;
 
+    // Returns true if the FTS5 index passes integrity verification.
+    // Runs: INSERT INTO search_index(search_index) VALUES('integrity-check')
+    bool fts5IntegrityCheck() const;
+
+    // Force a WAL checkpoint (PASSIVE mode — does not block readers).
+    bool walCheckpoint();
+
     // Raw handle for tests
     sqlite3* rawDb() const { return m_db; }
 

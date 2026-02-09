@@ -12,6 +12,8 @@ namespace bs {
 class SocketServer : public QObject {
     Q_OBJECT
 public:
+    static constexpr int kMaxReadBufferSize = 64 * 1024 * 1024; // 64 MB
+
     explicit SocketServer(QObject* parent = nullptr);
     ~SocketServer() override;
 

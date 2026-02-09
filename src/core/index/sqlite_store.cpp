@@ -15,6 +15,22 @@
 
 namespace bs {
 
+// Retry sqlite3_step() up to maxAttempts times on SQLITE_BUSY.
+// Uses linear backoff: 50ms, 100ms, 150ms, 200ms.
+// Returns the final sqlite3 result code.
+static int stepWithRetry(sqlite3_stmt* stmt, int maxAttempts = 5)
+{
+    int rc = SQLITE_BUSY;
+    for (int attempt = 0; attempt < maxAttempts && rc == SQLITE_BUSY; ++attempt) {
+        if (attempt > 0) {
+            sqlite3_reset(stmt);
+            QThread::msleep(static_cast<unsigned long>(50 * attempt));  // 50, 100, 150, 200 ms
+        }
+        rc = sqlite3_step(stmt);
+    }
+    return rc;
+}
+
 SQLiteStore::~SQLiteStore()
 {
     if (m_db) {
@@ -209,18 +225,7 @@ std::optional<int64_t> SQLiteStore::upsertItem(
         sqlite3_bind_text(stmt, 11, parentUtf8.constData(), -1, SQLITE_STATIC);
     }
 
-    // Retry loop: sqlite3_busy_timeout's handler is NOT invoked when SQLite
-    // detects a potential WAL deadlock (e.g. reader snapshot + writer conflict
-    // during auto-checkpoint).  In that case sqlite3_step() returns SQLITE_BUSY
-    // immediately, so we retry at the application level.
-    int rc = SQLITE_BUSY;
-    for (int attempt = 0; attempt < 5 && rc == SQLITE_BUSY; ++attempt) {
-        if (attempt > 0) {
-            sqlite3_reset(stmt);
-            QThread::msleep(50 * attempt);  // 50, 100, 150, 200 ms
-        }
-        rc = sqlite3_step(stmt);
-    }
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
@@ -249,7 +254,7 @@ bool SQLiteStore::deleteItemByPath(const QString& path)
         sqlite3_prepare_v2(m_db, fts, -1, &stmt, nullptr);
         const QByteArray pathUtf8 = path.toUtf8();
         sqlite3_bind_text(stmt, 1, pathUtf8.constData(), -1, SQLITE_STATIC);
-        sqlite3_step(stmt);
+        stepWithRetry(stmt);
         sqlite3_finalize(stmt);
     }
 
@@ -259,7 +264,7 @@ bool SQLiteStore::deleteItemByPath(const QString& path)
     sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
     const QByteArray pathUtf8 = path.toUtf8();
     sqlite3_bind_text(stmt, 1, pathUtf8.constData(), -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -274,7 +279,7 @@ bool SQLiteStore::updateContentHash(int64_t itemId, const QString& contentHash)
     const QByteArray hashUtf8 = contentHash.toUtf8();
     sqlite3_bind_text(stmt, 1, hashUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_int64(stmt, 2, itemId);
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -408,7 +413,7 @@ bool SQLiteStore::insertChunks(
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
         sqlite3_bind_int64(stmt, 1, itemId);
-        sqlite3_step(stmt);
+        stepWithRetry(stmt);
         sqlite3_finalize(stmt);
     }
 
@@ -418,7 +423,7 @@ bool SQLiteStore::insertChunks(
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
         sqlite3_bind_int64(stmt, 1, itemId);
-        sqlite3_step(stmt);
+        stepWithRetry(stmt);
         sqlite3_finalize(stmt);
     }
 
@@ -452,7 +457,7 @@ bool SQLiteStore::insertChunks(
             sqlite3_bind_int(stmt, 2, chunk.chunkIndex);
             sqlite3_bind_text(stmt, 3, textUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 4, hashUtf8.constData(), -1, SQLITE_STATIC);
-            int rc = sqlite3_step(stmt);
+            int rc = stepWithRetry(stmt);
             sqlite3_finalize(stmt);
             if (rc != SQLITE_DONE) {
                 LOG_ERROR(bsIndex, "content insert failed: %s", sqlite3_errmsg(m_db));
@@ -476,7 +481,7 @@ bool SQLiteStore::insertChunks(
             sqlite3_bind_text(stmt, 3, textUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 4, hashUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_int64(stmt, 5, itemId);
-            int rc = sqlite3_step(stmt);
+            int rc = stepWithRetry(stmt);
             sqlite3_finalize(stmt);
             if (rc != SQLITE_DONE) {
                 LOG_ERROR(bsIndex, "CRITICAL: FTS5 insert failed: %s", sqlite3_errmsg(m_db));
@@ -498,7 +503,7 @@ bool SQLiteStore::deleteChunksForItem(int64_t itemId, const QString& filePath)
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
         sqlite3_bind_int64(stmt, 1, itemId);
-        sqlite3_step(stmt);
+        stepWithRetry(stmt);
         sqlite3_finalize(stmt);
     }
     // Delete content rows (could also cascade from item delete)
@@ -507,7 +512,7 @@ bool SQLiteStore::deleteChunksForItem(int64_t itemId, const QString& filePath)
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
         sqlite3_bind_int64(stmt, 1, itemId);
-        sqlite3_step(stmt);
+        stepWithRetry(stmt);
         sqlite3_finalize(stmt);
     }
     Q_UNUSED(filePath);
@@ -1006,7 +1011,7 @@ bool SQLiteStore::recordFailure(int64_t itemId, const QString& stage,
     sqlite3_bind_text(stmt, 3, errUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_double(stmt, 4, now);
 
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -1017,7 +1022,7 @@ bool SQLiteStore::clearFailures(int64_t itemId)
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
     sqlite3_bind_int64(stmt, 1, itemId);
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -1048,7 +1053,7 @@ bool SQLiteStore::recordFeedback(int64_t itemId, const QString& action,
     sqlite3_bind_int(stmt, 4, position);
     sqlite3_bind_double(stmt, 5, now);
 
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
@@ -1080,7 +1085,7 @@ bool SQLiteStore::incrementFrequency(int64_t itemId)
     sqlite3_bind_int64(stmt, 1, itemId);
     sqlite3_bind_double(stmt, 2, now);
 
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -1396,7 +1401,7 @@ bool SQLiteStore::setSetting(const QString& key, const QString& value)
     const QByteArray valUtf8 = value.toUtf8();
     sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, valUtf8.constData(), -1, SQLITE_STATIC);
-    int rc = sqlite3_step(stmt);
+    int rc = stepWithRetry(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
 }
@@ -1657,6 +1662,44 @@ bool SQLiteStore::integrityCheck() const
     }
     sqlite3_finalize(stmt);
     return ok;
+}
+
+bool SQLiteStore::fts5IntegrityCheck() const
+{
+    if (!m_db) return false;
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(
+        m_db,
+        "INSERT INTO search_index(search_index) VALUES('integrity-check')",
+        -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "fts5IntegrityCheck prepare failed: %s", sqlite3_errmsg(m_db));
+        return false;
+    }
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR(bsIndex, "FTS5 integrity check failed: %s", sqlite3_errmsg(m_db));
+        return false;
+    }
+    return true;
+}
+
+bool SQLiteStore::walCheckpoint()
+{
+    if (!m_db) return false;
+
+    int walSize = 0;
+    int checkpointed = 0;
+    int rc = sqlite3_wal_checkpoint_v2(
+        m_db, nullptr, SQLITE_CHECKPOINT_PASSIVE, &walSize, &checkpointed);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "WAL checkpoint failed: %s", sqlite3_errmsg(m_db));
+        return false;
+    }
+    LOG_DEBUG(bsIndex, "WAL checkpoint: %d/%d pages checkpointed", checkpointed, walSize);
+    return true;
 }
 
 } // namespace bs
