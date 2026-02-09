@@ -1,0 +1,431 @@
+{
+  "version": 1,
+  "description": "UI simulation query suite - 53 relevance test cases",
+  "gatePassRate": 80.0,
+  "cases": [
+    {
+      "id": "E01",
+      "category": "exact",
+      "query": "is there any traces of using embedding model to im",
+      "mode": "auto",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 1
+    },
+    {
+      "id": "E02",
+      "category": "exact",
+      "query": "2022 Summer Travel Cost Accommodation",
+      "mode": "auto",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E03",
+      "category": "exact",
+      "query": "Breaking the Sound Barrier",
+      "mode": "auto",
+      "expectedFileName": "Breaking the Sound Barrier.docx",
+      "topN": 1
+    },
+    {
+      "id": "E04",
+      "category": "exact",
+      "query": "Breaking the Sound Barrier Transformation",
+      "mode": "auto",
+      "expectedFileName": "Breaking the Sound Barrier Transformation.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E05",
+      "category": "exact",
+      "query": "credit report",
+      "mode": "auto",
+      "expectedFileName": "credit report.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E06",
+      "category": "exact",
+      "query": "How do senior engineers spot human written code fr",
+      "mode": "auto",
+      "expectedFileName": "How do senior engineers spot human written code fr.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E07",
+      "category": "exact",
+      "query": "Notice of Articles Explained",
+      "mode": "auto",
+      "expectedFileName": "Notice of Articles Explained.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E08",
+      "category": "exact",
+      "query": "Print Report OnWaterlooRegionalPs",
+      "mode": "auto",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E09",
+      "category": "exact",
+      "query": "known issues with coinbase commerce payments as a",
+      "mode": "auto",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E10",
+      "category": "exact",
+      "query": "how do you register as a non profit then in ontari",
+      "mode": "auto",
+      "expectedFileName": "how do you register as a non profit then in ontari.pdf",
+      "topN": 1
+    },
+    {
+      "id": "E11",
+      "category": "exact",
+      "query": "Feature TraditionalAIAgentApproach SteinbergersOpenClawApproach",
+      "mode": "auto",
+      "expectedFileName": "Feature-TraditionalAIAgentApproach-SteinbergersOpenClawApproach.csv",
+      "topN": 1
+    },
+    {
+      "id": "E12",
+      "category": "exact",
+      "query": "coverage",
+      "mode": "auto",
+      "expectedFileName": "coverage.txt",
+      "topN": 1
+    },
+    {
+      "id": "TA01",
+      "category": "typo_auto",
+      "query": "is there any traces of using emebdding model to im",
+      "mode": "auto",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 3
+    },
+    {
+      "id": "TS01",
+      "category": "typo_strict",
+      "query": "is there any traces of using emebdding model to im",
+      "mode": "strict",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 3
+    },
+    {
+      "id": "TA02",
+      "category": "typo_auto",
+      "query": "2022 Summer Travel Cost Acocmmodation",
+      "mode": "auto",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS02",
+      "category": "typo_strict",
+      "query": "2022 Summer Travel Cost Acocmmodation",
+      "mode": "strict",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA03",
+      "category": "typo_auto",
+      "query": "Braeking the Sound Barrier",
+      "mode": "auto",
+      "expectedFileName": "Breaking the Sound Barrier.docx",
+      "topN": 3
+    },
+    {
+      "id": "TS03",
+      "category": "typo_strict",
+      "query": "Braeking the Sound Barrier",
+      "mode": "strict",
+      "expectedFileName": "Breaking the Sound Barrier.docx",
+      "topN": 3
+    },
+    {
+      "id": "TA04",
+      "category": "typo_auto",
+      "query": "Breaking the Sound Barrier Trnasformation",
+      "mode": "auto",
+      "expectedFileName": "Breaking the Sound Barrier Transformation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS04",
+      "category": "typo_strict",
+      "query": "Breaking the Sound Barrier Trnasformation",
+      "mode": "strict",
+      "expectedFileName": "Breaking the Sound Barrier Transformation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA05",
+      "category": "typo_auto",
+      "query": "crdeit report",
+      "mode": "auto",
+      "expectedFileName": "credit report.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS05",
+      "category": "typo_strict",
+      "query": "crdeit report",
+      "mode": "strict",
+      "expectedFileName": "credit report.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA06",
+      "category": "typo_auto",
+      "query": "How do senior enigneers spot human written code fr",
+      "mode": "auto",
+      "expectedFileName": "How do senior engineers spot human written code fr.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS06",
+      "category": "typo_strict",
+      "query": "How do senior enigneers spot human written code fr",
+      "mode": "strict",
+      "expectedFileName": "How do senior engineers spot human written code fr.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA07",
+      "category": "typo_auto",
+      "query": "Notice of Articles Exlpained",
+      "mode": "auto",
+      "expectedFileName": "Notice of Articles Explained.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS07",
+      "category": "typo_strict",
+      "query": "Notice of Articles Exlpained",
+      "mode": "strict",
+      "expectedFileName": "Notice of Articles Explained.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA08",
+      "category": "typo_auto",
+      "query": "Print Report OnaWterlooRegionalPs",
+      "mode": "auto",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS08",
+      "category": "typo_strict",
+      "query": "Print Report OnaWterlooRegionalPs",
+      "mode": "strict",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA09",
+      "category": "typo_auto",
+      "query": "known issues with conibase commerce payments as a",
+      "mode": "auto",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS09",
+      "category": "typo_strict",
+      "query": "known issues with conibase commerce payments as a",
+      "mode": "strict",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TA10",
+      "category": "typo_auto",
+      "query": "how do you reigster as a non profit then in ontari",
+      "mode": "auto",
+      "expectedFileName": "how do you register as a non profit then in ontari.pdf",
+      "topN": 3
+    },
+    {
+      "id": "TS10",
+      "category": "typo_strict",
+      "query": "how do you reigster as a non profit then in ontari",
+      "mode": "strict",
+      "expectedFileName": "how do you register as a non profit then in ontari.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P01",
+      "category": "phrase",
+      "query": "img src https r2cdn perplexity pplx",
+      "mode": "auto",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 3
+    },
+    {
+      "id": "P02",
+      "category": "phrase",
+      "query": "Page Check date Check out date",
+      "mode": "auto",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P03",
+      "category": "phrase",
+      "query": "Page How senior engineers spot human",
+      "mode": "auto",
+      "expectedFileName": "How do senior engineers spot human written code fr.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P04",
+      "category": "phrase",
+      "query": "Page Notice Articles Explained Notice Articles",
+      "mode": "auto",
+      "expectedFileName": "Notice of Articles Explained.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P05",
+      "category": "phrase",
+      "query": "Page Print Report OnWaterlooRegionalPs Waterloo Regional",
+      "mode": "auto",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P06",
+      "category": "phrase",
+      "query": "Page known issues with coinbase commerce",
+      "mode": "auto",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P07",
+      "category": "phrase",
+      "query": "Page how you register non profit",
+      "mode": "auto",
+      "expectedFileName": "how do you register as a non profit then in ontari.pdf",
+      "topN": 3
+    },
+    {
+      "id": "P08",
+      "category": "phrase",
+      "query": "Feature Traditional Agent Approach Steinberger's OpenClaw",
+      "mode": "auto",
+      "expectedFileName": "Feature-TraditionalAIAgentApproach-SteinbergersOpenClawApproach.csv",
+      "topN": 3
+    },
+    {
+      "id": "S01",
+      "category": "semantic_probe",
+      "query": "summer trip accommodation expenses",
+      "mode": "auto",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "S02",
+      "category": "semantic_probe",
+      "query": "embedding model traces integration",
+      "mode": "auto",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 3
+    },
+    {
+      "id": "S03",
+      "category": "semantic_probe",
+      "query": "waterloo regional school report",
+      "mode": "auto",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 3
+    },
+    {
+      "id": "S04",
+      "category": "semantic_probe",
+      "query": "coinbase commerce payment issues",
+      "mode": "auto",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 3
+    },
+    {
+      "id": "S05",
+      "category": "semantic_probe",
+      "query": "charity organization registration ontario",
+      "mode": "auto",
+      "expectedFileName": "how to register as a charity organization in ontar.pdf",
+      "topN": 3
+    },
+    {
+      "id": "S06",
+      "category": "semantic_probe",
+      "query": "human written code spotting by senior engineers",
+      "mode": "auto",
+      "expectedFileName": "How do senior engineers spot human written code fr.pdf",
+      "topN": 3
+    },
+    {
+      "id": "S07",
+      "category": "semantic_probe",
+      "query": "credit report may 9th",
+      "mode": "auto",
+      "expectedFileName": "CleanShot 2026-02-07 at 22.56.45@2x.png",
+      "topN": 3
+    },
+    {
+      "id": "S08",
+      "category": "semantic_probe",
+      "query": "breaking the sound barrier document",
+      "mode": "auto",
+      "expectedFileName": "audit.jsonl",
+      "topN": 3
+    },
+    {
+      "id": "N01",
+      "category": "noise",
+      "query": "   BREAKING!!! sound---barrier??? docx   ",
+      "mode": "auto",
+      "expectedFileName": "Breaking the Sound Barrier.docx",
+      "topN": 3
+    },
+    {
+      "id": "N02",
+      "category": "noise",
+      "query": "\"coinbase\"   commerce   payments    issues",
+      "mode": "auto",
+      "expectedFileName": "known issues with coinbase commerce payments as a.pdf",
+      "topN": 3
+    },
+    {
+      "id": "N03",
+      "category": "noise",
+      "query": "travel cost accommodation $$$ receipt",
+      "mode": "auto",
+      "expectedFileName": "2022 Summer Travel Cost - Accommodation.pdf",
+      "topN": 3
+    },
+    {
+      "id": "N04",
+      "category": "noise",
+      "query": "ON WATERLOO REGIONAL PS REPORT",
+      "mode": "auto",
+      "expectedFileName": "Print Report - OnWaterlooRegionalPs.pdf",
+      "topN": 3
+    },
+    {
+      "id": "N05",
+      "category": "noise",
+      "query": "embedding   modelll trcaes",
+      "mode": "auto",
+      "expectedFileName": "is there any traces of using embedding model to im.md",
+      "topN": 3
+    }
+  ]
+}
