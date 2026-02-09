@@ -10,6 +10,7 @@ namespace bs {
 // When all fields are empty/unset, no filtering is applied.
 struct SearchOptions {
     std::vector<QString> fileTypes;      // Extensions to include (e.g. "pdf", "docx")
+    std::vector<QString> includePaths;   // Path prefixes that results must match
     std::vector<QString> excludePaths;   // Path prefixes to exclude
 
     std::optional<double> modifiedAfter;  // Epoch seconds — results modified after this time
@@ -22,6 +23,7 @@ struct SearchOptions {
     bool hasFilters() const
     {
         return !fileTypes.empty()
+            || !includePaths.empty()
             || !excludePaths.empty()
             || modifiedAfter.has_value()
             || modifiedBefore.has_value()

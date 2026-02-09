@@ -139,15 +139,33 @@ void OnboardingController::saveHomeMap(const QVariantList& directories)
     auto settings = readSettings();
 
     QJsonArray homeMap;
+    QJsonArray indexRoots;
+    const QString home = QDir::homePath();
     for (const auto& entry : directories) {
         auto map = entry.toMap();
+        const QString name = map.value(QStringLiteral("name")).toString().trimmed();
+        const QString mode = map.value(QStringLiteral("mode")).toString();
+        if (name.isEmpty()) {
+            continue;
+        }
+
         QJsonObject dirObj;
-        dirObj[QStringLiteral("name")] = map.value(QStringLiteral("name")).toString();
-        dirObj[QStringLiteral("mode")] = map.value(QStringLiteral("mode")).toString();
+        dirObj[QStringLiteral("name")] = name;
+        dirObj[QStringLiteral("mode")] = mode;
         homeMap.append(dirObj);
+
+        if (mode != QLatin1String("skip")) {
+            QJsonObject rootObj;
+            rootObj[QStringLiteral("path")] = home + QLatin1Char('/') + name;
+            rootObj[QStringLiteral("mode")] = mode;
+            indexRoots.append(rootObj);
+        }
     }
 
     settings[QStringLiteral("home_directories")] = homeMap;
+    if (!indexRoots.isEmpty()) {
+        settings[QStringLiteral("indexRoots")] = indexRoots;
+    }
     writeSettings(settings);
 }
 

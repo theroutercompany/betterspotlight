@@ -58,3 +58,7 @@ bs_add_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp)
 target_compile_definitions(test-ui-sim-query-suite PRIVATE
     BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
 )
+add_test(NAME test-ui-sim-query-suite-stress COMMAND test-ui-sim-query-suite)
+set_tests_properties(test-ui-sim-query-suite-stress PROPERTIES
+    ENVIRONMENT "BS_RELEVANCE_GATE_MODE=report_only;BS_RELEVANCE_REPORT_PATH=/tmp/bs_ui_sim_query_stress_report.json"
+)

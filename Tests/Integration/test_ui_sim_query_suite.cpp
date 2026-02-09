@@ -1,6 +1,7 @@
 #include <QtTest/QtTest>
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -9,6 +10,7 @@
 #include <QJsonObject>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 
 #include <algorithm>
@@ -536,6 +538,10 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
     const int total = static_cast<int>(cases.size()) - semanticSkipped;
     const double passRate = (100.0 * static_cast<double>(passed)) / static_cast<double>(total);
     const int requiredPasses = static_cast<int>(std::ceil((gatePassRate / 100.0) * static_cast<double>(total)));
+    const QString gateMode = qEnvironmentVariable("BS_RELEVANCE_GATE_MODE")
+                                 .trimmed()
+                                 .toLower();
+    const bool reportOnly = (gateMode == QLatin1String("report_only"));
 
     qInfo().noquote() << QStringLiteral("Relevance gate summary: passed=%1/%2 passRate=%3%% required=%4%% (%5/%2)")
                              .arg(QString::number(passed),
@@ -543,12 +549,44 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
                                   QString::number(passRate, 'f', 2),
                                   QString::number(gatePassRate, 'f', 1),
                                   QString::number(requiredPasses));
+    qInfo().noquote() << QStringLiteral("Relevance gate mode: %1")
+                             .arg(reportOnly ? QStringLiteral("report_only")
+                                             : QStringLiteral("enforce"));
 
     for (const QString& line : failureDetails) {
         qInfo().noquote() << line;
     }
 
-    if (passRate < gatePassRate) {
+    const QString reportPath = qEnvironmentVariable("BS_RELEVANCE_REPORT_PATH").trimmed();
+    if (!reportPath.isEmpty()) {
+        QJsonObject report;
+        report[QStringLiteral("suitePath")] = suitePath;
+        report[QStringLiteral("dbPath")] = dbPath;
+        report[QStringLiteral("gateMode")] = reportOnly
+            ? QStringLiteral("report_only")
+            : QStringLiteral("enforce");
+        report[QStringLiteral("gatePassRate")] = gatePassRate;
+        report[QStringLiteral("totalCases")] = total;
+        report[QStringLiteral("passedCases")] = passed;
+        report[QStringLiteral("passRate")] = passRate;
+        report[QStringLiteral("requiredPasses")] = requiredPasses;
+        report[QStringLiteral("semanticSkipped")] = semanticSkipped;
+        report[QStringLiteral("timestampUtc")] =
+            QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        QJsonArray failures;
+        for (const QString& line : failureDetails) {
+            failures.append(line);
+        }
+        report[QStringLiteral("failures")] = failures;
+
+        QSaveFile out(reportPath);
+        if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            out.write(QJsonDocument(report).toJson(QJsonDocument::Indented));
+            out.commit();
+        }
+    }
+
+    if (passRate < gatePassRate && !reportOnly) {
         QFAIL(qPrintable(QStringLiteral("Relevance gate failed: %1/%2 (%3%%) below gate %4%% (required %5)")
                              .arg(passed)
                              .arg(total)

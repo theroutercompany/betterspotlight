@@ -13,6 +13,98 @@
 
 namespace bs {
 
+namespace {
+
+QJsonArray defaultCuratedRoots()
+{
+    const QString home = QDir::homePath();
+    return QJsonArray{
+        home + QStringLiteral("/Documents"),
+        home + QStringLiteral("/Desktop"),
+        home + QStringLiteral("/Downloads"),
+    };
+}
+
+QJsonArray rootsFromIndexRoots(const QJsonObject& settings, bool embedOnly)
+{
+    QJsonArray roots;
+    const QJsonArray indexRoots = settings.value(QStringLiteral("indexRoots")).toArray();
+    for (const QJsonValue& value : indexRoots) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = value.toObject();
+        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        if (mode == QLatin1String("skip")) {
+            continue;
+        }
+        if (embedOnly && mode != QLatin1String("index_embed")) {
+            continue;
+        }
+        const QString path = obj.value(QStringLiteral("path")).toString();
+        if (!path.isEmpty()) {
+            roots.append(path);
+        }
+    }
+    return roots;
+}
+
+QJsonArray rootsFromHomeDirectories(const QJsonObject& settings, bool embedOnly)
+{
+    QJsonArray roots;
+    const QString home = QDir::homePath();
+    const QJsonArray homeDirectories =
+        settings.value(QStringLiteral("home_directories")).toArray();
+    for (const QJsonValue& value : homeDirectories) {
+        if (!value.isObject()) {
+            continue;
+        }
+
+        const QJsonObject obj = value.toObject();
+        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        if (mode == QLatin1String("skip")) {
+            continue;
+        }
+        if (embedOnly && mode != QLatin1String("index_embed")) {
+            continue;
+        }
+
+        const QString name = obj.value(QStringLiteral("name")).toString().trimmed();
+        if (name.isEmpty()) {
+            continue;
+        }
+
+        roots.append(home + QLatin1Char('/') + name);
+    }
+    return roots;
+}
+
+bool isSingleHomeRoot(const QJsonArray& roots)
+{
+    return roots.size() == 1 && roots.first().toString() == QDir::homePath();
+}
+
+QJsonObject readAppSettings()
+{
+    const QString settingsPath =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/settings.json");
+    QFile settingsFile(settingsPath);
+    if (!settingsFile.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(settingsFile.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        return {};
+    }
+
+    return doc.object();
+}
+
+} // namespace
+
 ServiceManager::ServiceManager(QObject* parent)
     : QObject(parent)
     , m_supervisor(std::make_unique<Supervisor>(this))
@@ -267,73 +359,41 @@ bool ServiceManager::sendServiceRequest(const QString& serviceName,
 
 QJsonArray ServiceManager::loadIndexRoots() const
 {
-    QJsonArray roots;
+    const QJsonObject settings = readAppSettings();
 
-    const QString settingsPath =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/settings.json");
-    QFile settingsFile(settingsPath);
-    if (settingsFile.open(QIODevice::ReadOnly)) {
-        QJsonParseError parseError;
-        const QJsonDocument doc =
-            QJsonDocument::fromJson(settingsFile.readAll(), &parseError);
-        if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-            const QJsonArray indexRoots =
-                doc.object().value(QStringLiteral("indexRoots")).toArray();
-            for (const QJsonValue& value : indexRoots) {
-                if (!value.isObject()) {
-                    continue;
-                }
-                const QJsonObject obj = value.toObject();
-                const QString mode = obj.value(QStringLiteral("mode")).toString();
-                if (mode == QLatin1String("skip")) {
-                    continue;
-                }
-                const QString path = obj.value(QStringLiteral("path")).toString();
-                if (!path.isEmpty()) {
-                    roots.append(path);
-                }
-            }
+    QJsonArray roots = rootsFromIndexRoots(settings, /*embedOnly=*/false);
+    if (isSingleHomeRoot(roots)) {
+        const QJsonArray homeMappedRoots =
+            rootsFromHomeDirectories(settings, /*embedOnly=*/false);
+        if (!homeMappedRoots.isEmpty()) {
+            roots = homeMappedRoots;
         }
     }
 
     if (roots.isEmpty()) {
-        roots.append(QDir::homePath());
+        roots = defaultCuratedRoots();
     }
+
     return roots;
 }
 
 QJsonArray ServiceManager::loadEmbeddingRoots() const
 {
-    QJsonArray roots;
+    const QJsonObject settings = readAppSettings();
 
-    const QString settingsPath =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/settings.json");
-    QFile settingsFile(settingsPath);
-    if (!settingsFile.open(QIODevice::ReadOnly)) {
-        return roots;
+    QJsonArray roots = rootsFromIndexRoots(settings, /*embedOnly=*/true);
+    if (isSingleHomeRoot(rootsFromIndexRoots(settings, /*embedOnly=*/false))) {
+        const QJsonArray homeMappedRoots =
+            rootsFromHomeDirectories(settings, /*embedOnly=*/true);
+        if (!homeMappedRoots.isEmpty()) {
+            roots = homeMappedRoots;
+        }
     }
 
-    QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(settingsFile.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
-        return roots;
-    }
-
-    const QJsonArray indexRoots = doc.object().value(QStringLiteral("indexRoots")).toArray();
-    for (const QJsonValue& value : indexRoots) {
-        if (!value.isObject()) {
-            continue;
-        }
-        const QJsonObject obj = value.toObject();
-        const QString mode = obj.value(QStringLiteral("mode")).toString();
-        if (mode != QLatin1String("index_embed")) {
-            continue;
-        }
-        const QString path = obj.value(QStringLiteral("path")).toString();
-        if (!path.isEmpty()) {
-            roots.append(path);
+    if (roots.isEmpty()) {
+        const QJsonArray curated = defaultCuratedRoots();
+        for (const QJsonValue& value : curated) {
+            roots.append(value);
         }
     }
 

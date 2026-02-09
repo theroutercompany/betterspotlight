@@ -33,8 +33,35 @@ QJsonArray defaultIndexRoots()
     });
     roots.append(QJsonObject{
         {QStringLiteral("path"), home + QStringLiteral("/Downloads")},
-        {QStringLiteral("mode"), QStringLiteral("index_only")},
+        {QStringLiteral("mode"), QStringLiteral("index_embed")},
     });
+    return roots;
+}
+
+QJsonArray indexRootsFromHomeDirectories(const QJsonObject& settings)
+{
+    QJsonArray roots;
+    const QString home = QDir::homePath();
+    const QJsonArray homeDirectories =
+        settings.value(QStringLiteral("home_directories")).toArray();
+    for (const QJsonValue& value : homeDirectories) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = value.toObject();
+        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        if (mode == QLatin1String("skip")) {
+            continue;
+        }
+        const QString name = obj.value(QStringLiteral("name")).toString().trimmed();
+        if (name.isEmpty()) {
+            continue;
+        }
+        roots.append(QJsonObject{
+            {QStringLiteral("path"), home + QLatin1Char('/') + name},
+            {QStringLiteral("mode"), mode.isEmpty() ? QStringLiteral("index_only") : mode},
+        });
+    }
     return roots;
 }
 
@@ -489,6 +516,18 @@ void SettingsController::loadSettings()
     }
 
     const QString home = QDir::homePath();
+    const QJsonArray existingIndexRoots =
+        m_settings.value(QStringLiteral("indexRoots")).toArray();
+    const bool hasLegacyHomeRoot = existingIndexRoots.size() == 1
+        && existingIndexRoots.first().isObject()
+        && existingIndexRoots.first().toObject().value(QStringLiteral("path")).toString() == home;
+    if (existingIndexRoots.isEmpty() || hasLegacyHomeRoot) {
+        const QJsonArray derivedRoots = indexRootsFromHomeDirectories(m_settings);
+        if (!derivedRoots.isEmpty()) {
+            m_settings[QStringLiteral("indexRoots")] = derivedRoots;
+        }
+    }
+
     ensureDefault(m_settings, QStringLiteral("hotkey"), QStringLiteral("Cmd+Space"));
     ensureDefault(m_settings, QStringLiteral("launchAtLogin"), false);
     ensureDefault(m_settings, QStringLiteral("showInDock"), false);

@@ -13,9 +13,9 @@ namespace bs {
 //   1. .bsignore match             -> Exclude
 //   2. Built-in exclusion match    -> Exclude
 //   3. Cloud artifact              -> Exclude
-//   4. Hidden path (dot-prefixed)  -> Exclude (hidden dirs only; not
-//      cloud/bsignore-handled paths)
-//   5. Sensitive path              -> MetadataOnly
+//   4. Sensitive path              -> MetadataOnly
+//   5. Hidden path (dot-prefixed)  -> Exclude (hidden dirs only; not
+//      cloud/bsignore-handled paths), unless explicitly added as a root
 //   6. Size > 5 GB                 -> Exclude
 //   7. Otherwise                   -> Include
 class PathRules {
@@ -41,6 +41,10 @@ public:
     // Load additional exclusion patterns from a .bsignore file.
     void loadBsignore(const std::string& bsignorePath);
 
+    // Explicit roots to include even when they are dot-prefixed directories.
+    // This is used to support opt-in indexing of hidden folders.
+    void setExplicitIncludeRoots(const std::vector<std::string>& roots);
+
     // Maximum file size for indexing (5 GB).
     static constexpr uint64_t kMaxFileSize = 5ULL * 1024 * 1024 * 1024;
 
@@ -54,6 +58,9 @@ private:
     // Check whether the path is under a sensitive directory.
     bool isSensitivePath(const std::string& path) const;
 
+    // Check whether the path is under an explicitly included root.
+    bool isExplicitIncludePath(const std::string& path) const;
+
     // Simple glob matching for default exclusion patterns.
     bool matchSimpleGlob(const std::string& pattern,
                          const std::string& path) const;
@@ -64,6 +71,7 @@ private:
 
     std::vector<std::string> m_defaultExclusions;
     std::vector<std::string> m_sensitivePatterns;
+    std::vector<std::string> m_explicitIncludeRoots;
     BsignoreParser m_bsignoreParser;
 };
 

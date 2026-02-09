@@ -85,6 +85,7 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
 
     // Load user-defined exclusion patterns from ~/.bsignore
     m_pathRules.loadBsignore(QDir::homePath().toStdString() + "/.bsignore");
+    m_pathRules.setExplicitIncludeRoots(roots);
 
     // Create ExtractionManager and Pipeline
     m_extractor = std::make_unique<ExtractionManager>();
