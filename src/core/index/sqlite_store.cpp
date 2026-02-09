@@ -2,6 +2,7 @@
 #include "core/index/schema.h"
 #include "core/index/migration.h"
 #include "core/shared/logging.h"
+#include "core/shared/search_options.h"
 #include <sqlite3.h>
 #include <QDateTime>
 #include <QFile>
@@ -9,6 +10,7 @@
 #include <QSet>
 #include <QThread>
 
+#include <cmath>
 #include <cstring>
 
 namespace bs {
@@ -107,6 +109,10 @@ bool SQLiteStore::init(const QString& dbPath)
     if (!applyMigrations(m_db, kCurrentSchemaVersion)) {
         LOG_ERROR(bsIndex, "Migration failed");
         return false;
+    }
+
+    if (!applyBm25Weights()) {
+        LOG_WARN(bsIndex, "Failed to apply BM25 weights from settings");
     }
 
     // Restrict database file permissions to owner-only (0600)
@@ -602,6 +608,240 @@ std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
     return hits;
 }
 
+std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
+    const QString& query, int limit, bool relaxed, const SearchOptions& options)
+{
+    const int overfetchLimit = std::max(1, limit * 3);
+    auto hits = searchFts5(query, overfetchLimit, relaxed);
+    if (!options.hasFilters()) {
+        return hits;
+    }
+
+    std::vector<QString> normalizedFileTypes;
+    normalizedFileTypes.reserve(options.fileTypes.size());
+    for (const QString& fileType : options.fileTypes) {
+        QString normalized = fileType.trimmed().toLower();
+        if (normalized.startsWith(QLatin1Char('.'))) {
+            normalized = normalized.mid(1);
+        }
+        if (!normalized.isEmpty()) {
+            normalizedFileTypes.push_back(normalized);
+        }
+    }
+
+    std::vector<FtsHit> filtered;
+    filtered.reserve(std::min<int>(limit, static_cast<int>(hits.size())));
+    for (const auto& hit : hits) {
+        auto itemOpt = getItemById(hit.fileId);
+        if (!itemOpt.has_value()) {
+            continue;
+        }
+
+        const auto& item = itemOpt.value();
+        bool passes = true;
+
+        if (!normalizedFileTypes.empty()) {
+            QString ext;
+            const int dot = item.name.lastIndexOf(QLatin1Char('.'));
+            if (dot >= 0 && dot + 1 < item.name.size()) {
+                ext = item.name.mid(dot + 1).toLower();
+            }
+            bool extMatched = false;
+            for (const QString& allowed : normalizedFileTypes) {
+                if (ext == allowed) {
+                    extMatched = true;
+                    break;
+                }
+            }
+            if (!extMatched) {
+                passes = false;
+            }
+        }
+
+        if (passes && !options.excludePaths.empty()) {
+            for (const QString& excludedPrefix : options.excludePaths) {
+                if (!excludedPrefix.isEmpty() && item.path.startsWith(excludedPrefix)) {
+                    passes = false;
+                    break;
+                }
+            }
+        }
+
+        if (passes && options.modifiedAfter.has_value()
+            && item.modifiedAt < options.modifiedAfter.value()) {
+            passes = false;
+        }
+        if (passes && options.modifiedBefore.has_value()
+            && item.modifiedAt > options.modifiedBefore.value()) {
+            passes = false;
+        }
+        if (passes && options.minSizeBytes.has_value()
+            && item.size < options.minSizeBytes.value()) {
+            passes = false;
+        }
+        if (passes && options.maxSizeBytes.has_value()
+            && item.size > options.maxSizeBytes.value()) {
+            passes = false;
+        }
+
+        if (passes) {
+            filtered.push_back(hit);
+            if (static_cast<int>(filtered.size()) >= std::max(1, limit)) {
+                break;
+            }
+        }
+    }
+
+    return filtered;
+}
+
+std::vector<SQLiteStore::NameHit> SQLiteStore::searchByNameFuzzy(const QString& query, int limit)
+{
+    const QString trimmed = query.trimmed();
+    if (trimmed.isEmpty()) {
+        return {};
+    }
+
+    QStringList tokens;
+    const QStringList rawTokens = trimmed.toLower().split(QRegularExpression(QStringLiteral("\\s+")),
+                                                          Qt::SkipEmptyParts);
+    for (const QString& token : rawTokens) {
+        if (token.size() <= 1) {
+            continue;
+        }
+        tokens.push_back(token);
+    }
+
+    if (tokens.isEmpty()) {
+        return {};
+    }
+
+    QString sql = QStringLiteral("SELECT id, name, path FROM items WHERE ");
+    QStringList conditions;
+    conditions.reserve(tokens.size());
+    for (int i = 0; i < tokens.size(); ++i) {
+        conditions.push_back(QStringLiteral("LOWER(name) LIKE ?%1").arg(i + 1));
+    }
+    sql += conditions.join(QStringLiteral(" AND "));
+    sql += QStringLiteral(" ORDER BY LENGTH(name) ASC LIMIT ?%1").arg(tokens.size() + 1);
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "Fuzzy name search prepare: %s", sqlite3_errmsg(m_db));
+        return {};
+    }
+
+    int bindIndex = 1;
+    std::vector<QByteArray> patterns;
+    patterns.reserve(tokens.size());
+    for (const QString& token : tokens) {
+        patterns.push_back((QStringLiteral("%") + token + QStringLiteral("%")).toUtf8());
+        sqlite3_bind_text(stmt, bindIndex, patterns.back().constData(), -1, SQLITE_STATIC);
+        ++bindIndex;
+    }
+    sqlite3_bind_int(stmt, bindIndex, std::max(1, limit));
+
+    std::vector<SQLiteStore::NameHit> hits;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        SQLiteStore::NameHit hit;
+        hit.fileId = sqlite3_column_int64(stmt, 0);
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        hit.name = name ? QString::fromUtf8(name) : QString();
+        const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        hit.path = path ? QString::fromUtf8(path) : QString();
+        hits.push_back(std::move(hit));
+    }
+    sqlite3_finalize(stmt);
+    return hits;
+}
+
+std::vector<SQLiteStore::NameHit> SQLiteStore::searchByNameFuzzy(
+    const QString& query, int limit, const SearchOptions& options)
+{
+    const int overfetchLimit = std::max(1, limit * 3);
+    auto hits = searchByNameFuzzy(query, overfetchLimit);
+    if (!options.hasFilters()) {
+        return hits;
+    }
+
+    std::vector<QString> normalizedFileTypes;
+    normalizedFileTypes.reserve(options.fileTypes.size());
+    for (const QString& fileType : options.fileTypes) {
+        QString normalized = fileType.trimmed().toLower();
+        if (normalized.startsWith(QLatin1Char('.'))) {
+            normalized = normalized.mid(1);
+        }
+        if (!normalized.isEmpty()) {
+            normalizedFileTypes.push_back(normalized);
+        }
+    }
+
+    std::vector<NameHit> filtered;
+    filtered.reserve(std::min<int>(limit, static_cast<int>(hits.size())));
+    for (const auto& hit : hits) {
+        auto itemOpt = getItemById(hit.fileId);
+        if (!itemOpt.has_value()) {
+            continue;
+        }
+
+        const auto& item = itemOpt.value();
+        bool passes = true;
+
+        if (!normalizedFileTypes.empty()) {
+            QString ext;
+            const int dot = item.name.lastIndexOf(QLatin1Char('.'));
+            if (dot >= 0 && dot + 1 < item.name.size()) {
+                ext = item.name.mid(dot + 1).toLower();
+            }
+            bool extMatched = false;
+            for (const QString& allowed : normalizedFileTypes) {
+                if (ext == allowed) {
+                    extMatched = true;
+                    break;
+                }
+            }
+            if (!extMatched) {
+                passes = false;
+            }
+        }
+
+        if (passes && !options.excludePaths.empty()) {
+            for (const QString& excludedPrefix : options.excludePaths) {
+                if (!excludedPrefix.isEmpty() && item.path.startsWith(excludedPrefix)) {
+                    passes = false;
+                    break;
+                }
+            }
+        }
+
+        if (passes && options.modifiedAfter.has_value()
+            && item.modifiedAt < options.modifiedAfter.value()) {
+            passes = false;
+        }
+        if (passes && options.modifiedBefore.has_value()
+            && item.modifiedAt > options.modifiedBefore.value()) {
+            passes = false;
+        }
+        if (passes && options.minSizeBytes.has_value()
+            && item.size < options.minSizeBytes.value()) {
+            passes = false;
+        }
+        if (passes && options.maxSizeBytes.has_value()
+            && item.size > options.maxSizeBytes.value()) {
+            passes = false;
+        }
+
+        if (passes) {
+            filtered.push_back(hit);
+            if (static_cast<int>(filtered.size()) >= std::max(1, limit)) {
+                break;
+            }
+        }
+    }
+
+    return filtered;
+}
+
 QString SQLiteStore::sanitizeFtsQueryRelaxed(const QString& raw)
 {
     const QString normalized = raw.toLower().trimmed();
@@ -880,6 +1120,69 @@ bool SQLiteStore::setSetting(const QString& key, const QString& value)
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return rc == SQLITE_DONE;
+}
+
+bool SQLiteStore::applyBm25Weights()
+{
+    constexpr double kDefaultNameWeight = 10.0;
+    constexpr double kDefaultPathWeight = 5.0;
+    constexpr double kDefaultContentWeight = 1.0;
+
+    const auto parseWeight = [](const std::optional<QString>& value, double fallback) {
+        if (!value.has_value()) {
+            return fallback;
+        }
+
+        bool ok = false;
+        const double parsed = value->toDouble(&ok);
+        if (!ok || !std::isfinite(parsed) || parsed < 0.0) {
+            return fallback;
+        }
+        return parsed;
+    };
+
+    const double nameWeight = parseWeight(getSetting(QStringLiteral("bm25WeightName")),
+                                          kDefaultNameWeight);
+    const double pathWeight = parseWeight(getSetting(QStringLiteral("bm25WeightPath")),
+                                          kDefaultPathWeight);
+    const double contentWeight = parseWeight(getSetting(QStringLiteral("bm25WeightContent")),
+                                             kDefaultContentWeight);
+
+    const QString sql = QStringLiteral(
+        "INSERT INTO search_index(search_index, rank) VALUES('fts5', 'bm25(%1, %2, %3)')")
+                            .arg(nameWeight, 0, 'g', 17)
+                            .arg(pathWeight, 0, 'g', 17)
+                            .arg(contentWeight, 0, 'g', 17);
+    const QByteArray sqlUtf8 = sql.toUtf8();
+    if (!execSql(sqlUtf8.constData())) {
+        return false;
+    }
+
+    LOG_INFO(bsIndex, "Applied BM25 weights (name=%.6f, path=%.6f, content=%.6f)",
+             nameWeight, pathWeight, contentWeight);
+    return true;
+}
+
+bool SQLiteStore::setBm25Weights(double nameWeight, double pathWeight, double contentWeight)
+{
+    if (nameWeight < 0.0 || pathWeight < 0.0 || contentWeight < 0.0) {
+        LOG_WARN(bsIndex,
+                 "Rejected BM25 weights: all weights must be non-negative (name=%.6f, path=%.6f, content=%.6f)",
+                 nameWeight, pathWeight, contentWeight);
+        return false;
+    }
+
+    if (!setSetting(QStringLiteral("bm25WeightName"),
+                    QString::number(nameWeight, 'g', 17)) ||
+        !setSetting(QStringLiteral("bm25WeightPath"),
+                    QString::number(pathWeight, 'g', 17)) ||
+        !setSetting(QStringLiteral("bm25WeightContent"),
+                    QString::number(contentWeight, 'g', 17))) {
+        LOG_ERROR(bsIndex, "Failed to persist BM25 weights to settings");
+        return false;
+    }
+
+    return applyBm25Weights();
 }
 
 // ── Health ──────────────────────────────────────────────────

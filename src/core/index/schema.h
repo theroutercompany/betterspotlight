@@ -153,7 +153,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 
 // BM25 weight configuration (doc 04 Section 3.9)
 constexpr const char* kFts5WeightConfig =
-    "INSERT INTO search_index(search_index, rank) VALUES('fts5', 'bm25(10.0, 5.0, 1.0)')";
+    "INSERT INTO search_index(search_index, rank) VALUES('fts5', 'bm25(10.0, 5.0, 0.5)')";
 
 // Default settings rows (doc 04 Section 10.1)
 constexpr const char* kDefaultSettings = R"(
@@ -168,7 +168,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('prefixNameWeight', '150');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('containsNameWeight', '100');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('exactPathWeight', '90');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('prefixPathWeight', '80');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('contentMatchWeight', '1.0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('contentMatchWeight', '0.6');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('fuzzyMatchWeight', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('recencyWeight', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('recencyDecayDays', '7');
@@ -181,6 +181,9 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticWeight', '40');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticSimilarityThreshold', '0.7');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('pinnedBoostWeight', '200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('junkPenaltyWeight', '50');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('bm25WeightName', '10.0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('bm25WeightPath', '5.0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('bm25WeightContent', '0.5');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('lexicalWeight', '0.6');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('knnK', '50');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('efSearch', '50');
