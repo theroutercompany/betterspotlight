@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/indexing/chunker.h"
+#include "core/extraction/extractor.h"
 #include "core/shared/types.h"
 
 #include <optional>
@@ -35,6 +36,7 @@ struct IndexResult {
 struct PreparedFailure {
     QString stage;
     QString message;
+    std::optional<ExtractionResult::Status> extractionStatus;
 };
 
 // PreparedWork is produced by parallel prep workers and later consumed
@@ -43,6 +45,7 @@ struct PreparedWork {
     WorkItem::Type type = WorkItem::Type::NewFile;
     QString path;
     uint64_t generation = 0;
+    int retryCount = 0;
 
     ValidationResult validation = ValidationResult::Include;
     std::optional<FileMetadata> metadata;

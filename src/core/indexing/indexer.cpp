@@ -46,6 +46,7 @@ PreparedWork Indexer::prepareWorkItem(const WorkItem& item, uint64_t generation)
     prepared.type = item.type;
     prepared.path = QString::fromStdString(item.filePath);
     prepared.generation = generation;
+    prepared.retryCount = item.retryCount;
     prepared.validation = ValidationResult::Exclude;
     return prepared;
 }
@@ -81,6 +82,7 @@ PreparedWork Indexer::prepareDelete(const WorkItem& item, uint64_t generation)
     prepared.type = WorkItem::Type::Delete;
     prepared.path = QString::fromStdString(item.filePath);
     prepared.generation = generation;
+    prepared.retryCount = item.retryCount;
     prepared.validation = ValidationResult::Include;
     return prepared;
 }
@@ -94,6 +96,7 @@ PreparedWork Indexer::prepareNewOrModified(const WorkItem& item, uint64_t genera
     prepared.type = item.type;
     prepared.path = QString::fromStdString(item.filePath);
     prepared.generation = generation;
+    prepared.retryCount = item.retryCount;
 
     auto validation = m_pathRules.validate(item.filePath);
     prepared.validation = validation;
@@ -107,7 +110,8 @@ PreparedWork Indexer::prepareNewOrModified(const WorkItem& item, uint64_t genera
     if (!meta.has_value()) {
         prepared.failure = PreparedFailure{
             QStringLiteral("metadata"),
-            QStringLiteral("Cannot stat or access file")
+            QStringLiteral("Cannot stat or access file"),
+            std::nullopt
         };
         prepared.prepDurationMs = static_cast<int>(timer.elapsed());
         return prepared;
@@ -148,6 +152,7 @@ PreparedWork Indexer::prepareRescan(const WorkItem& item, uint64_t generation)
     prepared.type = WorkItem::Type::RescanDirectory;
     prepared.path = QString::fromStdString(item.filePath);
     prepared.generation = generation;
+    prepared.retryCount = item.retryCount;
 
     auto validation = m_pathRules.validate(item.filePath);
     prepared.validation = validation;
@@ -160,7 +165,8 @@ PreparedWork Indexer::prepareRescan(const WorkItem& item, uint64_t generation)
     if (!meta.has_value()) {
         prepared.failure = PreparedFailure{
             QStringLiteral("metadata"),
-            QStringLiteral("Cannot stat or access file")
+            QStringLiteral("Cannot stat or access file"),
+            std::nullopt
         };
         prepared.prepDurationMs = static_cast<int>(timer.elapsed());
         return prepared;
@@ -210,7 +216,8 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
         prepared.failure = PreparedFailure{
             QStringLiteral("extraction"),
             extraction.errorMessage.value_or(
-                QStringLiteral("Extraction failed with no details"))
+                QStringLiteral("Extraction failed with no details")),
+            extraction.status
         };
         return;
     }
