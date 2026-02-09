@@ -1,5 +1,104 @@
 {
-  "version": "1.0",
-  "fixture_id": "standard_home_v1",
-  "baselines": []
+  "version": "1.1",
+  "fixtureId": "standard_home_v1",
+  "gatePassRate": 90.0,
+  "description": "Deterministic IPC relevance baselines on fixture corpus (non-live index)",
+  "cases": [
+    {
+      "id": "B01",
+      "category": "exact",
+      "query": "resume rex 2026",
+      "mode": "auto",
+      "expectedFileName": "resume-rex-2026.docx",
+      "topN": 3
+    },
+    {
+      "id": "B02",
+      "category": "exact",
+      "query": "react hooks guide",
+      "mode": "auto",
+      "expectedFileName": "react-hooks-guide.md",
+      "topN": 3
+    },
+    {
+      "id": "B03",
+      "category": "exact",
+      "query": "deployment guide",
+      "mode": "auto",
+      "expectedFileName": "deployment-guide.md",
+      "topN": 3
+    },
+    {
+      "id": "B04",
+      "category": "phrase",
+      "query": "invoice january 2026 pdf",
+      "mode": "auto",
+      "expectedFileName": "invoice-january-2026.pdf",
+      "topN": 3
+    },
+    {
+      "id": "B05",
+      "category": "phrase",
+      "query": "project proposal pdf",
+      "mode": "auto",
+      "expectedFileName": "project-proposal.pdf",
+      "topN": 3
+    },
+    {
+      "id": "B06",
+      "category": "phrase",
+      "query": "quarterly review q4 pdf",
+      "mode": "auto",
+      "expectedFileName": "quarterly-review-q4.pdf",
+      "topN": 3
+    },
+    {
+      "id": "B07",
+      "category": "phrase",
+      "query": "travel itinerary txt",
+      "mode": "auto",
+      "expectedFileName": "travel-itinerary.txt",
+      "topN": 3
+    },
+    {
+      "id": "B08",
+      "category": "noise",
+      "query": "   PROJECT!!!   proposal???   ",
+      "mode": "auto",
+      "expectedFileName": "project-proposal.pdf",
+      "topN": 3
+    },
+    {
+      "id": "B09",
+      "category": "noise",
+      "query": "\"wedding\"    guest    list   csv",
+      "mode": "auto",
+      "expectedFileName": "wedding-guest-list.csv",
+      "topN": 3
+    },
+    {
+      "id": "B10",
+      "category": "typo_auto",
+      "query": "resmue rex 2026",
+      "mode": "auto",
+      "expectedFileName": "resume-rex-2026.docx",
+      "topN": 3
+    },
+    {
+      "id": "B11",
+      "category": "typo_auto",
+      "query": "deplyoment guide",
+      "mode": "auto",
+      "expectedFileName": "deployment-guide.md",
+      "topN": 3
+    },
+    {
+      "id": "B12",
+      "category": "typo_strict",
+      "query": "resmue rex 2026",
+      "mode": "strict",
+      "expectedFileName": "resume-rex-2026.docx",
+      "topN": 3
+    }
+  ]
 }
