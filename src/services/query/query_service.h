@@ -3,12 +3,14 @@
 #include "core/ipc/service_base.h"
 #include "core/index/sqlite_store.h"
 #include "core/index/typo_lexicon.h"
+#include "core/fs/bsignore_parser.h"
 #include "core/ranking/scorer.h"
 
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <QFileSystemWatcher>
 #include <QStringList>
 #include <shared_mutex>
 #include <thread>
@@ -39,6 +41,7 @@ private:
     // ── M1 handlers ──
     QJsonObject handleSearch(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetHealth(uint64_t id);
+    QJsonObject handleGetHealthDetails(uint64_t id, const QJsonObject& params);
     QJsonObject handleRecordFeedback(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetFrequency(uint64_t id, const QJsonObject& params);
 
@@ -115,7 +118,25 @@ private:
 
     // Initialize M2 modules after store is opened.
     void initM2Modules();
+    void initBsignoreWatch();
+    void reloadBsignore();
+    bool isExcludedByBsignore(const QString& absolutePath) const;
+    QJsonObject bsignoreStatusJson() const;
+    QJsonObject processStatsForService(const QString& serviceName) const;
+    QJsonObject queryStatsSnapshot() const;
     bool m_m2Initialized = false;
+
+    std::unique_ptr<QFileSystemWatcher> m_bsignoreWatcher;
+    BsignoreParser m_bsignoreParser;
+    QString m_bsignorePath;
+    qint64 m_bsignoreLastLoadedAtMs = 0;
+    int m_bsignorePatternCount = 0;
+    bool m_bsignoreLoaded = false;
+
+    std::atomic<uint64_t> m_searchCount{0};
+    std::atomic<uint64_t> m_rewriteAppliedCount{0};
+    std::atomic<uint64_t> m_semanticOnlyAdmittedCount{0};
+    std::atomic<uint64_t> m_semanticOnlySuppressedCount{0};
 };
 
 } // namespace bs

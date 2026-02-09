@@ -42,6 +42,15 @@ bs_add_test(test-query-service-relevance-fixture Integration/test_query_service_
 target_compile_definitions(test-query-service-relevance-fixture PRIVATE
     BS_RELEVANCE_BASELINES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/baselines.json"
 )
+set_tests_properties(test-query-service-relevance-fixture PROPERTIES
+    ENVIRONMENT "BS_RELEVANCE_FIXTURE_REPORT_PATH=/tmp/bs_query_service_relevance_fixture_report.json"
+)
+#
+# Deterministic relevance gate promotion policy:
+# - Transitional gatePassRate=90.0 while the 100-case corpus is stabilized.
+# - Promote to gatePassRate=95.0 in tests/relevance/baselines.json only
+#   after 3 consecutive clean runs of test-query-service-relevance-fixture.
+#
 
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)

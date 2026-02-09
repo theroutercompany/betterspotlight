@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QStandardPaths>
 #include <cinttypes>
@@ -83,8 +84,13 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
     }
     m_store.emplace(std::move(store.value()));
 
-    // Load user-defined exclusion patterns from ~/.bsignore
-    m_pathRules.loadBsignore(QDir::homePath().toStdString() + "/.bsignore");
+    // Load user-defined exclusion patterns from ~/.bsignore and start watching
+    // for live updates so exclusions apply without restarting services.
+    m_bsignorePath = QDir::homePath() + QStringLiteral("/.bsignore");
+    m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
+    m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
+    configureBsignoreWatcher();
     m_pathRules.setExplicitIncludeRoots(roots);
 
     // Create ExtractionManager and Pipeline
@@ -268,6 +274,13 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("paused")] = false;
         result[QStringLiteral("roots")] = roots;
         result[QStringLiteral("lastProgressReport")] = lastProgress;
+        const QJsonObject bsignore = bsignoreStatusJson();
+        result[QStringLiteral("bsignorePath")] = bsignore.value(QStringLiteral("path")).toString();
+        result[QStringLiteral("bsignoreLoaded")] = bsignore.value(QStringLiteral("loaded")).toBool(false);
+        result[QStringLiteral("bsignorePatternCount")] =
+            bsignore.value(QStringLiteral("patternCount")).toInt(0);
+        result[QStringLiteral("bsignoreLastLoadedAtMs")] =
+            bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
         return IpcMessage::makeResponse(id, result);
     }
 
@@ -292,7 +305,84 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     result[QStringLiteral("writerBatchDepth")] = static_cast<qint64>(stats.writerBatchDepth);
     result[QStringLiteral("roots")] = roots;
     result[QStringLiteral("lastProgressReport")] = lastProgress;
+    const QJsonObject bsignore = bsignoreStatusJson();
+    result[QStringLiteral("bsignorePath")] = bsignore.value(QStringLiteral("path")).toString();
+    result[QStringLiteral("bsignoreLoaded")] = bsignore.value(QStringLiteral("loaded")).toBool(false);
+    result[QStringLiteral("bsignorePatternCount")] =
+        bsignore.value(QStringLiteral("patternCount")).toInt(0);
+    result[QStringLiteral("bsignoreLastLoadedAtMs")] =
+        bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
     return IpcMessage::makeResponse(id, result);
+}
+
+void IndexerService::configureBsignoreWatcher()
+{
+    if (m_bsignorePath.isEmpty()) {
+        return;
+    }
+
+    if (!m_bsignoreWatcher) {
+        m_bsignoreWatcher = std::make_unique<QFileSystemWatcher>(this);
+        connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::fileChanged,
+                this, &IndexerService::onBsignorePathChanged);
+        connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::directoryChanged,
+                this, &IndexerService::onBsignoreDirectoryChanged);
+    }
+
+    if (!m_bsignoreWatcher->files().isEmpty()) {
+        m_bsignoreWatcher->removePaths(m_bsignoreWatcher->files());
+    }
+    if (!m_bsignoreWatcher->directories().isEmpty()) {
+        m_bsignoreWatcher->removePaths(m_bsignoreWatcher->directories());
+    }
+
+    const QFileInfo info(m_bsignorePath);
+    const QString parentDir = info.absoluteDir().absolutePath();
+    if (QFileInfo::exists(parentDir)) {
+        m_bsignoreWatcher->addPath(parentDir);
+    }
+    if (info.exists()) {
+        m_bsignoreWatcher->addPath(m_bsignorePath);
+    }
+}
+
+void IndexerService::reloadBsignore()
+{
+    if (m_bsignorePath.isEmpty()) {
+        return;
+    }
+
+    m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
+    m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
+    configureBsignoreWatcher();
+
+    QJsonObject params = bsignoreStatusJson();
+    params[QStringLiteral("timestamp")] = static_cast<qint64>(QDateTime::currentMSecsSinceEpoch());
+    sendNotification(QStringLiteral("bsignoreReloaded"), params);
+}
+
+QJsonObject IndexerService::bsignoreStatusJson() const
+{
+    QJsonObject status;
+    status[QStringLiteral("path")] = m_bsignorePath;
+    status[QStringLiteral("loaded")] = m_bsignoreLoaded;
+    status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
+    status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;
+    status[QStringLiteral("lastLoadedAt")] = m_bsignoreLastLoadedAtMs > 0
+        ? QDateTime::fromMSecsSinceEpoch(m_bsignoreLastLoadedAtMs).toUTC().toString(Qt::ISODate)
+        : QString();
+    return status;
+}
+
+void IndexerService::onBsignorePathChanged(const QString& /*path*/)
+{
+    reloadBsignore();
+}
+
+void IndexerService::onBsignoreDirectoryChanged(const QString& /*path*/)
+{
+    reloadBsignore();
 }
 
 } // namespace bs

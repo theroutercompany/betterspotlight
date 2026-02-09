@@ -280,6 +280,7 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
     QStringList failureDetails;
     QJsonArray rankingMissDetails;
     QJsonArray fixtureMismatchDetails;
+    QJsonArray semanticUnavailableDetails;
 
     sqlite3_stmt* expectedLookupStmt = nullptr;
     const char* expectedLookupSql = "SELECT 1 FROM items WHERE LOWER(name) = LOWER(?1) LIMIT 1";
@@ -313,6 +314,20 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         }
         if (testCase.category == QStringLiteral("semantic_probe") && !semanticAvailable) {
             ++semanticSkipped;
+            const QString detail = QStringLiteral(
+                                       "[%1|%2] q=\"%3\" expect=\"%4\" semantic_unavailable")
+                                       .arg(testCase.id,
+                                            testCase.category,
+                                            testCase.query,
+                                            testCase.expectedFileName);
+            failureDetails.append(detail);
+            QJsonObject failure;
+            failure[QStringLiteral("id")] = testCase.id;
+            failure[QStringLiteral("category")] = testCase.category;
+            failure[QStringLiteral("failureType")] = QStringLiteral("semantic_unavailable");
+            failure[QStringLiteral("query")] = testCase.query;
+            failure[QStringLiteral("expectedFileName")] = testCase.expectedFileName;
+            semanticUnavailableDetails.append(failure);
             qInfo().noquote()
                 << QStringLiteral("CASE %1 (%2) => SKIP (requires vector search)")
                        .arg(testCase.id, testCase.category);
@@ -631,6 +646,7 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         report[QStringLiteral("requiredPasses")] = requiredPasses;
         report[QStringLiteral("semanticSkipped")] = semanticSkipped;
         report[QStringLiteral("fixtureMismatches")] = fixtureMismatches;
+        report[QStringLiteral("semanticUnavailableCount")] = semanticUnavailableDetails.size();
         report[QStringLiteral("timestampUtc")] =
             QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         QJsonArray failuresLegacy;
@@ -640,6 +656,7 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         report[QStringLiteral("failures")] = failuresLegacy;
         report[QStringLiteral("rankingMisses")] = rankingMissDetails;
         report[QStringLiteral("fixtureMismatchCases")] = fixtureMismatchDetails;
+        report[QStringLiteral("semanticUnavailableCases")] = semanticUnavailableDetails;
 
         QSaveFile out(reportPath);
         if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

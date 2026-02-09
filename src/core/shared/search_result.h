@@ -53,6 +53,8 @@ struct SearchResult {
     int fuzzyDistance = 0;
     double score = 0.0;
     double bm25RawScore = 0.0;
+    double semanticSimilarity = 0.0;
+    double semanticNormalized = 0.0;
     QString snippet;
     std::vector<Highlight> highlights;
     int64_t fileSize = 0;

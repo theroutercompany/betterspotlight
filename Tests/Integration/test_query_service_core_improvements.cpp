@@ -148,6 +148,9 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
     const QString bankingPath = QDir(docsDir).filePath(QStringLiteral("banking-report.txt"));
     QVERIFY(upsertItem(store, bankingPath, QStringLiteral(".txt"), bs::ItemKind::Text,
                        QStringLiteral("banking report report report report q1 summary")).has_value());
+    const QString apiDeploymentPath = QDir(docsDir).filePath(QStringLiteral("API-deployment-guide.md"));
+    QVERIFY(upsertItem(store, apiDeploymentPath, QStringLiteral(".md"), bs::ItemKind::Markdown,
+                       QStringLiteral("API deployment guide for release operations")).has_value());
 
     // Placeholder/offline corpus.
     const QString creditPath = QDir(docsDir).filePath(QStringLiteral("credit report.pdf"));
@@ -268,6 +271,39 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
             QStringLiteral("code")));
     }
 
+    // Health details endpoint should expose paginated failures + process/query stats.
+    {
+        QJsonObject params;
+        params[QStringLiteral("limit")] = 25;
+        params[QStringLiteral("offset")] = 0;
+        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getHealthDetails"), params);
+        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+        const QJsonObject details = result.value(QStringLiteral("details")).toObject();
+        QVERIFY(!details.isEmpty());
+
+        const QJsonArray failures = details.value(QStringLiteral("failures")).toArray();
+        QVERIFY(!failures.isEmpty());
+        bool foundExpectedGap = false;
+        for (const QJsonValue& value : failures) {
+            const QJsonObject entry = value.toObject();
+            if (entry.value(QStringLiteral("expectedGap")).toBool(false)) {
+                foundExpectedGap = true;
+                break;
+            }
+        }
+        QVERIFY(foundExpectedGap);
+
+        const QJsonObject processStats = details.value(QStringLiteral("processStats")).toObject();
+        QVERIFY(processStats.contains(QStringLiteral("query")));
+        const QJsonObject queryStats = processStats.value(QStringLiteral("query")).toObject();
+        QVERIFY(queryStats.contains(QStringLiteral("available")));
+        QVERIFY(queryStats.value(QStringLiteral("available")).isBool());
+
+        QVERIFY(details.contains(QStringLiteral("queryStats")));
+        QVERIFY(details.contains(QStringLiteral("bsignore")));
+    }
+
     // Parser wiring + filter merge behavior.
     {
         QJsonObject params;
@@ -286,6 +322,17 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(debugInfo.value(QStringLiteral("plannerApplied")).toBool(false));
         QCOMPARE(debugInfo.value(QStringLiteral("plannerReason")).toString(),
                  QStringLiteral("consumer_curated_prefilter"));
+        QCOMPARE(debugInfo.value(QStringLiteral("queryClass")).toString(),
+                 QStringLiteral("natural_language"));
+        QVERIFY(std::abs(
+                    debugInfo.value(QStringLiteral("mergeLexicalWeightApplied")).toDouble() - 0.55)
+                < 1e-6);
+        QVERIFY(std::abs(
+                    debugInfo.value(QStringLiteral("mergeSemanticWeightApplied")).toDouble() - 0.45)
+                < 1e-6);
+        QVERIFY(debugInfo.contains(QStringLiteral("semanticOnlySuppressedCount")));
+        QVERIFY(debugInfo.contains(QStringLiteral("semanticOnlyAdmittedCount")));
+        QVERIFY(debugInfo.value(QStringLiteral("semanticOnlyAdmitReasonSummary")).isObject());
         const QJsonObject filtersDebug = debugInfo.value(QStringLiteral("filters")).toObject();
         const QJsonArray includePaths = filtersDebug.value(QStringLiteral("includePaths")).toArray();
         QVERIFY(!includePaths.isEmpty());
@@ -331,6 +378,40 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(debugInfo.contains(QStringLiteral("rewriteApplied")));
         QVERIFY(debugInfo.contains(QStringLiteral("rewriteReason")));
         QVERIFY(debugInfo.value(QStringLiteral("rewriteApplied")).toBool());
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("banikng repotr");
+        params[QStringLiteral("limit")] = 10;
+        params[QStringLiteral("debug")] = true;
+        params[QStringLiteral("queryMode")] = QStringLiteral("auto");
+        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("search"), params);
+        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject debugInfo = response.value(QStringLiteral("result"))
+                                          .toObject()
+                                          .value(QStringLiteral("debugInfo"))
+                                          .toObject();
+        QVERIFY(debugInfo.value(QStringLiteral("rewriteApplied")).toBool());
+        const QJsonArray correctedTokens = debugInfo.value(QStringLiteral("correctedTokens")).toArray();
+        QVERIFY2(correctedTokens.size() <= 2, "Auto-mode rewrite exceeded replacement budget");
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("API deplyoment guide");
+        params[QStringLiteral("limit")] = 10;
+        params[QStringLiteral("debug")] = true;
+        params[QStringLiteral("queryMode")] = QStringLiteral("auto");
+        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("search"), params);
+        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+        const QJsonObject debugInfo = result.value(QStringLiteral("debugInfo")).toObject();
+        QVERIFY(debugInfo.value(QStringLiteral("rewriteApplied")).toBool());
+        const QJsonArray ranked = result.value(QStringLiteral("results")).toArray();
+        QVERIFY(!ranked.isEmpty());
+        const QString topName = ranked.first().toObject().value(QStringLiteral("name")).toString();
+        QCOMPARE(topName, QStringLiteral("API-deployment-guide.md"));
     }
 
     // Availability metadata for offline placeholder result.

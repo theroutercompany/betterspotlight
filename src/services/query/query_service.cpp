@@ -24,7 +24,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
+#include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSet>
@@ -33,6 +35,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sys/types.h>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -82,6 +86,12 @@ enum class SearchQueryMode {
     Relaxed,
 };
 
+enum class QueryClass {
+    NaturalLanguage,
+    PathOrCode,
+    ShortAmbiguous,
+};
+
 enum CandidateOrigin : uint8_t {
     CandidateOriginStrict = 1 << 0,
     CandidateOriginRelaxed = 1 << 1,
@@ -111,30 +121,68 @@ double bestLexicalStrength(const std::vector<SQLiteStore::FtsHit>& hits)
 double typoCandidateConfidence(const QString& sourceToken,
                                const TypoLexicon::Correction& correction)
 {
-    double confidence = 0.50;
+    const auto looksLikeSingleTransposition = [](const QString& source,
+                                                 const QString& corrected) {
+        if (source.size() != corrected.size() || source.size() < 2) {
+            return false;
+        }
+        int firstDiff = -1;
+        int secondDiff = -1;
+        for (int i = 0; i < source.size(); ++i) {
+            if (source.at(i).toLower() != corrected.at(i).toLower()) {
+                if (firstDiff == -1) {
+                    firstDiff = i;
+                } else if (secondDiff == -1) {
+                    secondDiff = i;
+                } else {
+                    return false;
+                }
+            }
+        }
+        if (firstDiff == -1 || secondDiff == -1 || secondDiff != firstDiff + 1) {
+            return false;
+        }
+        return source.at(firstDiff).toLower() == corrected.at(secondDiff).toLower()
+            && source.at(secondDiff).toLower() == corrected.at(firstDiff).toLower();
+    };
+
+    double confidence = 0.48;
     if (correction.editDistance == 1) {
-        confidence += 0.18;
+        confidence += 0.22;
     } else if (correction.editDistance == 2) {
-        confidence += 0.08;
+        confidence += 0.10;
     }
 
-    if (correction.docCount >= 20) {
-        confidence += 0.20;
-    } else if (correction.docCount >= 10) {
-        confidence += 0.15;
-    } else if (correction.docCount >= 5) {
-        confidence += 0.10;
+    if (correction.docCount >= 25) {
+        confidence += 0.22;
+    } else if (correction.docCount >= 12) {
+        confidence += 0.18;
+    } else if (correction.docCount >= 6) {
+        confidence += 0.13;
     } else if (correction.docCount >= 3) {
-        confidence += 0.05;
+        confidence += 0.08;
     }
 
     if (!sourceToken.isEmpty() && !correction.corrected.isEmpty()
         && sourceToken.front().toLower() == correction.corrected.front().toLower()) {
-        confidence += 0.08;
+        confidence += 0.06;
+    }
+
+    if (sourceToken.size() == correction.corrected.size()) {
+        confidence += 0.05;
+    }
+
+    if (sourceToken.size() >= 2 && correction.corrected.size() >= 2
+        && sourceToken.left(2).toLower() == correction.corrected.left(2).toLower()) {
+        confidence += 0.04;
+    }
+
+    if (looksLikeSingleTransposition(sourceToken, correction.corrected)) {
+        confidence += 0.06;
     }
 
     if (sourceToken.size() >= 8 && correction.editDistance == 2) {
-        confidence += 0.04;
+        confidence += 0.05;
     }
 
     return std::clamp(confidence, 0.0, 1.0);
@@ -178,6 +226,35 @@ bool shouldApplyConsumerPrefilter(const QString& queryLower,
     // Consumer-first default for phrase-like lookups while still avoiding
     // obvious code/path-style queries.
     return querySignalTokens.size() >= 2 || queryTokensRaw.size() >= 3;
+}
+
+QueryClass classifyQueryShape(const QString& queryLower,
+                              const QSet<QString>& querySignalTokens,
+                              const QStringList& queryTokensRaw)
+{
+    if (looksLikePathOrCodeQuery(queryLower)) {
+        return QueryClass::PathOrCode;
+    }
+    if (looksLikeNaturalLanguageQuery(querySignalTokens)) {
+        return QueryClass::NaturalLanguage;
+    }
+    if (queryTokensRaw.size() <= 2) {
+        return QueryClass::ShortAmbiguous;
+    }
+    return QueryClass::NaturalLanguage;
+}
+
+QString queryClassToString(QueryClass queryClass)
+{
+    switch (queryClass) {
+    case QueryClass::NaturalLanguage:
+        return QStringLiteral("natural_language");
+    case QueryClass::PathOrCode:
+        return QStringLiteral("path_or_code");
+    case QueryClass::ShortAmbiguous:
+        return QStringLiteral("short_ambiguous");
+    }
+    return QStringLiteral("unknown");
 }
 
 QString normalizeFileTypeToken(const QString& token)
@@ -252,6 +329,21 @@ QStringList tokenizeWords(const QString& text)
     return tokens;
 }
 
+bool isExpectedGapFailureMessage(const QString& errorMessage)
+{
+    const QString lowered = errorMessage.toLower();
+    return lowered.contains(QStringLiteral("pdf extraction unavailable ("))
+        || lowered.contains(QStringLiteral("ocr extraction unavailable ("))
+        || lowered.contains(QStringLiteral("leptonica failed to read image"))
+        || lowered.contains(QStringLiteral("is not supported by extractor"))
+        || lowered.contains(QStringLiteral("exceeds configured limit"))
+        || lowered == QLatin1String("file does not exist or is not a regular file")
+        || lowered == QLatin1String("file is not readable")
+        || lowered == QLatin1String("failed to load pdf document")
+        || lowered == QLatin1String("pdf is encrypted or password-protected")
+        || lowered == QLatin1String("file appears to be a cloud placeholder (size reported but no content readable)");
+}
+
 struct QueryHints {
     bool downloadsHint = false;
     bool documentsHint = false;
@@ -314,6 +406,7 @@ QueryService::QueryService(QObject* parent)
     : ServiceBase(QStringLiteral("query"), parent)
 {
     LOG_INFO(bsIpc, "QueryService created");
+    initBsignoreWatch();
 }
 
 QueryService::~QueryService()
@@ -373,6 +466,7 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
 
     if (method == QLatin1String("search"))          return handleSearch(id, params);
     if (method == QLatin1String("getHealth"))        return handleGetHealth(id);
+    if (method == QLatin1String("getHealthDetails")) return handleGetHealthDetails(id, params);
     if (method == QLatin1String("recordFeedback"))   return handleRecordFeedback(id, params);
     if (method == QLatin1String("getFrequency"))     return handleGetFrequency(id, params);
 
@@ -417,6 +511,7 @@ bool QueryService::ensureStoreOpen()
     LOG_INFO(bsIpc, "Database opened at: %s", qPrintable(m_dbPath));
 
     initM2Modules();
+    initBsignoreWatch();
     return true;
 }
 
@@ -514,6 +609,144 @@ void QueryService::initM2Modules()
     }
 }
 
+void QueryService::initBsignoreWatch()
+{
+    if (m_bsignorePath.isEmpty()) {
+        m_bsignorePath = QDir::homePath() + QStringLiteral("/.bsignore");
+    }
+
+    if (!m_bsignoreWatcher) {
+        m_bsignoreWatcher = std::make_unique<QFileSystemWatcher>(this);
+        connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::fileChanged,
+                this, [this](const QString&) { reloadBsignore(); });
+        connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::directoryChanged,
+                this, [this](const QString&) { reloadBsignore(); });
+    }
+
+    reloadBsignore();
+}
+
+void QueryService::reloadBsignore()
+{
+    if (m_bsignorePath.isEmpty()) {
+        return;
+    }
+
+    m_bsignoreLastLoadedAtMs = QDateTime::currentMSecsSinceEpoch();
+    const QFileInfo bsignoreInfo(m_bsignorePath);
+    if (bsignoreInfo.exists()) {
+        m_bsignoreLoaded = m_bsignoreParser.loadFromFile(m_bsignorePath.toStdString());
+    } else {
+        m_bsignoreParser.clear();
+        m_bsignoreLoaded = true;
+    }
+    m_bsignorePatternCount = static_cast<int>(m_bsignoreParser.patterns().size());
+
+    if (m_bsignoreWatcher) {
+        if (!m_bsignoreWatcher->files().isEmpty()) {
+            m_bsignoreWatcher->removePaths(m_bsignoreWatcher->files());
+        }
+        if (!m_bsignoreWatcher->directories().isEmpty()) {
+            m_bsignoreWatcher->removePaths(m_bsignoreWatcher->directories());
+        }
+
+        const QString parentDir = bsignoreInfo.absoluteDir().absolutePath();
+        if (QFileInfo::exists(parentDir)) {
+            m_bsignoreWatcher->addPath(parentDir);
+        }
+        if (bsignoreInfo.exists()) {
+            m_bsignoreWatcher->addPath(m_bsignorePath);
+        }
+    }
+}
+
+bool QueryService::isExcludedByBsignore(const QString& absolutePath) const
+{
+    if (!m_bsignoreLoaded || m_bsignorePatternCount <= 0) {
+        return false;
+    }
+    return m_bsignoreParser.matches(absolutePath.toStdString());
+}
+
+QJsonObject QueryService::bsignoreStatusJson() const
+{
+    QJsonObject status;
+    status[QStringLiteral("path")] = m_bsignorePath;
+    status[QStringLiteral("loaded")] = m_bsignoreLoaded;
+    status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
+    status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;
+    status[QStringLiteral("lastLoadedAt")] = m_bsignoreLastLoadedAtMs > 0
+        ? QDateTime::fromMSecsSinceEpoch(m_bsignoreLastLoadedAtMs).toUTC().toString(Qt::ISODate)
+        : QString();
+    return status;
+}
+
+QJsonObject QueryService::processStatsForService(const QString& serviceName) const
+{
+    QJsonObject stats;
+    stats[QStringLiteral("service")] = serviceName;
+    stats[QStringLiteral("available")] = false;
+
+    const QString pidPath = QStringLiteral("/tmp/betterspotlight-%1/%2.pid")
+        .arg(getuid()).arg(serviceName);
+    QFile pidFile(pidPath);
+    if (!pidFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return stats;
+    }
+
+    bool ok = false;
+    const qint64 pid = pidFile.readAll().trimmed().toLongLong(&ok);
+    if (!ok || pid <= 0) {
+        return stats;
+    }
+
+    QProcess ps;
+    ps.start(QStringLiteral("ps"), {
+        QStringLiteral("-o"), QStringLiteral("rss="),
+        QStringLiteral("-o"), QStringLiteral("%cpu="),
+        QStringLiteral("-p"), QString::number(pid),
+    });
+    if (!ps.waitForFinished(1000) || ps.exitStatus() != QProcess::NormalExit || ps.exitCode() != 0) {
+        return stats;
+    }
+
+    const QString out = QString::fromUtf8(ps.readAllStandardOutput()).trimmed();
+    if (out.isEmpty()) {
+        return stats;
+    }
+    const QStringList fields = out.split(QRegularExpression(QStringLiteral("\\s+")),
+                                         Qt::SkipEmptyParts);
+    if (fields.size() < 2) {
+        return stats;
+    }
+
+    bool rssOk = false;
+    bool cpuOk = false;
+    const qint64 rssKb = fields.at(0).toLongLong(&rssOk);
+    const double cpuPct = fields.at(1).toDouble(&cpuOk);
+    if (!rssOk || !cpuOk) {
+        return stats;
+    }
+
+    stats[QStringLiteral("available")] = true;
+    stats[QStringLiteral("pid")] = pid;
+    stats[QStringLiteral("rssKb")] = rssKb;
+    stats[QStringLiteral("cpuPct")] = cpuPct;
+    return stats;
+}
+
+QJsonObject QueryService::queryStatsSnapshot() const
+{
+    QJsonObject stats;
+    stats[QStringLiteral("searchCount")] = static_cast<qint64>(m_searchCount.load());
+    stats[QStringLiteral("rewriteAppliedCount")] = static_cast<qint64>(m_rewriteAppliedCount.load());
+    stats[QStringLiteral("semanticOnlyAdmittedCount")] =
+        static_cast<qint64>(m_semanticOnlyAdmittedCount.load());
+    stats[QStringLiteral("semanticOnlySuppressedCount")] =
+        static_cast<qint64>(m_semanticOnlySuppressedCount.load());
+    return stats;
+}
+
 QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 {
     if (!ensureStoreOpen()) {
@@ -522,7 +755,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     }
 
     // Parse query
-    QString query = params.value(QStringLiteral("query")).toString();
+    const QString originalRawQuery = params.value(QStringLiteral("query")).toString();
+    QString query = originalRawQuery;
     {
         const auto nq = QueryNormalizer::normalize(query);
         query = nq.normalized;
@@ -544,6 +778,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
                                      QStringLiteral("Missing 'query' parameter"));
     }
+    m_searchCount.fetch_add(1);
 
     // Parse limit (default 20)
     int limit = 20;
@@ -656,6 +891,31 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const QString queryLower = query.toLower();
     const QueryHints queryHints = parseQueryHints(queryLower);
     const QStringList queryTokensRaw = tokenizeWords(queryLower);
+    QSet<QString> highSignalShortTokens;
+    {
+        static const QRegularExpression rawTokenRegex(QStringLiteral(R"([A-Za-z0-9_]+)"));
+        auto tokenMatch = rawTokenRegex.globalMatch(originalRawQuery);
+        while (tokenMatch.hasNext()) {
+            const QString token = tokenMatch.next().captured(0);
+            if (token.size() != 3) {
+                continue;
+            }
+            bool hasAlpha = false;
+            bool allUpper = true;
+            for (const QChar ch : token) {
+                if (ch.isLetter()) {
+                    hasAlpha = true;
+                    if (!ch.isUpper()) {
+                        allUpper = false;
+                        break;
+                    }
+                }
+            }
+            if (hasAlpha && allUpper) {
+                highSignalShortTokens.insert(token.toLower());
+            }
+        }
+    }
     QSet<QString> querySignalTokens;
     for (const QString& token : queryTokensRaw) {
         if (token.size() >= 3 && !queryStopwords().contains(token)) {
@@ -751,7 +1011,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         int appliedReplacements = 0;
         for (int i = 0; i < queryTokens.size(); ++i) {
             const QString token = queryTokens.at(i);
-            if (token.size() < 4 || stopwords.contains(token)) {
+            const bool eligibleShortToken =
+                token.size() == 3 && highSignalShortTokens.contains(token.toLower());
+            if ((!eligibleShortToken && token.size() < 4) || stopwords.contains(token)) {
                 continue;
             }
 
@@ -961,6 +1223,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
 
         const auto& item = itemOpt.value();
+        if (isExcludedByBsignore(item.path)) {
+            continue;
+        }
 
         SearchResult sr;
         sr.itemId = item.id;
@@ -1082,18 +1347,32 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return true;
     };
 
-    const bool pathOrCodeLikeQuery = looksLikePathOrCodeQuery(queryLower);
-    const bool naturalLanguageQuery =
-        !pathOrCodeLikeQuery && looksLikeNaturalLanguageQuery(querySignalTokens);
-    const float semanticThreshold = naturalLanguageQuery ? 0.62f : 0.70f;
-    const float semanticOnlyFloor = naturalLanguageQuery ? 0.08f : 0.15f;
+    const QueryClass queryClass = classifyQueryShape(queryLower, querySignalTokens, queryTokensRaw);
+    const bool naturalLanguageQuery = queryClass == QueryClass::NaturalLanguage;
+    const bool shortAmbiguousQuery = queryClass == QueryClass::ShortAmbiguous;
+    const float semanticThreshold = naturalLanguageQuery ? 0.62f
+        : (shortAmbiguousQuery ? 0.66f : 0.70f);
+    const float semanticOnlyFloor = naturalLanguageQuery ? 0.08f
+        : (shortAmbiguousQuery ? 0.10f : 0.15f);
     const int semanticOnlyCap = naturalLanguageQuery
         ? std::min(6, limit)
-        : std::min(3, limit / 2);
+        : (shortAmbiguousQuery ? std::min(4, limit) : std::min(3, limit / 2));
+    const float mergeLexicalWeight = naturalLanguageQuery ? 0.55f
+        : (shortAmbiguousQuery ? 0.65f : 0.70f);
+    const float mergeSemanticWeight = naturalLanguageQuery ? 0.45f
+        : (shortAmbiguousQuery ? 0.35f : 0.30f);
+    const bool strictLexicalWeakOrEmpty =
+        strictHits.empty() || bestLexicalStrength(strictHits) < 2.0;
     constexpr float kSemanticOnlySafetySimilarity = 0.78f;
+    const float relaxedSemanticOnlySimilarity =
+        std::max(semanticThreshold + 0.03f, 0.66f);
 
     std::vector<SemanticResult> semanticResults;
     std::unordered_map<int64_t, float> semanticSimilarityByItemId;
+    std::unordered_map<int64_t, float> semanticNormalizedByItemId;
+    int semanticOnlySuppressedCount = 0;
+    int semanticOnlyAdmittedCount = 0;
+    QHash<QString, int> semanticOnlyAdmitReasons;
     if (m_embeddingManager && m_embeddingManager->isAvailable()) {
         std::vector<float> queryVec = m_embeddingManager->embedQuery(query);
         if (!queryVec.empty()) {
@@ -1117,12 +1396,15 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                         continue;
                     }
 
-                    if (hasSearchFilters) {
-                        auto semanticItemOpt = m_store->getItemById(itemIdOpt.value());
-                        if (!semanticItemOpt.has_value()
-                            || !itemPassesSearchOptions(semanticItemOpt.value())) {
-                            continue;
-                        }
+                    auto semanticItemOpt = m_store->getItemById(itemIdOpt.value());
+                    if (!semanticItemOpt.has_value()) {
+                        continue;
+                    }
+                    if (isExcludedByBsignore(semanticItemOpt->path)) {
+                        continue;
+                    }
+                    if (hasSearchFilters && !itemPassesSearchOptions(semanticItemOpt.value())) {
+                        continue;
                     }
 
                     SemanticResult sr;
@@ -1130,6 +1412,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                     sr.cosineSimilarity = cosineSim;
                     semanticResults.push_back(sr);
                     semanticSimilarityByItemId[sr.itemId] = cosineSim;
+                    semanticNormalizedByItemId[sr.itemId] = normalizedSemantic;
                 }
             }
         }
@@ -1138,6 +1421,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     if (!semanticResults.empty()) {
         MergeConfig mergeConfig;
         mergeConfig.similarityThreshold = semanticThreshold;
+        mergeConfig.lexicalWeight = mergeLexicalWeight;
+        mergeConfig.semanticWeight = mergeSemanticWeight;
         mergeConfig.maxResults = std::max(limit * 2, limit);
         results = SearchMerger::merge(results, semanticResults, mergeConfig);
 
@@ -1147,14 +1432,19 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         for (const auto& raw : results) {
             SearchResult sr = raw;
             const bool semanticOnly = lexicalItemIds.find(sr.itemId) == lexicalItemIds.end();
+            const float semanticSimilarity = semanticSimilarityByItemId.count(sr.itemId) > 0
+                ? semanticSimilarityByItemId.at(sr.itemId)
+                : 0.0f;
+            const float semanticNormalized = semanticNormalizedByItemId.count(sr.itemId) > 0
+                ? semanticNormalizedByItemId.at(sr.itemId)
+                : 0.0f;
+            sr.semanticSimilarity = semanticSimilarity;
+            sr.semanticNormalized = semanticNormalized;
             if (semanticOnly) {
-                float semanticSimilarity = 0.0f;
-                auto simIt = semanticSimilarityByItemId.find(sr.itemId);
-                if (simIt != semanticSimilarityByItemId.end()) {
-                    semanticSimilarity = simIt->second;
-                }
-
                 bool allowSemanticOnly = semanticSimilarity >= kSemanticOnlySafetySimilarity;
+                QString admitReason = allowSemanticOnly
+                    ? QStringLiteral("high_similarity")
+                    : QStringLiteral("suppressed");
                 if (!allowSemanticOnly) {
                     if (sr.path.isEmpty() || sr.name.isEmpty()) {
                         auto itemOpt = m_store->getItemById(sr.itemId);
@@ -1173,19 +1463,36 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                         for (const QString& token : overlapTokens) {
                             if (querySignalTokens.contains(token)) {
                                 allowSemanticOnly = true;
+                                admitReason = QStringLiteral("lexical_overlap");
                                 break;
                             }
                         }
                     }
+
+                    if (!allowSemanticOnly && strictLexicalWeakOrEmpty
+                        && naturalLanguageQuery
+                        && semanticSimilarity >= relaxedSemanticOnlySimilarity) {
+                        allowSemanticOnly = true;
+                        admitReason = QStringLiteral("weak_lexical_semantic");
+                    }
                 }
 
                 if (!allowSemanticOnly) {
+                    ++semanticOnlySuppressedCount;
                     continue;
                 }
                 if (semanticOnlyAdded >= semanticOnlyCap) {
+                    ++semanticOnlySuppressedCount;
                     continue;
                 }
                 ++semanticOnlyAdded;
+                ++semanticOnlyAdmittedCount;
+                semanticOnlyAdmitReasons[admitReason] =
+                    semanticOnlyAdmitReasons.value(admitReason) + 1;
+            } else {
+                if (semanticSimilarity > 0.0f) {
+                    ++semanticOnlyAdmitReasons[QStringLiteral("blended_result")];
+                }
             }
             cappedResults.push_back(sr);
         }
@@ -1239,6 +1546,16 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         if (m_typeAffinity) {
             m2Boost += m_typeAffinity->getBoost(sr.path);
+        }
+
+        if (naturalLanguageQuery && sr.semanticNormalized > 0.0) {
+            const bool semanticOnly = lexicalItemIds.find(sr.itemId) == lexicalItemIds.end();
+            const double normalizedSemantic = std::clamp(sr.semanticNormalized, 0.0, 1.0);
+            const double semanticBoost = semanticOnly
+                ? std::min(14.0, 5.0 + (normalizedSemantic * 14.0))
+                : std::min(8.0, normalizedSemantic * 8.0);
+            m2Boost += semanticBoost;
+            sr.scoreBreakdown.semanticBoost += semanticBoost;
         }
 
         if (!querySignalTokens.isEmpty()) {
@@ -1390,6 +1707,18 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     result[QStringLiteral("results")] = resultsArray;
     result[QStringLiteral("queryTime")] = static_cast<int>(timer.elapsed());
     result[QStringLiteral("totalMatches")] = totalMatches;
+
+    if (rewriteDecision.applied) {
+        m_rewriteAppliedCount.fetch_add(1);
+    }
+    if (semanticOnlyAdmittedCount > 0) {
+        m_semanticOnlyAdmittedCount.fetch_add(
+            static_cast<uint64_t>(semanticOnlyAdmittedCount));
+    }
+    if (semanticOnlySuppressedCount > 0) {
+        m_semanticOnlySuppressedCount.fetch_add(
+            static_cast<uint64_t>(semanticOnlySuppressedCount));
+    }
     if (debugRequested) {
         QJsonObject debugInfo;
         switch (queryMode) {
@@ -1409,9 +1738,20 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("semanticCandidates")] =
             static_cast<int>(semanticResults.size());
         debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
+        debugInfo[QStringLiteral("queryClass")] = queryClassToString(queryClass);
         debugInfo[QStringLiteral("semanticThresholdApplied")] = semanticThreshold;
         debugInfo[QStringLiteral("semanticOnlyFloorApplied")] = semanticOnlyFloor;
         debugInfo[QStringLiteral("semanticOnlyCapApplied")] = semanticOnlyCap;
+        debugInfo[QStringLiteral("mergeLexicalWeightApplied")] = mergeLexicalWeight;
+        debugInfo[QStringLiteral("mergeSemanticWeightApplied")] = mergeSemanticWeight;
+        debugInfo[QStringLiteral("semanticOnlySuppressedCount")] = semanticOnlySuppressedCount;
+        debugInfo[QStringLiteral("semanticOnlyAdmittedCount")] = semanticOnlyAdmittedCount;
+        QJsonObject semanticReasonSummary;
+        for (auto it = semanticOnlyAdmitReasons.constBegin();
+             it != semanticOnlyAdmitReasons.constEnd(); ++it) {
+            semanticReasonSummary[it.key()] = it.value();
+        }
+        debugInfo[QStringLiteral("semanticOnlyAdmitReasonSummary")] = semanticReasonSummary;
         debugInfo[QStringLiteral("queryAfterParse")] = query;
         QJsonArray parsedTypes;
         for (const QString& extractedType : parsed.extractedTypes) {
@@ -1657,6 +1997,23 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         QJsonArray::fromStringList(rebuildStateCopy.scopeRoots);
     indexHealth[QStringLiteral("vectorRebuildScopeCandidates")] =
         rebuildStateCopy.scopeCandidates;
+    const QJsonObject bsignoreStatus = bsignoreStatusJson();
+    indexHealth[QStringLiteral("bsignorePath")] = bsignoreStatus.value(QStringLiteral("path")).toString();
+    indexHealth[QStringLiteral("bsignoreLoaded")] = bsignoreStatus.value(QStringLiteral("loaded")).toBool(false);
+    indexHealth[QStringLiteral("bsignorePatternCount")] =
+        bsignoreStatus.value(QStringLiteral("patternCount")).toInt(0);
+    indexHealth[QStringLiteral("bsignoreLastLoadedAtMs")] =
+        bsignoreStatus.value(QStringLiteral("lastLoadedAtMs")).toInteger();
+    indexHealth[QStringLiteral("bsignoreLastLoadedAt")] =
+        bsignoreStatus.value(QStringLiteral("lastLoadedAt")).toString();
+    const QJsonObject queryStats = queryStatsSnapshot();
+    indexHealth[QStringLiteral("searchCount")] = queryStats.value(QStringLiteral("searchCount")).toInteger();
+    indexHealth[QStringLiteral("rewriteAppliedCount")] =
+        queryStats.value(QStringLiteral("rewriteAppliedCount")).toInteger();
+    indexHealth[QStringLiteral("semanticOnlyAdmittedCount")] =
+        queryStats.value(QStringLiteral("semanticOnlyAdmittedCount")).toInteger();
+    indexHealth[QStringLiteral("semanticOnlySuppressedCount")] =
+        queryStats.value(QStringLiteral("semanticOnlySuppressedCount")).toInteger();
 
     bool includesHomeRoot = false;
     const QString homePath = QDir::homePath();
@@ -1705,6 +2062,102 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     result[QStringLiteral("indexHealth")] = indexHealth;
     result[QStringLiteral("serviceHealth")] = serviceHealth;
     result[QStringLiteral("issues")] = QJsonArray();
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject& params)
+{
+    if (!ensureStoreOpen()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+
+    int limit = params.value(QStringLiteral("limit")).toInt(50);
+    int offset = params.value(QStringLiteral("offset")).toInt(0);
+    if (limit < 1) {
+        limit = 1;
+    } else if (limit > 500) {
+        limit = 500;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+
+    const QJsonObject summaryResponse = handleGetHealth(id);
+    if (summaryResponse.value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        return summaryResponse;
+    }
+    const QJsonObject summaryResult = summaryResponse.value(QStringLiteral("result")).toObject();
+
+    QJsonArray failures;
+    int expectedGapRows = 0;
+    int criticalRows = 0;
+    if (sqlite3* db = m_store->rawDb()) {
+        const char* sql = R"(
+            SELECT i.path, f.stage, f.error_message, f.failure_count, f.last_failed_at
+            FROM failures f
+            JOIN items i ON i.id = f.item_id
+            ORDER BY f.last_failed_at DESC
+            LIMIT ? OFFSET ?
+        )";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, limit);
+            sqlite3_bind_int(stmt, 2, offset);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                const char* stage = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                const char* error = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+                const int failureCount = sqlite3_column_int(stmt, 3);
+                const double lastFailedAt = sqlite3_column_double(stmt, 4);
+
+                const QString errorText = error ? QString::fromUtf8(error) : QString();
+                const bool expectedGap = isExpectedGapFailureMessage(errorText);
+                if (expectedGap) {
+                    ++expectedGapRows;
+                } else {
+                    ++criticalRows;
+                }
+
+                QJsonObject entry;
+                entry[QStringLiteral("path")] = path ? QString::fromUtf8(path) : QString();
+                entry[QStringLiteral("stage")] = stage ? QString::fromUtf8(stage) : QString();
+                entry[QStringLiteral("error")] = errorText;
+                entry[QStringLiteral("failureCount")] = failureCount;
+                entry[QStringLiteral("expectedGap")] = expectedGap;
+                entry[QStringLiteral("severity")] =
+                    expectedGap ? QStringLiteral("expected_gap") : QStringLiteral("critical");
+                entry[QStringLiteral("lastFailedAt")] = lastFailedAt > 0.0
+                    ? QDateTime::fromSecsSinceEpoch(static_cast<qint64>(lastFailedAt))
+                          .toUTC()
+                          .toString(Qt::ISODate)
+                    : QString();
+                failures.append(entry);
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    QJsonObject processStats;
+    processStats[QStringLiteral("query")] = processStatsForService(QStringLiteral("query"));
+    processStats[QStringLiteral("indexer")] = processStatsForService(QStringLiteral("indexer"));
+    processStats[QStringLiteral("extractor")] = processStatsForService(QStringLiteral("extractor"));
+
+    QJsonObject details;
+    details[QStringLiteral("failures")] = failures;
+    details[QStringLiteral("failuresLimit")] = limit;
+    details[QStringLiteral("failuresOffset")] = offset;
+    details[QStringLiteral("criticalFailureRows")] = criticalRows;
+    details[QStringLiteral("expectedGapFailureRows")] = expectedGapRows;
+    details[QStringLiteral("processStats")] = processStats;
+    details[QStringLiteral("queryStats")] = queryStatsSnapshot();
+    details[QStringLiteral("bsignore")] = bsignoreStatusJson();
+
+    QJsonObject result;
+    result[QStringLiteral("indexHealth")] = summaryResult.value(QStringLiteral("indexHealth")).toObject();
+    result[QStringLiteral("serviceHealth")] = summaryResult.value(QStringLiteral("serviceHealth")).toObject();
+    result[QStringLiteral("issues")] = summaryResult.value(QStringLiteral("issues")).toArray();
+    result[QStringLiteral("details")] = details;
     return IpcMessage::makeResponse(id, result);
 }
 
