@@ -159,6 +159,7 @@ private:
     std::atomic<size_t> m_preparingCount{0};
     std::atomic<size_t> m_writingCount{0};
     std::atomic<size_t> m_failedCount{0};
+    std::atomic<size_t> m_retriedCount{0};
     std::atomic<size_t> m_committedCount{0};
     std::atomic<size_t> m_coalescedCount{0};
     std::atomic<size_t> m_staleDroppedCount{0};
@@ -173,6 +174,7 @@ private:
 
     static constexpr int kBatchCommitSize = 50;
     static constexpr int kBatchCommitIntervalMs = 250;
+    static constexpr int kMaxPipelineRetries = 3;
     static constexpr size_t kScanHighWatermark = 8000;
     static constexpr size_t kScanResumeWatermark = 5000;
     static constexpr int kEnqueueRetrySleepMs = 25;

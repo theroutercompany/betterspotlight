@@ -16,6 +16,32 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+bool isTransientExtractionFailure(const PreparedWork& prepared)
+{
+    if (!prepared.failure.has_value()) {
+        return false;
+    }
+    if (prepared.failure->stage != QStringLiteral("extraction")) {
+        return false;
+    }
+
+    const auto status = prepared.failure->extractionStatus.value_or(ExtractionResult::Status::Unknown);
+    switch (status) {
+    case ExtractionResult::Status::Inaccessible:
+    case ExtractionResult::Status::Timeout:
+    case ExtractionResult::Status::Unknown:
+        return true;
+    case ExtractionResult::Status::Success:
+    case ExtractionResult::Status::CorruptedFile:
+    case ExtractionResult::Status::UnsupportedFormat:
+    case ExtractionResult::Status::SizeExceeded:
+    case ExtractionResult::Status::Cancelled:
+        return false;
+    }
+
+    return false;
+}
+
 } // namespace
 
 // ── Construction / destruction ──────────────────────────────
@@ -188,6 +214,7 @@ void Pipeline::resetRuntimeState()
     m_preparingCount.store(0);
     m_writingCount.store(0);
     m_failedCount.store(0);
+    m_retriedCount.store(0);
     m_committedCount.store(0);
     m_coalescedCount.store(0);
     m_staleDroppedCount.store(0);
@@ -393,6 +420,7 @@ QueueStats Pipeline::queueStatus() const
     stats.prepWorkers = m_allowedPrepWorkers.load();
     stats.writerBatchDepth = m_writerBatchDepth.load();
     stats.failedItems = stats.droppedItems + m_failedCount.load();
+    // m_retriedCount is available for telemetry but QueueStats doesn't need it yet.
     stats.activeItems = stats.preparing + stats.writing;
 
     return stats;
@@ -675,7 +703,35 @@ void Pipeline::writerLoop()
             m_processedCount.fetch_add(1);
 
             if (result.status == IndexResult::Status::ExtractionFailed) {
-                m_failedCount.fetch_add(1);
+                const bool shouldRetry = isTransientExtractionFailure(prepared)
+                    && prepared.retryCount < kMaxPipelineRetries;
+                if (shouldRetry) {
+                    WorkItem retryItem;
+                    retryItem.type = WorkItem::Type::ModifiedContent;
+                    retryItem.filePath = prepared.path.toStdString();
+                    retryItem.retryCount = prepared.retryCount + 1;
+
+                    const int backoffMs = std::min(
+                        500 * (1 << (prepared.retryCount * 2)),
+                        8000);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
+
+                    if (m_workQueue.enqueue(retryItem)) {
+                        m_retriedCount.fetch_add(1);
+                        LOG_INFO(bsIndex, "Re-enqueued for retry (%d/%d): %s",
+                                 retryItem.retryCount,
+                                 kMaxPipelineRetries,
+                                 qUtf8Printable(prepared.path));
+                    } else {
+                        m_failedCount.fetch_add(1);
+                        LOG_WARN(bsIndex, "Failed to re-enqueue retry (%d/%d): %s",
+                                 retryItem.retryCount,
+                                 kMaxPipelineRetries,
+                                 qUtf8Printable(prepared.path));
+                    }
+                } else {
+                    m_failedCount.fetch_add(1);
+                }
             }
 
             ++batchCount;
