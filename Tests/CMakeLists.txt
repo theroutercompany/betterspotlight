@@ -50,3 +50,9 @@ bs_add_test(test-embedding-fallback  Integration/test_embedding_fallback.cpp)
 bs_add_test(test-boost-verification  Integration/test_boost_verification.cpp)
 bs_add_test(test-context-boost       Integration/test_context_boost.cpp)
 bs_add_test(test-embedding-recovery  Integration/test_embedding_recovery.cpp)
+
+# ── Relevance gate tests ────────────────────────────────────────
+bs_add_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp)
+target_compile_definitions(test-ui-sim-query-suite PRIVATE
+    BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
+)
