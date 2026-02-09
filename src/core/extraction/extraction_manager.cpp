@@ -10,7 +10,8 @@ namespace bs {
 // ── Construction / destruction ──────────────────────────────
 
 ExtractionManager::ExtractionManager()
-    : m_textExtractor(std::make_unique<TextExtractor>())
+    : m_mdlsTextExtractor(std::make_unique<MdlsTextExtractor>())
+    , m_textExtractor(std::make_unique<TextExtractor>())
     , m_pdfExtractor(std::make_unique<PdfExtractor>())
     , m_ocrExtractor(std::make_unique<OcrExtractor>())
 {
@@ -150,6 +151,13 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
         // Honor extractor-specific extension support to avoid routing formats
         // (e.g. .icns) into extractors that cannot decode them.
         const QString extension = info.suffix().toLower();
+
+        if ((kind == ItemKind::Text || kind == ItemKind::Code || kind == ItemKind::Markdown)
+            && m_mdlsTextExtractor
+            && m_mdlsTextExtractor->supports(extension)) {
+            extractor = m_mdlsTextExtractor.get();
+        }
+
         if (!extractor->supports(extension)) {
             result.status = ExtractionResult::Status::UnsupportedFormat;
             result.errorMessage = QString("Extension '%1' is not supported by extractor")

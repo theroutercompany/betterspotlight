@@ -1,4 +1,5 @@
 add_library(betterspotlight-core-extraction STATIC
+    mdls_text_extractor.cpp
     text_extractor.cpp
     pdf_extractor.cpp
     ocr_extractor.cpp

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/extraction/extractor.h"
+#include "core/extraction/mdls_text_extractor.h"
 #include "core/extraction/text_extractor.h"
 #include "core/extraction/pdf_extractor.h"
 #include "core/extraction/ocr_extractor.h"
@@ -65,6 +66,7 @@ public:
     bool isCancelRequested() const;
 
 private:
+    std::unique_ptr<MdlsTextExtractor> m_mdlsTextExtractor;
     std::unique_ptr<TextExtractor> m_textExtractor;
     std::unique_ptr<PdfExtractor> m_pdfExtractor;
     std::unique_ptr<OcrExtractor> m_ocrExtractor;
