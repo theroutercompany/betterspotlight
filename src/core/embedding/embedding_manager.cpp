@@ -6,7 +6,9 @@
 #include "core/models/tokenizer_factory.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 
+#include <chrono>
 #include <cmath>
 
 #if defined(ONNXRUNTIME_FOUND) && __has_include(<onnxruntime_cxx_api.h>)
@@ -17,6 +19,36 @@
 #endif
 
 namespace bs {
+
+bool EmbeddingCircuitBreaker::isOpen() const
+{
+    if (consecutiveFailures.load() < kOpenThreshold) {
+        return false;
+    }
+    // In open state — check if enough time has elapsed for half-open
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    const int64_t lastFail = lastFailureTime.load();
+    if (now - lastFail >= kHalfOpenDelayMs) {
+        return false;  // half-open: allow one attempt
+    }
+    return true;
+}
+
+void EmbeddingCircuitBreaker::recordSuccess()
+{
+    consecutiveFailures.store(0);
+}
+
+void EmbeddingCircuitBreaker::recordFailure()
+{
+    consecutiveFailures.fetch_add(1);
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+    lastFailureTime.store(now);
+}
 
 class EmbeddingManager::Impl {
 public:
@@ -136,6 +168,11 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
         return {};
     }
 
+    if (m_circuitBreaker.isOpen()) {
+        qWarning() << "EmbeddingManager circuit breaker is open, skipping inference";
+        return {};
+    }
+
     const BatchTokenizerOutput tokenized = m_tokenizer->tokenizeBatch(texts);
     if (tokenized.batchSize <= 0 || tokenized.seqLength <= 0) {
         return {};
@@ -216,6 +253,7 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
                 }
                 embeddings.push_back(normalizeEmbedding(std::move(embedding)));
             }
+            m_circuitBreaker.recordSuccess();
             return embeddings;
         }
 
@@ -231,13 +269,16 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
                 }
                 embeddings.push_back(normalizeEmbedding(std::move(embedding)));
             }
+            m_circuitBreaker.recordSuccess();
             return embeddings;
         }
 
         qWarning() << "EmbeddingManager inference failed: unsupported output shape";
+        m_circuitBreaker.recordFailure();
         return {};
     } catch (const Ort::Exception& ex) {
         qWarning() << "EmbeddingManager inference failed:" << ex.what();
+        m_circuitBreaker.recordFailure();
         return {};
     }
 #else
