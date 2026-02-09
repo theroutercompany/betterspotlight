@@ -28,7 +28,8 @@ double Scorer::computeBaseMatchScore(MatchType matchType, double bm25RawScore) c
     case MatchType::Content:
         // FTS5 bm25 returns lower-is-better values (often negative). Convert
         // to a positive lexical signal so stronger matches get higher scores.
-        return std::max(0.0, -bm25RawScore) * m_weights.contentMatchWeight;
+        return (std::max(0.0, -bm25RawScore) * m_weights.contentMatchWeight)
+               + ((bm25RawScore < 0.0) ? 1e-12 : 0.0);
     case MatchType::Fuzzy:
         return static_cast<double>(m_weights.fuzzyMatchWeight);
     }
@@ -164,6 +165,11 @@ ScoreBreakdown Scorer::computeScore(const SearchResult& result,
 
     // 1. Base match score
     breakdown.baseMatchScore = computeBaseMatchScore(result.matchType, bm25RawScore);
+
+    if (result.matchType == MatchType::Fuzzy && result.fuzzyDistance > 1) {
+        const double penalty = (result.fuzzyDistance == 2) ? 0.5 : 0.25;
+        breakdown.baseMatchScore *= penalty;
+    }
 
     // 2. Recency boost (parse modificationDate as epoch seconds)
     if (!result.modificationDate.isEmpty()) {
