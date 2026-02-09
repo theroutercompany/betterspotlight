@@ -2,8 +2,8 @@
 
 #include "core/ipc/service_base.h"
 #include "core/index/sqlite_store.h"
+#include "core/index/typo_lexicon.h"
 #include "core/ranking/scorer.h"
-#include "core/ranking/match_classifier.h"
 
 #include <atomic>
 #include <memory>
@@ -55,6 +55,7 @@ private:
 
     // ── Store + services ──
     std::optional<SQLiteStore> m_store;
+    TypoLexicon m_typoLexicon;
     Scorer m_scorer;
 
     // M2 modules — initialized lazily after store open
