@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 #include "core/index/typo_lexicon.h"
 #include "core/index/sqlite_store.h"
 #include "core/query/query_normalizer.h"
@@ -177,47 +178,21 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
 
     // Semantic search setup (optional - skip semantic_probe if assets missing).
     bool semanticAvailable = false;
+    std::unique_ptr<bs::ModelRegistry> modelRegistry;
     std::unique_ptr<bs::EmbeddingManager> embeddingManager;
     std::unique_ptr<bs::VectorIndex> vectorIndex;
     std::unique_ptr<bs::VectorStore> vectorStore;
 
 #ifdef BETTERSPOTLIGHT_WITH_ONNX
     {
-        QString modelPath;
-        QString vocabPath;
-        QStringList searchDirs;
-
-        const QString envModelDir =
-            QProcessEnvironment::systemEnvironment().value(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
-        if (!envModelDir.isEmpty()) {
-            searchDirs << QDir::cleanPath(envModelDir);
-        }
-
-        const QString appDir = QCoreApplication::applicationDirPath();
-        searchDirs << QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"));
-        searchDirs << QDir::cleanPath(appDir + QStringLiteral("/../../data/models"));
-#ifdef BETTERSPOTLIGHT_SOURCE_DIR
-        searchDirs << QDir::cleanPath(QString::fromUtf8(BETTERSPOTLIGHT_SOURCE_DIR)
-                                      + QStringLiteral("/data/models"));
-#endif
-        searchDirs.removeDuplicates();
-
-        for (const QString& dir : searchDirs) {
-            const QString candidateModel = dir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-            const QString candidateVocab = dir + QStringLiteral("/vocab.txt");
-            if (QFileInfo::exists(candidateModel) && QFileInfo::exists(candidateVocab)) {
-                modelPath = candidateModel;
-                vocabPath = candidateVocab;
-                break;
-            }
-        }
-
+        const QString modelsDir = bs::ModelRegistry::resolveModelsDir();
         const QString dataDir = QFileInfo(dbPath).absolutePath();
         const QString vectorIndexPath = dataDir + QStringLiteral("/vectors.hnsw");
         const QString vectorMetaPath = dataDir + QStringLiteral("/vectors.meta");
 
-        if (!modelPath.isEmpty() && QFileInfo::exists(vectorIndexPath)) {
-            embeddingManager = std::make_unique<bs::EmbeddingManager>(modelPath, vocabPath);
+        modelRegistry = std::make_unique<bs::ModelRegistry>(modelsDir);
+        if (modelRegistry->hasModel("bi-encoder") && QFileInfo::exists(vectorIndexPath)) {
+            embeddingManager = std::make_unique<bs::EmbeddingManager>(modelRegistry.get());
             if (embeddingManager->initialize()) {
                 vectorIndex = std::make_unique<bs::VectorIndex>();
                 if (vectorIndex->load(vectorIndexPath.toStdString(), vectorMetaPath.toStdString())) {

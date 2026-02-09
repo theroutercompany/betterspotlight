@@ -1,5 +1,6 @@
 #include <QtTest/QtTest>
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 #include "core/vector/search_merger.h"
 
 class TestEmbeddingFallback : public QObject {
@@ -12,8 +13,8 @@ private slots:
 
 void TestEmbeddingFallback::testNoModelGracefulFallback()
 {
-    bs::EmbeddingManager manager(QStringLiteral("missing_model.onnx"),
-                                 QStringLiteral("missing_vocab.txt"));
+    bs::ModelRegistry registry(QStringLiteral("/nonexistent/models"));
+    bs::EmbeddingManager manager(&registry);
     QVERIFY(!manager.initialize());
     QVERIFY(!manager.isAvailable());
 
@@ -33,8 +34,7 @@ void TestEmbeddingFallback::testNoModelGracefulFallback()
 
 void TestEmbeddingFallback::testEmbedFailureReturnsFTS5()
 {
-    bs::EmbeddingManager manager(QStringLiteral("bad.onnx"),
-                                 QStringLiteral("bad_vocab.txt"));
+    bs::EmbeddingManager manager(nullptr);
 
     const std::vector<float> embedding = manager.embed(QStringLiteral("test"));
     QVERIFY(embedding.empty());

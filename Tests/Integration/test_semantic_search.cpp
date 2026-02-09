@@ -3,6 +3,7 @@
 #include "core/vector/vector_store.h"
 #include "core/vector/search_merger.h"
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 
 #include <sqlite3.h>
 
@@ -30,8 +31,7 @@ std::vector<float> TestSemanticSearch::makeVector(int seed)
 
 void TestSemanticSearch::testSemanticSearchFallback()
 {
-    bs::EmbeddingManager manager(QStringLiteral("missing.onnx"),
-                                 QStringLiteral("missing_vocab.txt"));
+    bs::EmbeddingManager manager(nullptr);
     QVERIFY(!manager.isAvailable());
 
     const std::vector<float> embedding = manager.embed(QStringLiteral("test query"));

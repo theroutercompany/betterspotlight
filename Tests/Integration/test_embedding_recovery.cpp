@@ -1,5 +1,6 @@
 #include <QtTest/QtTest>
 #include "core/embedding/embedding_manager.h"
+#include "core/models/model_registry.h"
 #include "core/vector/vector_index.h"
 #include "core/vector/search_merger.h"
 
@@ -28,8 +29,8 @@ std::vector<float> TestEmbeddingRecovery::makeVector(int seed)
 
 void TestEmbeddingRecovery::testRecoveryAfterModelFailure()
 {
-    bs::EmbeddingManager manager(QStringLiteral("missing_model.onnx"),
-                                 QStringLiteral("missing_vocab.txt"));
+    bs::ModelRegistry registry(QStringLiteral("/nonexistent/models"));
+    bs::EmbeddingManager manager(&registry);
     QVERIFY(!manager.initialize());
     QVERIFY(!manager.isAvailable());
 

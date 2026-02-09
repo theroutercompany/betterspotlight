@@ -16,6 +16,7 @@ endmacro()
 
 # ── Unit tests ────────────────────────────────────────────────────
 bs_add_test(test-sqlite-store       Unit/test_sqlite_store.cpp)
+bs_add_test(test-sqlite-store-joined Unit/test_sqlite_store_joined.cpp)
 bs_add_test(test-path-rules         Unit/test_path_rules.cpp)
 bs_add_test(test-scoring            Unit/test_scoring.cpp)
 bs_add_test(test-chunker            Unit/test_chunker.cpp)
@@ -51,6 +52,15 @@ set_tests_properties(test-query-service-relevance-fixture PROPERTIES
 # - Promote to gatePassRate=95.0 in tests/relevance/baselines.json only
 #   after 3 consecutive clean runs of test-query-service-relevance-fixture.
 #
+
+# ── M3 Query understanding tests ───────────────────────────────
+bs_add_test(test-temporal-parser     Unit/test_temporal_parser.cpp)
+bs_add_test(test-entity-extractor    Unit/test_entity_extractor.cpp)
+bs_add_test(test-doctype-classifier  Unit/test_doctype_classifier.cpp)
+bs_add_test(test-rules-engine        Unit/test_rules_engine.cpp)
+
+# ── M3 Unit tests ────────────────────────────────────────────────
+bs_add_test(test-model-registry    Unit/test_model_registry.cpp)
 
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
