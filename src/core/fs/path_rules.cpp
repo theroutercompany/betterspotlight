@@ -2,6 +2,7 @@
 #include "core/shared/logging.h"
 
 #include <QFileInfo>
+#include <algorithm>
 #include <cstring>
 
 namespace bs {
@@ -273,27 +274,59 @@ bool PathRules::matchesDefaultExclusion(const std::string& path) const
 
 bool PathRules::isHiddenPath(const std::string& path) const
 {
-    // Check if any directory component (not the filename itself) starts
-    // with a dot. We look for "/." sequences.
-    size_t pos = 0;
-    while (pos < path.size()) {
-        size_t slash = path.find('/', pos);
-        if (slash == std::string::npos) {
+    static const std::vector<std::string> allowedDotDirs = {
+        // Dev toolchains — index normally
+        ".config/",
+        ".local/",
+        ".cargo/",
+        ".rustup/",
+        ".npm/",
+        ".nvm/",
+        ".pyenv/",
+        ".rbenv/",
+        ".sdkman/",
+        ".gradle/",
+        ".m2/",
+        ".docker/",
+        ".kube/",
+        ".terraform.d/",
+        ".bundle/",
+        // Sensitive dirs — must pass through to isSensitivePath() for MetadataOnly
+        ".ssh/",
+        ".gnupg/",
+        ".gpg/",
+        ".aws/",
+    };
+
+    // Check only directory components (not the filename itself).
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t end = path.find('/', start);
+        if (end == std::string::npos) {
+            end = path.size();
+        }
+
+        if (end > start) {
+            const bool isLastComponent = (end == path.size());
+            const std::string component = path.substr(start, end - start);
+            if (!isLastComponent && component[0] == '.') {
+                std::string dotDirPattern = component;
+                dotDirPattern.push_back('/');
+
+                const bool isAllowedDotDir =
+                    std::find(allowedDotDirs.begin(),
+                              allowedDotDirs.end(),
+                              dotDirPattern) != allowedDotDirs.end();
+                if (!isAllowedDotDir) {
+                    return true;
+                }
+            }
+        }
+
+        if (end == path.size()) {
             break;
         }
-        // Check if the component after this slash starts with '.'
-        if (slash + 1 < path.size() && path[slash + 1] == '.') {
-            // This is a hidden directory component — but we already handle
-            // specific dot-dirs (like .git, .ssh) via exclusions/sensitivity.
-            // This catches the general case.
-            return true;
-        }
-        pos = slash + 1;
-    }
-
-    // Also check if the path itself starts with a dot (relative path).
-    if (!path.empty() && path[0] == '.' && path.size() > 1 && path[1] != '/') {
-        return true;
+        start = end + 1;
     }
 
     return false;
