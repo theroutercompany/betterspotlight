@@ -17,6 +17,9 @@ add_subdirectory(feedback)
 add_library(betterspotlight-core STATIC
     index/sqlite_store.cpp
     index/migration.cpp
+    index/typo_lexicon.cpp
+    query/query_normalizer.cpp
+    query/query_parser.cpp
 )
 
 target_include_directories(betterspotlight-core PUBLIC
