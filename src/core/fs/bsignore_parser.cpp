@@ -32,6 +32,11 @@ bool BsignoreParser::loadFromString(const std::string& content)
     return true;
 }
 
+void BsignoreParser::clear()
+{
+    m_patterns.clear();
+}
+
 void BsignoreParser::parseLines(const std::string& content)
 {
     m_patterns.clear();

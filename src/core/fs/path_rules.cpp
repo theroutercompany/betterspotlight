@@ -1,6 +1,7 @@
 #include "core/fs/path_rules.h"
 #include "core/shared/logging.h"
 
+#include <QDateTime>
 #include <QFileInfo>
 #include <algorithm>
 #include <cstring>
@@ -113,7 +114,7 @@ ValidationResult PathRules::validate(const std::string& filePath,
     // Decision table (doc 03 Stage 3), evaluated in order:
 
     // 1. .bsignore match -> Exclude
-    if (m_bsignoreParser.matches(filePath)) {
+    if (isBsignoreExcluded(filePath)) {
         return ValidationResult::Exclude;
     }
 
@@ -255,12 +256,44 @@ bool PathRules::isCloudArtifact(const std::string& filePath) const
     return false;
 }
 
-void PathRules::loadBsignore(const std::string& bsignorePath)
+bool PathRules::loadBsignore(const std::string& bsignorePath)
 {
-    if (m_bsignoreParser.loadFromFile(bsignorePath)) {
-        LOG_INFO(bsFs, "Loaded .bsignore from %s (%zu patterns)",
-                 bsignorePath.c_str(), m_bsignoreParser.patterns().size());
+    m_bsignorePath = bsignorePath;
+    m_bsignoreLastLoadedAtMs = QDateTime::currentMSecsSinceEpoch();
+
+    const QString qtPath = QString::fromStdString(bsignorePath);
+    const QFileInfo info(qtPath);
+
+    if (!info.exists()) {
+        m_bsignoreParser.clear();
+        m_bsignorePatternCount = 0;
+        m_bsignoreLoaded = true;
+        LOG_INFO(bsFs, ".bsignore not found at %s; using empty pattern set",
+                 bsignorePath.c_str());
+        return true;
     }
+
+    m_bsignoreLoaded = m_bsignoreParser.loadFromFile(bsignorePath);
+    m_bsignorePatternCount = m_bsignoreParser.patterns().size();
+    if (m_bsignoreLoaded) {
+        LOG_INFO(bsFs, "Loaded .bsignore from %s (%zu patterns)",
+                 bsignorePath.c_str(), m_bsignorePatternCount);
+        return true;
+    }
+    return false;
+}
+
+bool PathRules::reloadBsignore()
+{
+    if (m_bsignorePath.empty()) {
+        return false;
+    }
+    return loadBsignore(m_bsignorePath);
+}
+
+bool PathRules::isBsignoreExcluded(const std::string& filePath) const
+{
+    return m_bsignoreParser.matches(filePath);
 }
 
 void PathRules::setExplicitIncludeRoots(const std::vector<std::string>& roots)

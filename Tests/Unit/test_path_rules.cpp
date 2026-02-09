@@ -64,6 +64,8 @@ private slots:
 
     // ── .bsignore integration ────────────────────────────────────
     void testLoadBsignoreAppliesPatterns();
+    void testReloadBsignoreReflectsChanges();
+    void testReloadBsignoreMissingFileClearsPatterns();
 
     // ── Edge cases ───────────────────────────────────────────────
     void testEmptyPath();
@@ -389,6 +391,58 @@ void TestPathRules::testLoadBsignoreAppliesPatterns()
     // Normal files unaffected
     QCOMPARE(rules.validate("/Users/me/Documents/report.txt"),
              bs::ValidationResult::Include);
+}
+
+void TestPathRules::testReloadBsignoreReflectsChanges()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString bsignorePath = dir.path() + "/.bsignore";
+    {
+        QFile f(bsignorePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        QTextStream out(&f);
+        out << "*.tmp\n";
+    }
+
+    bs::PathRules rules;
+    QVERIFY(rules.loadBsignore(bsignorePath.toStdString()));
+    QCOMPARE(rules.validate("/Users/me/project/file.tmp"), bs::ValidationResult::Exclude);
+    QCOMPARE(rules.validate("/Users/me/project/file.log"), bs::ValidationResult::Include);
+
+    {
+        QFile f(bsignorePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
+        QTextStream out(&f);
+        out << "*.log\n";
+    }
+
+    QVERIFY(rules.reloadBsignore());
+    QCOMPARE(rules.validate("/Users/me/project/file.tmp"), bs::ValidationResult::Include);
+    QCOMPARE(rules.validate("/Users/me/project/file.log"), bs::ValidationResult::Exclude);
+}
+
+void TestPathRules::testReloadBsignoreMissingFileClearsPatterns()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString bsignorePath = dir.path() + "/.bsignore";
+    {
+        QFile f(bsignorePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        QTextStream out(&f);
+        out << "*.cache\n";
+    }
+
+    bs::PathRules rules;
+    QVERIFY(rules.loadBsignore(bsignorePath.toStdString()));
+    QCOMPARE(rules.validate("/Users/me/project/x.cache"), bs::ValidationResult::Exclude);
+
+    QVERIFY(QFile::remove(bsignorePath));
+    QVERIFY(rules.reloadBsignore());
+    QCOMPARE(rules.validate("/Users/me/project/x.cache"), bs::ValidationResult::Include);
 }
 
 // ── Edge cases ───────────────────────────────────────────────────
