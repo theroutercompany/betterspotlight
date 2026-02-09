@@ -214,12 +214,14 @@ std::unordered_map<std::string, ItemKind> FileScanner::buildExtensionMap()
         "awk", "sed",
         "diff", "patch",
         "plist",
-        "reg",
-        "inf", "desktop",
-        "service", "timer", "socket", "path",
-    }) {
-        map[ext] = ItemKind::Text;
-    }
+         "reg",
+         "inf", "desktop",
+         "xlsx", "xls", "pptx", "ppt",
+         "numbers", "pages", "key",
+         "service", "timer", "socket", "path",
+     }) {
+         map[ext] = ItemKind::Text;
+     }
 
     // ── Code files ────────────────────────────────────────────────
     for (const auto* ext : {

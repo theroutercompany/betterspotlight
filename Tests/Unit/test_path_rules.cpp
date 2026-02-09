@@ -23,6 +23,9 @@ private slots:
     // ── Hidden path tests ────────────────────────────────────────
     void testExcludeHiddenDotDir();
     void testHiddenDirectoryComponent();
+    void testIncludeDotfileInHome();
+    void testIncludeAllowlistedDotConfig();
+    void testIncludeAllowlistedDotLocal();
 
     // ── Sensitive path tests (MetadataOnly) ──────────────────────
     void testMetadataOnlySshDir();
@@ -143,8 +146,8 @@ void TestPathRules::testExcludeIdeDirectories()
 void TestPathRules::testExcludeHiddenDotDir()
 {
     bs::PathRules rules;
-    QCOMPARE(rules.validate("/Users/me/.hidden/config.txt"),
-             bs::ValidationResult::Exclude);
+    QCOMPARE(rules.validate("/Users/me/.random_hidden_dir/file.txt"),
+              bs::ValidationResult::Exclude);
 }
 
 void TestPathRules::testHiddenDirectoryComponent()
@@ -154,15 +157,36 @@ void TestPathRules::testHiddenDirectoryComponent()
              bs::ValidationResult::Exclude);
 }
 
+void TestPathRules::testIncludeDotfileInHome()
+{
+    bs::PathRules rules;
+    QCOMPARE(rules.validate("/Users/me/.zshrc"),
+             bs::ValidationResult::Include);
+}
+
+void TestPathRules::testIncludeAllowlistedDotConfig()
+{
+    bs::PathRules rules;
+    QCOMPARE(rules.validate("/Users/me/.config/nvim/init.lua"),
+             bs::ValidationResult::Include);
+}
+
+void TestPathRules::testIncludeAllowlistedDotLocal()
+{
+    bs::PathRules rules;
+    QCOMPARE(rules.validate("/Users/me/.local/share/data.json"),
+             bs::ValidationResult::Include);
+}
+
 // ── Sensitive path tests ─────────────────────────────────────────
 
 void TestPathRules::testMetadataOnlySshDir()
 {
     bs::PathRules rules;
+    QCOMPARE(rules.validate("/Users/me/.ssh/config"),
+             bs::ValidationResult::MetadataOnly);
     QCOMPARE(rules.validate("/Users/me/.ssh/id_rsa"),
-             bs::ValidationResult::Exclude);
-    // The .ssh dir is hidden so it gets Exclude before MetadataOnly.
-    // But let's test isSensitivePath independently via classifySensitivity.
+             bs::ValidationResult::MetadataOnly);
     auto sensitivity = rules.classifySensitivity("/Users/me/.ssh/id_rsa");
     QCOMPARE(sensitivity, bs::Sensitivity::Sensitive);
 }
@@ -170,6 +194,8 @@ void TestPathRules::testMetadataOnlySshDir()
 void TestPathRules::testMetadataOnlyGnupgDir()
 {
     bs::PathRules rules;
+    QCOMPARE(rules.validate("/Users/me/.gnupg/pubring.kbx"),
+             bs::ValidationResult::MetadataOnly);
     auto sensitivity = rules.classifySensitivity("/Users/me/.gnupg/secring.gpg");
     QCOMPARE(sensitivity, bs::Sensitivity::Sensitive);
 }
@@ -265,7 +291,7 @@ void TestPathRules::testClassifyHiddenPath()
 {
     bs::PathRules rules;
     QCOMPARE(rules.classifySensitivity("/Users/me/.config/app/settings.json"),
-             bs::Sensitivity::Hidden);
+             bs::Sensitivity::Normal);
 }
 
 // ── Cloud folder detection ───────────────────────────────────────
