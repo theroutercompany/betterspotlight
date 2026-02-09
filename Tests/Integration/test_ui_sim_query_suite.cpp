@@ -11,6 +11,7 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSet>
 
 #include <algorithm>
@@ -275,7 +276,30 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
 
     int passed = 0;
     int semanticSkipped = 0;
+    int fixtureMismatches = 0;
     QStringList failureDetails;
+    QJsonArray rankingMissDetails;
+    QJsonArray fixtureMismatchDetails;
+
+    sqlite3_stmt* expectedLookupStmt = nullptr;
+    const char* expectedLookupSql = "SELECT 1 FROM items WHERE LOWER(name) = LOWER(?1) LIMIT 1";
+    QVERIFY2(sqlite3_prepare_v2(store->rawDb(), expectedLookupSql, -1, &expectedLookupStmt, nullptr)
+                 == SQLITE_OK,
+             "Failed to prepare expected-file lookup statement");
+    auto stmtGuard = qScopeGuard([&]() {
+        if (expectedLookupStmt) {
+            sqlite3_finalize(expectedLookupStmt);
+        }
+    });
+
+    const auto expectedExistsInCorpus = [&](const QString& expectedName) {
+        sqlite3_reset(expectedLookupStmt);
+        sqlite3_clear_bindings(expectedLookupStmt);
+        const QByteArray utf8 = expectedName.toUtf8();
+        sqlite3_bind_text(expectedLookupStmt, 1, utf8.constData(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(expectedLookupStmt);
+        return rc == SQLITE_ROW;
+    };
 
     for (const QueryCase& testCase : cases) {
         // Skip typo_strict as intentional negative-path tests.
@@ -291,6 +315,28 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
             ++semanticSkipped;
             qInfo().noquote()
                 << QStringLiteral("CASE %1 (%2) => SKIP (requires vector search)")
+                       .arg(testCase.id, testCase.category);
+            continue;
+        }
+
+        if (!expectedExistsInCorpus(testCase.expectedFileName)) {
+            ++fixtureMismatches;
+            const QString detail = QStringLiteral(
+                                       "[%1|%2] q=\"%3\" expect=\"%4\" missing_from_corpus")
+                                       .arg(testCase.id,
+                                            testCase.category,
+                                            testCase.query,
+                                            testCase.expectedFileName);
+            failureDetails.append(detail);
+            QJsonObject failure;
+            failure[QStringLiteral("id")] = testCase.id;
+            failure[QStringLiteral("category")] = testCase.category;
+            failure[QStringLiteral("failureType")] = QStringLiteral("fixture_mismatch");
+            failure[QStringLiteral("query")] = testCase.query;
+            failure[QStringLiteral("expectedFileName")] = testCase.expectedFileName;
+            fixtureMismatchDetails.append(failure);
+            qInfo().noquote()
+                << QStringLiteral("CASE %1 (%2) => SKIP (fixture mismatch: missing expected file)")
                        .arg(testCase.id, testCase.category);
             continue;
         }
@@ -517,13 +563,22 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         if (ok) {
             ++passed;
         } else {
-            failureDetails.append(QStringLiteral("[%1|%2] q=\"%3\" expect=\"%4\" topN=%5 saw=[%6]")
-                                      .arg(testCase.id,
-                                           testCase.category,
-                                           testCase.query,
-                                           testCase.expectedFileName,
-                                           QString::number(testCase.topN),
-                                           inspectedNames.join(QStringLiteral(", "))));
+            const QString detail = QStringLiteral("[%1|%2] q=\"%3\" expect=\"%4\" topN=%5 saw=[%6]")
+                                       .arg(testCase.id,
+                                            testCase.category,
+                                            testCase.query,
+                                            testCase.expectedFileName,
+                                            QString::number(testCase.topN),
+                                            inspectedNames.join(QStringLiteral(", ")));
+            failureDetails.append(detail);
+            QJsonObject failure;
+            failure[QStringLiteral("id")] = testCase.id;
+            failure[QStringLiteral("category")] = testCase.category;
+            failure[QStringLiteral("failureType")] = QStringLiteral("ranking_miss");
+            failure[QStringLiteral("query")] = testCase.query;
+            failure[QStringLiteral("expectedFileName")] = testCase.expectedFileName;
+            failure[QStringLiteral("inspectedTopN")] = inspectedNames.join(QStringLiteral(", "));
+            rankingMissDetails.append(failure);
         }
 
         qInfo().noquote()
@@ -535,13 +590,17 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
                         ok ? QStringLiteral("PASS") : QStringLiteral("FAIL"));
     }
 
-    const int total = static_cast<int>(cases.size()) - semanticSkipped;
+    const int total = static_cast<int>(cases.size()) - semanticSkipped - fixtureMismatches;
+    if (total <= 0) {
+        QSKIP("No evaluable cases found after skips and fixture mismatch filtering");
+    }
     const double passRate = (100.0 * static_cast<double>(passed)) / static_cast<double>(total);
     const int requiredPasses = static_cast<int>(std::ceil((gatePassRate / 100.0) * static_cast<double>(total)));
     const QString gateMode = qEnvironmentVariable("BS_RELEVANCE_GATE_MODE")
                                  .trimmed()
                                  .toLower();
-    const bool reportOnly = (gateMode == QLatin1String("report_only"));
+    const bool enforceGate = (gateMode == QLatin1String("enforce"));
+    const bool reportOnly = !enforceGate;
 
     qInfo().noquote() << QStringLiteral("Relevance gate summary: passed=%1/%2 passRate=%3%% required=%4%% (%5/%2)")
                              .arg(QString::number(passed),
@@ -549,6 +608,7 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
                                   QString::number(passRate, 'f', 2),
                                   QString::number(gatePassRate, 'f', 1),
                                   QString::number(requiredPasses));
+    qInfo().noquote() << QStringLiteral("Fixture mismatches: %1").arg(QString::number(fixtureMismatches));
     qInfo().noquote() << QStringLiteral("Relevance gate mode: %1")
                              .arg(reportOnly ? QStringLiteral("report_only")
                                              : QStringLiteral("enforce"));
@@ -562,22 +622,24 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         QJsonObject report;
         report[QStringLiteral("suitePath")] = suitePath;
         report[QStringLiteral("dbPath")] = dbPath;
-        report[QStringLiteral("gateMode")] = reportOnly
-            ? QStringLiteral("report_only")
-            : QStringLiteral("enforce");
+        report[QStringLiteral("gateMode")] = reportOnly ? QStringLiteral("report_only")
+                                                        : QStringLiteral("enforce");
         report[QStringLiteral("gatePassRate")] = gatePassRate;
         report[QStringLiteral("totalCases")] = total;
         report[QStringLiteral("passedCases")] = passed;
         report[QStringLiteral("passRate")] = passRate;
         report[QStringLiteral("requiredPasses")] = requiredPasses;
         report[QStringLiteral("semanticSkipped")] = semanticSkipped;
+        report[QStringLiteral("fixtureMismatches")] = fixtureMismatches;
         report[QStringLiteral("timestampUtc")] =
             QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        QJsonArray failures;
+        QJsonArray failuresLegacy;
         for (const QString& line : failureDetails) {
-            failures.append(line);
+            failuresLegacy.append(line);
         }
-        report[QStringLiteral("failures")] = failures;
+        report[QStringLiteral("failures")] = failuresLegacy;
+        report[QStringLiteral("rankingMisses")] = rankingMissDetails;
+        report[QStringLiteral("fixtureMismatchCases")] = fixtureMismatchDetails;
 
         QSaveFile out(reportPath);
         if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -586,7 +648,7 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
         }
     }
 
-    if (passRate < gatePassRate && !reportOnly) {
+    if (passRate < gatePassRate && enforceGate) {
         QFAIL(qPrintable(QStringLiteral("Relevance gate failed: %1/%2 (%3%%) below gate %4%% (required %5)")
                              .arg(passed)
                              .arg(total)

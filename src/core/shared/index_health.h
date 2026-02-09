@@ -13,6 +13,8 @@ struct IndexHealth {
     int64_t ftsIndexSize = 0;       // Bytes
     int64_t itemsWithoutContent = 0;
     int64_t totalFailures = 0;
+    int64_t criticalFailures = 0;
+    int64_t expectedGapFailures = 0;
     int64_t totalChunks = 0;
 };
 

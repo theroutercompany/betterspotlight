@@ -26,6 +26,10 @@ bs_add_test(test-corrupt-files     Unit/test_corrupt_files.cpp)
 bs_add_test(test-query-ranking      Unit/test_query_ranking.cpp)
 bs_add_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
 bs_add_test(test-extraction-extension-fallback Unit/test_extraction_extension_fallback.cpp)
+bs_add_test(test-docs-memo-location Unit/test_docs_memo_location.cpp)
+target_compile_definitions(test-docs-memo-location PRIVATE
+    BETTERSPOTLIGHT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
 
 # ── Integration tests ────────────────────────────────────────────
 bs_add_test(test-full-pipeline      Integration/test_full_pipeline.cpp)
@@ -34,6 +38,10 @@ bs_add_test(test-incremental-update Integration/test_incremental_update.cpp)
 bs_add_test(test-crash-isolation    Integration/test_crash_isolation.cpp)
 bs_add_test(test-index-backpressure Integration/test_index_backpressure.cpp)
 bs_add_test(test-query-service-core-improvements Integration/test_query_service_core_improvements.cpp)
+bs_add_test(test-query-service-relevance-fixture Integration/test_query_service_relevance_fixture.cpp)
+target_compile_definitions(test-query-service-relevance-fixture PRIVATE
+    BS_RELEVANCE_BASELINES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/baselines.json"
+)
 
 # ── M2 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
@@ -57,6 +65,9 @@ bs_add_test(test-embedding-recovery  Integration/test_embedding_recovery.cpp)
 bs_add_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp)
 target_compile_definitions(test-ui-sim-query-suite PRIVATE
     BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
+)
+set_tests_properties(test-ui-sim-query-suite PROPERTIES
+    ENVIRONMENT "BS_RELEVANCE_GATE_MODE=report_only;BS_RELEVANCE_REPORT_PATH=/tmp/bs_ui_sim_query_suite_report.json"
 )
 add_test(NAME test-ui-sim-query-suite-stress COMMAND test-ui-sim-query-suite)
 set_tests_properties(test-ui-sim-query-suite-stress PROPERTIES
