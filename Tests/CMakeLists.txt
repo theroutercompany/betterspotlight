@@ -62,6 +62,12 @@ bs_add_test(test-rules-engine        Unit/test_rules_engine.cpp)
 # ── M3 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-model-registry    Unit/test_model_registry.cpp)
 
+# ── Wave 3: Stability & reliability tests ─────────────────────────
+bs_add_test(test-sqlite-store-reliability     Unit/test_sqlite_store_reliability.cpp)
+bs_add_test(test-ipc-reliability              Unit/test_ipc_reliability.cpp)
+bs_add_test(test-embedding-circuit-breaker    Unit/test_embedding_circuit_breaker.cpp)
+bs_add_test(test-extraction-timeout           Unit/test_extraction_timeout.cpp)
+
 # ── Wave 2: Cross-encoder + StructuredQuery signal tests ─────────
 bs_add_test(test-tokenizer-pair              Unit/test_tokenizer_pair.cpp)
 bs_add_test(test-cross-encoder-reranker      Unit/test_cross_encoder_reranker.cpp)
