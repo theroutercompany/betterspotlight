@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QJsonArray>
 #include <QStandardPaths>
+#include <cinttypes>
 
 namespace bs {
 
@@ -87,6 +88,26 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
 
     // Create ExtractionManager and Pipeline
     m_extractor = std::make_unique<ExtractionManager>();
+
+    // Apply extraction limits from database settings
+    if (auto maxSizeStr = m_store->getSetting(QStringLiteral("max_file_size"))) {
+        bool ok = false;
+        int64_t maxSize = maxSizeStr->toLongLong(&ok);
+        if (ok && maxSize > 0) {
+            m_extractor->setMaxFileSizeBytes(maxSize);
+            LOG_INFO(bsIpc, "Extraction max file size: %" PRId64 " bytes", maxSize);
+        }
+    }
+
+    if (auto timeoutStr = m_store->getSetting(QStringLiteral("extraction_timeout_ms"))) {
+        bool ok = false;
+        int timeoutMs = timeoutStr->toInt(&ok);
+        if (ok && timeoutMs > 0) {
+            m_extractor->setTimeoutMs(timeoutMs);
+            LOG_INFO(bsIpc, "Extraction timeout: %d ms", timeoutMs);
+        }
+    }
+
     m_pipeline = std::make_unique<Pipeline>(m_store.value(), *m_extractor, m_pathRules);
 
     // Connect pipeline signals to IPC notifications
