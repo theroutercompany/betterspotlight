@@ -3,9 +3,57 @@
 #include "core/shared/logging.h"
 
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 
 namespace bs {
+
+namespace {
+
+constexpr qint64 kTextProbeBytes = 8192;
+constexpr double kMaxSuspiciousByteRatio = 0.02;
+
+bool looksLikeTextPayload(const QByteArray& bytes)
+{
+    if (bytes.isEmpty()) {
+        return true;
+    }
+
+    int suspicious = 0;
+    for (unsigned char b : bytes) {
+        if (b == 0) {
+            return false;
+        }
+        if (b < 0x09) {
+            ++suspicious;
+            continue;
+        }
+        if (b >= 0x0E && b < 0x20) {
+            ++suspicious;
+        }
+    }
+
+    return (static_cast<double>(suspicious) / static_cast<double>(bytes.size()))
+           <= kMaxSuspiciousByteRatio;
+}
+
+bool shouldFallbackToTextByProbe(const QFileInfo& info, const QString& filePath)
+{
+    QFile probe(filePath);
+    if (!probe.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+
+    const QByteArray sample = probe.read(kTextProbeBytes);
+    probe.close();
+
+    if (sample.isEmpty() && info.size() > 0) {
+        return false;
+    }
+    return looksLikeTextPayload(sample);
+}
+
+} // namespace
 
 // ── Construction / destruction ──────────────────────────────
 
@@ -103,8 +151,10 @@ FileExtractor* ExtractionManager::selectExtractor(ItemKind kind) const
     case ItemKind::Directory:
     case ItemKind::Archive:
     case ItemKind::Binary:
-    case ItemKind::Unknown:
         return nullptr;
+    case ItemKind::Unknown:
+        // Unknown extension files still get a text probe fallback.
+        return m_textExtractor.get();
     }
 
     return nullptr;
@@ -159,13 +209,27 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
         }
 
         if (!extractor->supports(extension)) {
-            result.status = ExtractionResult::Status::UnsupportedFormat;
-            result.errorMessage = QString("Extension '%1' is not supported by extractor")
-                                      .arg(extension.isEmpty()
-                                           ? QStringLiteral("<none>")
-                                           : extension);
-            result.durationMs = 0;
-            return result;
+            const bool textKind = (kind == ItemKind::Text
+                                   || kind == ItemKind::Code
+                                   || kind == ItemKind::Markdown
+                                   || kind == ItemKind::Unknown);
+            const bool canProbeFallback = (extractor == m_textExtractor.get()) && textKind;
+            if (canProbeFallback && shouldFallbackToTextByProbe(info, filePath)) {
+                LOG_INFO(bsExtraction,
+                         "Text fallback enabled for unknown extension '%s': %s",
+                         qUtf8Printable(extension.isEmpty()
+                                            ? QStringLiteral("<none>")
+                                            : extension),
+                         qUtf8Printable(filePath));
+            } else {
+                result.status = ExtractionResult::Status::UnsupportedFormat;
+                result.errorMessage = QString("Extension '%1' is not supported by extractor")
+                                          .arg(extension.isEmpty()
+                                               ? QStringLiteral("<none>")
+                                               : extension);
+                result.durationMs = 0;
+                return result;
+            }
         }
     }
 

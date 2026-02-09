@@ -1241,6 +1241,7 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                     f.error_message LIKE 'PDF extraction unavailable (%'
                     OR f.error_message LIKE 'OCR extraction unavailable (%'
                     OR f.error_message LIKE 'Leptonica failed to read image%'
+                    OR f.error_message LIKE 'Extension % is not supported by extractor'
                     OR f.error_message LIKE 'File size % exceeds configured limit %'
                     OR f.error_message = 'File does not exist or is not a regular file'
                     OR f.error_message = 'File is not readable'

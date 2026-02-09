@@ -1275,6 +1275,7 @@ IndexHealth SQLiteStore::getHealth()
                         error_message LIKE 'PDF extraction unavailable (%'
                         OR error_message LIKE 'OCR extraction unavailable (%'
                         OR error_message LIKE 'Leptonica failed to read image%'
+                        OR error_message LIKE 'Extension % is not supported by extractor'
                         OR error_message LIKE 'File size % exceeds configured limit %'
                         OR error_message = 'File does not exist or is not a regular file'
                         OR error_message = 'File is not readable'
