@@ -705,6 +705,19 @@ std::vector<SQLiteStore::FtsHit> SQLiteStore::searchFts5(
             }
         }
 
+        if (passes && !options.includePaths.empty()) {
+            bool included = false;
+            for (const QString& includePrefix : options.includePaths) {
+                if (!includePrefix.isEmpty() && item.path.startsWith(includePrefix)) {
+                    included = true;
+                    break;
+                }
+            }
+            if (!included) {
+                passes = false;
+            }
+        }
+
         if (passes && !options.excludePaths.empty()) {
             for (const QString& excludedPrefix : options.excludePaths) {
                 if (!excludedPrefix.isEmpty() && item.path.startsWith(excludedPrefix)) {
@@ -848,6 +861,19 @@ std::vector<SQLiteStore::NameHit> SQLiteStore::searchByNameFuzzy(
                 }
             }
             if (!extMatched) {
+                passes = false;
+            }
+        }
+
+        if (passes && !options.includePaths.empty()) {
+            bool included = false;
+            for (const QString& includePrefix : options.includePaths) {
+                if (!includePrefix.isEmpty() && item.path.startsWith(includePrefix)) {
+                    included = true;
+                    break;
+                }
+            }
+            if (!included) {
                 passes = false;
             }
         }

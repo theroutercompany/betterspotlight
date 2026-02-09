@@ -275,6 +275,12 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         const QJsonArray parsedTypes = debugInfo.value(QStringLiteral("parsedTypes")).toArray();
         QVERIFY(!parsedTypes.isEmpty());
         QCOMPARE(parsedTypes.first().toString(), QStringLiteral("pdf"));
+        QVERIFY(debugInfo.value(QStringLiteral("plannerApplied")).toBool(false));
+        QCOMPARE(debugInfo.value(QStringLiteral("plannerReason")).toString(),
+                 QStringLiteral("consumer_curated_prefilter"));
+        const QJsonObject filtersDebug = debugInfo.value(QStringLiteral("filters")).toObject();
+        const QJsonArray includePaths = filtersDebug.value(QStringLiteral("includePaths")).toArray();
+        QVERIFY(!includePaths.isEmpty());
 
         const QJsonArray results = result.value(QStringLiteral("results")).toArray();
         QVERIFY(!results.isEmpty());

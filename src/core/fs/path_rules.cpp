@@ -4,6 +4,7 @@
 #include <QFileInfo>
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace bs {
 
@@ -126,16 +127,16 @@ ValidationResult PathRules::validate(const std::string& filePath,
         return ValidationResult::Exclude;
     }
 
-    // 4. Hidden path (dot-prefixed directory) -> Exclude
-    //    Only hidden directories, not files that happen to start with '.'.
-    //    Cloud and bsignore-handled paths are already caught above.
-    if (isHiddenPath(filePath)) {
-        return ValidationResult::Exclude;
-    }
-
-    // 5. Sensitive path -> MetadataOnly
+    // 4. Sensitive path -> MetadataOnly
     if (isSensitivePath(filePath)) {
         return ValidationResult::MetadataOnly;
+    }
+
+    // 5. Hidden path (dot-prefixed directory) -> Exclude unless explicitly added.
+    //    Only hidden directories, not files that happen to start with '.'.
+    //    Cloud and bsignore-handled paths are already caught above.
+    if (isHiddenPath(filePath) && !isExplicitIncludePath(filePath)) {
+        return ValidationResult::Exclude;
     }
 
     // 6. Size > 5 GB -> Exclude
@@ -262,6 +263,26 @@ void PathRules::loadBsignore(const std::string& bsignorePath)
     }
 }
 
+void PathRules::setExplicitIncludeRoots(const std::vector<std::string>& roots)
+{
+    m_explicitIncludeRoots.clear();
+    m_explicitIncludeRoots.reserve(roots.size());
+
+    for (const std::string& root : roots) {
+        if (root.empty()) {
+            continue;
+        }
+
+        std::string normalized = root;
+        while (normalized.size() > 1 && normalized.back() == '/') {
+            normalized.pop_back();
+        }
+        if (!normalized.empty()) {
+            m_explicitIncludeRoots.push_back(std::move(normalized));
+        }
+    }
+}
+
 bool PathRules::matchesDefaultExclusion(const std::string& path) const
 {
     for (const auto& pattern : m_defaultExclusions) {
@@ -274,30 +295,6 @@ bool PathRules::matchesDefaultExclusion(const std::string& path) const
 
 bool PathRules::isHiddenPath(const std::string& path) const
 {
-    static const std::vector<std::string> allowedDotDirs = {
-        // Dev toolchains — index normally
-        ".config/",
-        ".local/",
-        ".cargo/",
-        ".rustup/",
-        ".npm/",
-        ".nvm/",
-        ".pyenv/",
-        ".rbenv/",
-        ".sdkman/",
-        ".gradle/",
-        ".m2/",
-        ".docker/",
-        ".kube/",
-        ".terraform.d/",
-        ".bundle/",
-        // Sensitive dirs — must pass through to isSensitivePath() for MetadataOnly
-        ".ssh/",
-        ".gnupg/",
-        ".gpg/",
-        ".aws/",
-    };
-
     // Check only directory components (not the filename itself).
     size_t start = 0;
     while (start <= path.size()) {
@@ -310,16 +307,7 @@ bool PathRules::isHiddenPath(const std::string& path) const
             const bool isLastComponent = (end == path.size());
             const std::string component = path.substr(start, end - start);
             if (!isLastComponent && component[0] == '.') {
-                std::string dotDirPattern = component;
-                dotDirPattern.push_back('/');
-
-                const bool isAllowedDotDir =
-                    std::find(allowedDotDirs.begin(),
-                              allowedDotDirs.end(),
-                              dotDirPattern) != allowedDotDirs.end();
-                if (!isAllowedDotDir) {
-                    return true;
-                }
+                return true;
             }
         }
 
@@ -327,6 +315,26 @@ bool PathRules::isHiddenPath(const std::string& path) const
             break;
         }
         start = end + 1;
+    }
+
+    return false;
+}
+
+bool PathRules::isExplicitIncludePath(const std::string& path) const
+{
+    for (const std::string& root : m_explicitIncludeRoots) {
+        if (path == root) {
+            return true;
+        }
+        if (path.size() <= root.size()) {
+            continue;
+        }
+        if (path.compare(0, root.size(), root) != 0) {
+            continue;
+        }
+        if (root.back() == '/' || path[root.size()] == '/') {
+            return true;
+        }
     }
 
     return false;

@@ -110,6 +110,41 @@ bool looksLikeNaturalLanguageQuery(const QSet<QString>& signalTokens)
     return signalTokens.size() >= 3;
 }
 
+bool looksLikePathOrCodeQuery(const QString& query)
+{
+    const QString queryLower = query.toLower();
+    if (queryLower.contains(QLatin1Char('/'))
+        || queryLower.contains(QLatin1Char('\\'))
+        || queryLower.startsWith(QLatin1Char('.'))
+        || queryLower.startsWith(QLatin1Char('~'))
+        || queryLower.contains(QStringLiteral("::"))) {
+        return true;
+    }
+
+    static const QRegularExpression extensionLikeToken(
+        QStringLiteral(R"(\b[a-z0-9_\-]+\.[a-z0-9]{1,8}\b)"));
+    if (extensionLikeToken.match(queryLower).hasMatch()) {
+        return true;
+    }
+
+    static const QRegularExpression codePunctuation(
+        QStringLiteral(R"([<>{}\[\]();=#])"));
+    return codePunctuation.match(query).hasMatch();
+}
+
+bool shouldApplyConsumerPrefilter(const QString& queryLower,
+                                  const QStringList& queryTokensRaw,
+                                  const QSet<QString>& querySignalTokens)
+{
+    if (looksLikePathOrCodeQuery(queryLower) || queryTokensRaw.isEmpty()) {
+        return false;
+    }
+
+    // Consumer-first default for phrase-like lookups while still avoiding
+    // obvious code/path-style queries.
+    return querySignalTokens.size() >= 2 || queryTokensRaw.size() >= 3;
+}
+
 QString normalizeFileTypeToken(const QString& token)
 {
     QString normalized = token.trimmed().toLower();
@@ -489,6 +524,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const SearchQueryMode queryMode = parseSearchQueryMode(params);
 
     SearchOptions searchOptions;
+    const bool hasUserProvidedFilters = params.contains(QStringLiteral("filters"));
     const auto addFileTypeFilter = [&](const QString& rawType) {
         const QString normalized = normalizeFileTypeToken(rawType);
         if (normalized.isEmpty()) {
@@ -504,6 +540,21 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             searchOptions.fileTypes.push_back(normalized);
         }
     };
+    const auto addPathFilterUnique = [](std::vector<QString>& container,
+                                        const QString& rawPath) {
+        const QString normalized = QDir::cleanPath(rawPath.trimmed());
+        if (normalized.isEmpty()) {
+            return;
+        }
+        const bool alreadyPresent = std::any_of(
+            container.begin(), container.end(),
+            [&](const QString& existing) {
+                return QDir::cleanPath(existing) == normalized;
+            });
+        if (!alreadyPresent) {
+            container.push_back(normalized);
+        }
+    };
     if (params.contains(QStringLiteral("filters"))) {
         const QJsonObject filters = params.value(QStringLiteral("filters")).toObject();
 
@@ -517,7 +568,14 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             const QJsonArray paths = filters.value(QStringLiteral("excludePaths")).toArray();
             searchOptions.excludePaths.reserve(static_cast<size_t>(paths.size()));
             for (const auto& p : paths) {
-                searchOptions.excludePaths.push_back(p.toString());
+                addPathFilterUnique(searchOptions.excludePaths, p.toString());
+            }
+        }
+        if (filters.contains(QStringLiteral("includePaths"))) {
+            const QJsonArray paths = filters.value(QStringLiteral("includePaths")).toArray();
+            searchOptions.includePaths.reserve(static_cast<size_t>(paths.size()));
+            for (const auto& p : paths) {
+                addPathFilterUnique(searchOptions.includePaths, p.toString());
             }
         }
         if (filters.contains(QStringLiteral("modifiedAfter"))) {
@@ -539,7 +597,6 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     for (const QString& parsedType : parsed.filters.fileTypes) {
         addFileTypeFilter(parsedType);
     }
-    const bool hasSearchFilters = searchOptions.hasFilters();
 
     // Parse context
     QueryContext context;
@@ -570,6 +627,39 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             querySignalTokens.insert(token);
         }
     }
+
+    QString plannerReason = QStringLiteral("none");
+    bool plannerApplied = false;
+    const QString homePath = QDir::homePath();
+    const QString documentsPath = homePath + QStringLiteral("/Documents");
+    const QString desktopPath = homePath + QStringLiteral("/Desktop");
+    const QString downloadsPath = homePath + QStringLiteral("/Downloads");
+
+    if (!hasUserProvidedFilters) {
+        if (queryHints.documentsHint || queryHints.desktopHint || queryHints.downloadsHint) {
+            plannerReason = QStringLiteral("query_location_hint");
+            if (queryHints.documentsHint) {
+                addPathFilterUnique(searchOptions.includePaths, documentsPath);
+            }
+            if (queryHints.desktopHint) {
+                addPathFilterUnique(searchOptions.includePaths, desktopPath);
+            }
+            if (queryHints.downloadsHint) {
+                addPathFilterUnique(searchOptions.includePaths, downloadsPath);
+            }
+            plannerApplied = !searchOptions.includePaths.empty();
+        } else if (shouldApplyConsumerPrefilter(queryLower, queryTokensRaw, querySignalTokens)) {
+            // Consumer-first default: constrain natural-language lookups to
+            // high-signal user roots unless callers opt into explicit filters.
+            plannerReason = QStringLiteral("consumer_curated_prefilter");
+            addPathFilterUnique(searchOptions.includePaths, documentsPath);
+            addPathFilterUnique(searchOptions.includePaths, desktopPath);
+            addPathFilterUnique(searchOptions.includePaths, downloadsPath);
+            plannerApplied = true;
+        }
+    }
+
+    const bool hasSearchFilters = searchOptions.hasFilters();
 
     LOG_INFO(bsIpc, "Search: query='%s' limit=%d mode=%d",
              qPrintable(query), limit, static_cast<int>(queryMode));
@@ -874,6 +964,60 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     }
 
     // M2: Semantic search + merge
+    const auto itemPassesSearchOptions = [&](const SQLiteStore::ItemRow& item) {
+        if (!searchOptions.includePaths.empty()) {
+            bool insideIncludedRoot = false;
+            for (const QString& includePrefix : searchOptions.includePaths) {
+                if (item.path.startsWith(includePrefix)) {
+                    insideIncludedRoot = true;
+                    break;
+                }
+            }
+            if (!insideIncludedRoot) {
+                return false;
+            }
+        }
+
+        for (const QString& excludePrefix : searchOptions.excludePaths) {
+            if (item.path.startsWith(excludePrefix)) {
+                return false;
+            }
+        }
+
+        if (!searchOptions.fileTypes.empty()) {
+            const QString ext = QFileInfo(item.path).suffix().toLower();
+            bool matchedType = false;
+            for (const QString& rawType : searchOptions.fileTypes) {
+                if (normalizeFileTypeToken(rawType) == ext) {
+                    matchedType = true;
+                    break;
+                }
+            }
+            if (!matchedType) {
+                return false;
+            }
+        }
+
+        if (searchOptions.modifiedAfter.has_value()
+            && item.modifiedAt < searchOptions.modifiedAfter.value()) {
+            return false;
+        }
+        if (searchOptions.modifiedBefore.has_value()
+            && item.modifiedAt > searchOptions.modifiedBefore.value()) {
+            return false;
+        }
+        if (searchOptions.minSizeBytes.has_value()
+            && item.size < searchOptions.minSizeBytes.value()) {
+            return false;
+        }
+        if (searchOptions.maxSizeBytes.has_value()
+            && item.size > searchOptions.maxSizeBytes.value()) {
+            return false;
+        }
+
+        return true;
+    };
+
     std::vector<SemanticResult> semanticResults;
     constexpr float kSemanticThreshold = 0.7f;
     constexpr float kSemanticOnlyFloor = 0.15f;
@@ -899,6 +1043,15 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                     if (!itemIdOpt.has_value()) {
                         continue;
                     }
+
+                    if (hasSearchFilters) {
+                        auto semanticItemOpt = m_store->getItemById(itemIdOpt.value());
+                        if (!semanticItemOpt.has_value()
+                            || !itemPassesSearchOptions(semanticItemOpt.value())) {
+                            continue;
+                        }
+                    }
+
                     SemanticResult sr;
                     sr.itemId = itemIdOpt.value();
                     sr.cosineSimilarity = cosineSim;
@@ -952,10 +1105,6 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     // M2: Apply interaction, path preference, and type affinity boosts
     QString normalizedQuery = InteractionTracker::normalizeQuery(query);
-    const QString homePath = QDir::homePath();
-    const QString downloadsPath = homePath + QStringLiteral("/Downloads");
-    const QString documentsPath = homePath + QStringLiteral("/Documents");
-    const QString desktopPath = homePath + QStringLiteral("/Desktop");
 
     auto isNoteLikeTextExtension = [](const QString& ext) {
         return ext == QLatin1String("md")
@@ -1165,6 +1314,11 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             fileTypesDebug.append(fileType);
         }
         filtersDebug[QStringLiteral("fileTypes")] = fileTypesDebug;
+        QJsonArray includePathsDebug;
+        for (const QString& includePath : searchOptions.includePaths) {
+            includePathsDebug.append(includePath);
+        }
+        filtersDebug[QStringLiteral("includePaths")] = includePathsDebug;
         QJsonArray excludePathsDebug;
         for (const QString& excludePath : searchOptions.excludePaths) {
             excludePathsDebug.append(excludePath);
@@ -1189,6 +1343,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("rewriteApplied")] = rewriteDecision.applied;
         debugInfo[QStringLiteral("rewriteConfidence")] = rewriteDecision.confidence;
         debugInfo[QStringLiteral("rewriteReason")] = rewriteDecision.reason;
+        debugInfo[QStringLiteral("plannerApplied")] = plannerApplied;
+        debugInfo[QStringLiteral("plannerReason")] = plannerReason;
         if (!rewrittenRelaxedQuery.isEmpty() && rewrittenRelaxedQuery != query) {
             debugInfo[QStringLiteral("rewrittenQuery")] = rewrittenRelaxedQuery;
         }

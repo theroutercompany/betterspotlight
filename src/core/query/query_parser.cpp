@@ -46,6 +46,7 @@ const QSet<QString>& knownTypeTokens()
         QStringLiteral("go"),
         QStringLiteral("rs"),
         QStringLiteral("swift"),
+        QStringLiteral("el"),
     };
     return kKnownTypes;
 }

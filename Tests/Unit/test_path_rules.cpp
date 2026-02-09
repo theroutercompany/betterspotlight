@@ -24,8 +24,8 @@ private slots:
     void testExcludeHiddenDotDir();
     void testHiddenDirectoryComponent();
     void testIncludeDotfileInHome();
-    void testIncludeAllowlistedDotConfig();
-    void testIncludeAllowlistedDotLocal();
+    void testIncludeExplicitlyAddedDotConfigRoot();
+    void testIncludeExplicitlyAddedDotLocalRoot();
 
     // ── Sensitive path tests (MetadataOnly) ──────────────────────
     void testMetadataOnlySshDir();
@@ -164,16 +164,18 @@ void TestPathRules::testIncludeDotfileInHome()
              bs::ValidationResult::Include);
 }
 
-void TestPathRules::testIncludeAllowlistedDotConfig()
+void TestPathRules::testIncludeExplicitlyAddedDotConfigRoot()
 {
     bs::PathRules rules;
+    rules.setExplicitIncludeRoots({"/Users/me/.config"});
     QCOMPARE(rules.validate("/Users/me/.config/nvim/init.lua"),
              bs::ValidationResult::Include);
 }
 
-void TestPathRules::testIncludeAllowlistedDotLocal()
+void TestPathRules::testIncludeExplicitlyAddedDotLocalRoot()
 {
     bs::PathRules rules;
+    rules.setExplicitIncludeRoots({"/Users/me/.local"});
     QCOMPARE(rules.validate("/Users/me/.local/share/data.json"),
              bs::ValidationResult::Include);
 }
@@ -291,7 +293,7 @@ void TestPathRules::testClassifyHiddenPath()
 {
     bs::PathRules rules;
     QCOMPARE(rules.classifySensitivity("/Users/me/.config/app/settings.json"),
-             bs::Sensitivity::Normal);
+             bs::Sensitivity::Hidden);
 }
 
 // ── Cloud folder detection ───────────────────────────────────────
