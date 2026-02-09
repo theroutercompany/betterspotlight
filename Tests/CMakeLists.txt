@@ -68,6 +68,12 @@ bs_add_test(test-ipc-reliability              Unit/test_ipc_reliability.cpp)
 bs_add_test(test-embedding-circuit-breaker    Unit/test_embedding_circuit_breaker.cpp)
 bs_add_test(test-extraction-timeout           Unit/test_extraction_timeout.cpp)
 
+# ── Wave 4: Relevance push tests ─────────────────────────────────
+bs_add_test(test-score-transparency      Unit/test_score_transparency.cpp)
+bs_add_test(test-typo-recall             Unit/test_typo_recall.cpp)
+bs_add_test(test-semantic-adaptive       Unit/test_semantic_adaptive.cpp)
+bs_add_test(test-query-cache             Unit/test_query_cache.cpp)
+
 # ── Wave 2: Cross-encoder + StructuredQuery signal tests ─────────
 bs_add_test(test-tokenizer-pair              Unit/test_tokenizer_pair.cpp)
 bs_add_test(test-cross-encoder-reranker      Unit/test_cross_encoder_reranker.cpp)
