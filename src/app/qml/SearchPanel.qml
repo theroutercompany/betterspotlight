@@ -21,7 +21,23 @@ Window {
     // Maximum height for the results area
     readonly property int maxResultsVisible: 10
     readonly property int resultItemHeight: 56
+    readonly property int headerItemHeight: 30
     readonly property int maxResultsHeight: maxResultsVisible * resultItemHeight
+
+    function rowHeight(row) {
+        if (!row) return resultItemHeight
+        return (row.rowType || "") === "header" ? headerItemHeight : resultItemHeight
+    }
+
+    function computedResultsHeight() {
+        if (!searchController || !searchController.resultRows) return 0
+        var rows = searchController.resultRows
+        var total = 0
+        for (var i = 0; i < rows.length; ++i) {
+            total += rowHeight(rows[i])
+        }
+        return Math.min(total, maxResultsHeight)
+    }
 
     // Computed total height
     readonly property int containerPadding: 8
@@ -29,7 +45,7 @@ Window {
         var h = containerPadding * 2 + searchField.height
         if (resultsList.count > 0) {
             h += resultsDivider.height
-            h += Math.min(resultsList.count * resultItemHeight, maxResultsHeight)
+            h += computedResultsHeight()
         }
         return Math.min(h, 800)
     }
@@ -104,21 +120,20 @@ Window {
                 }
 
                 Keys.onDownPressed: {
-                    if (searchController && searchController.results.length > 0) {
-                        var newIndex = Math.min(
-                            searchController.selectedIndex + 1,
-                            searchController.results.length - 1
-                        )
-                        searchController.selectedIndex = newIndex
-                        resultsList.positionViewAtIndex(newIndex, ListView.Contain)
+                    if (searchController && searchController.resultRows.length > 0) {
+                        searchController.moveSelection(1)
+                        if (searchController.selectedIndex >= 0) {
+                            resultsList.positionViewAtIndex(searchController.selectedIndex, ListView.Contain)
+                        }
                     }
                 }
 
                 Keys.onUpPressed: {
-                    if (searchController && searchController.selectedIndex > 0) {
-                        var newIndex = searchController.selectedIndex - 1
-                        searchController.selectedIndex = newIndex
-                        resultsList.positionViewAtIndex(newIndex, ListView.Contain)
+                    if (searchController && searchController.resultRows.length > 0) {
+                        searchController.moveSelection(-1)
+                        if (searchController.selectedIndex >= 0) {
+                            resultsList.positionViewAtIndex(searchController.selectedIndex, ListView.Contain)
+                        }
                     }
                 }
 
@@ -164,23 +179,24 @@ Window {
             ListView {
                 id: resultsList
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(count * searchWindow.resultItemHeight,
-                                                  searchWindow.maxResultsHeight)
+                Layout.preferredHeight: searchWindow.computedResultsHeight()
                 visible: count > 0
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
 
-                model: searchController ? searchController.results : []
+                model: searchController ? searchController.resultRows : []
                 currentIndex: searchController ? searchController.selectedIndex : -1
 
                 delegate: ResultItem {
                     width: resultsList.width
-                    height: searchWindow.resultItemHeight
-                    itemData: modelData
-                    isSelected: index === resultsList.currentIndex
+                    height: (modelData.rowType || "") === "header" ? 30 : searchWindow.resultItemHeight
+                    itemData: modelData.itemData || ({})
+                    isHeader: (modelData.rowType || "") === "header"
+                    headerText: modelData.title || ""
+                    isSelected: !isHeader && (index === resultsList.currentIndex)
 
                     onClicked: {
-                        if (searchController) {
+                        if (searchController && !isHeader) {
                             searchController.selectedIndex = index
                             searchController.openResult(index)
                             searchWindow.dismiss()

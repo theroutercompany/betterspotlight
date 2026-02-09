@@ -112,6 +112,25 @@ SocketClient* Supervisor::clientFor(const QString& serviceName)
     return svc->client.get();
 }
 
+QJsonArray Supervisor::serviceSnapshot() const
+{
+    QJsonArray services;
+    for (const auto& svc : m_services) {
+        QJsonObject entry;
+        entry[QStringLiteral("name")] = svc->info.name;
+        entry[QStringLiteral("crashCount")] = svc->info.crashCount;
+        entry[QStringLiteral("firstCrashTime")] = svc->info.firstCrashTime;
+        entry[QStringLiteral("lastCrashTime")] = svc->info.lastCrashTime;
+        entry[QStringLiteral("ready")] = svc->ready;
+        entry[QStringLiteral("running")] =
+            (svc->process && svc->process->state() == QProcess::Running);
+        entry[QStringLiteral("pid")] =
+            svc->process ? static_cast<qint64>(svc->process->processId()) : static_cast<qint64>(0);
+        services.append(entry);
+    }
+    return services;
+}
+
 void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
 {
     auto* process = qobject_cast<QProcess*>(sender());

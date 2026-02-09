@@ -2,6 +2,7 @@
 
 #include "core/ipc/socket_client.h"
 #include <QObject>
+#include <QJsonArray>
 #include <QProcess>
 #include <QTimer>
 #include <memory>
@@ -34,6 +35,9 @@ public:
 
     // Get client for a specific service
     SocketClient* clientFor(const QString& serviceName);
+
+    // Snapshot of supervised processes for diagnostics/stress reporting.
+    QJsonArray serviceSnapshot() const;
 
 signals:
     void serviceStarted(const QString& name);

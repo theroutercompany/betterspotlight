@@ -45,8 +45,10 @@ void SearchController::setQuery(const QString& query)
     if (m_query.trimmed().isEmpty()) {
         // Clear results immediately for empty queries
         m_results.clear();
+        m_resultRows.clear();
         m_selectedIndex = -1;
         emit resultsChanged();
+        emit resultRowsChanged();
         emit selectedIndexChanged();
         m_debounceTimer.stop();
         return;
@@ -61,6 +63,11 @@ QVariantList SearchController::results() const
     return m_results;
 }
 
+QVariantList SearchController::resultRows() const
+{
+    return m_resultRows;
+}
+
 bool SearchController::isSearching() const
 {
     return m_isSearching;
@@ -73,11 +80,24 @@ int SearchController::selectedIndex() const
 
 void SearchController::setSelectedIndex(int index)
 {
-    if (index < -1) {
+    if (m_resultRows.isEmpty()) {
         index = -1;
-    }
-    if (index >= m_results.size()) {
-        index = m_results.size() - 1;
+    } else {
+        if (index < -1) {
+            index = -1;
+        }
+        if (index >= m_resultRows.size()) {
+            index = m_resultRows.size() - 1;
+        }
+
+        if (index >= 0 && resultIndexForRow(index) < 0) {
+            int forward = nextSelectableRow(index, +1);
+            if (forward >= 0) {
+                index = forward;
+            } else {
+                index = nextSelectableRow(index, -1);
+            }
+        }
     }
 
     if (m_selectedIndex == index) {
@@ -90,7 +110,8 @@ void SearchController::setSelectedIndex(int index)
 
 void SearchController::openResult(int index)
 {
-    QString path = pathForResult(index);
+    const int resultIndex = resultIndexForRow(index);
+    QString path = pathForResult(resultIndex);
     if (path.isEmpty()) {
         return;
     }
@@ -103,11 +124,11 @@ void SearchController::openResult(int index)
         SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
         if (client && client->isConnected()) {
             QJsonObject params;
-            QVariantMap item = m_results.at(index).toMap();
+            QVariantMap item = m_results.at(resultIndex).toMap();
             params[QStringLiteral("itemId")] = item.value(QStringLiteral("itemId")).toLongLong();
             params[QStringLiteral("action")] = QStringLiteral("open");
             params[QStringLiteral("query")] = m_query;
-            params[QStringLiteral("position")] = index;
+            params[QStringLiteral("position")] = resultIndex;
             client->sendNotification(QStringLiteral("recordFeedback"), params);
         }
     }
@@ -115,7 +136,7 @@ void SearchController::openResult(int index)
 
 void SearchController::revealInFinder(int index)
 {
-    QString path = pathForResult(index);
+    QString path = pathForResult(resultIndexForRow(index));
     if (path.isEmpty()) {
         return;
     }
@@ -126,7 +147,7 @@ void SearchController::revealInFinder(int index)
 
 void SearchController::copyPath(int index)
 {
-    QString path = pathForResult(index);
+    QString path = pathForResult(resultIndexForRow(index));
     if (path.isEmpty()) {
         return;
     }
@@ -142,12 +163,28 @@ void SearchController::clearResults()
 {
     m_query.clear();
     m_results.clear();
+    m_resultRows.clear();
     m_selectedIndex = -1;
     m_debounceTimer.stop();
 
     emit queryChanged();
     emit resultsChanged();
+    emit resultRowsChanged();
     emit selectedIndexChanged();
+}
+
+void SearchController::moveSelection(int delta)
+{
+    if (delta == 0 || m_resultRows.isEmpty()) {
+        return;
+    }
+
+    if (m_selectedIndex < 0) {
+        setSelectedIndex(delta > 0 ? firstSelectableRow() : nextSelectableRow(m_resultRows.size(), -1));
+        return;
+    }
+
+    setSelectedIndex(nextSelectableRow(m_selectedIndex, delta > 0 ? 1 : -1));
 }
 
 QVariantMap SearchController::getHealthSync()
@@ -186,9 +223,26 @@ QVariantMap SearchController::getHealthSync()
 
     QJsonObject result = response->value(QStringLiteral("result")).toObject();
 
+    // Prefer extended endpoint when available.
+    auto detailResponse = client->sendRequest(QStringLiteral("getHealthDetails"), {}, kSearchTimeoutMs);
+    if (detailResponse && detailResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
+        result = detailResponse->value(QStringLiteral("result")).toObject();
+    }
+
     // The query service nests health stats under "indexHealth".
     // Flatten it so QML can access keys like healthData["totalIndexedItems"] directly.
     QJsonObject indexHealth = result.value(QStringLiteral("indexHealth")).toObject();
+    const QJsonObject details = result.value(QStringLiteral("details")).toObject();
+    if (!details.isEmpty()) {
+        indexHealth[QStringLiteral("detailedFailures")] = details.value(QStringLiteral("failures")).toArray();
+        indexHealth[QStringLiteral("criticalFailureRows")] =
+            details.value(QStringLiteral("criticalFailureRows")).toInt();
+        indexHealth[QStringLiteral("expectedGapFailureRows")] =
+            details.value(QStringLiteral("expectedGapFailureRows")).toInt();
+        indexHealth[QStringLiteral("processStats")] = details.value(QStringLiteral("processStats")).toObject();
+        indexHealth[QStringLiteral("queryStats")] = details.value(QStringLiteral("queryStats")).toObject();
+        indexHealth[QStringLiteral("bsignoreDetails")] = details.value(QStringLiteral("bsignore")).toObject();
+    }
 
     // Merge queue/runtime stats from the indexer service.
     SocketClient* indexerClient = m_supervisor->clientFor(QStringLiteral("indexer"));
@@ -344,6 +398,7 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
         item[QStringLiteral("snippet")] = obj.value(QStringLiteral("snippet")).toString();
         item[QStringLiteral("fileSize")] = metadata.value(QStringLiteral("fileSize")).toInteger();
         item[QStringLiteral("modifiedAt")] = metadata.value(QStringLiteral("modificationDate")).toString();
+        item[QStringLiteral("frequency")] = metadata.value(QStringLiteral("frequency")).toInteger();
         item[QStringLiteral("contentAvailable")] =
             obj.value(QStringLiteral("contentAvailable")).toBool(true);
         item[QStringLiteral("availabilityStatus")] =
@@ -358,12 +413,96 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
     }
 
     m_results = std::move(newResults);
-    m_selectedIndex = m_results.isEmpty() ? -1 : 0;
+    rebuildResultRows();
+    m_selectedIndex = firstSelectableRow();
 
     emit resultsChanged();
+    emit resultRowsChanged();
     emit selectedIndexChanged();
 
     LOG_DEBUG(bsCore, "SearchController: got %d results", static_cast<int>(m_results.size()));
+}
+
+void SearchController::rebuildResultRows()
+{
+    QVariantList recentRows;
+    QVariantList folderRows;
+    QVariantList fileRows;
+
+    for (int i = 0; i < m_results.size(); ++i) {
+        const QVariantMap item = m_results.at(i).toMap();
+        QVariantMap row;
+        row[QStringLiteral("rowType")] = QStringLiteral("result");
+        row[QStringLiteral("resultIndex")] = i;
+        row[QStringLiteral("itemData")] = item;
+
+        const QString kind = item.value(QStringLiteral("kind")).toString();
+        const int frequency = item.value(QStringLiteral("frequency")).toInt();
+        if (frequency > 0) {
+            recentRows.append(row);
+        } else if (kind == QLatin1String("directory")) {
+            folderRows.append(row);
+        } else {
+            fileRows.append(row);
+        }
+    }
+
+    QVariantList rows;
+    const auto appendGroup = [&rows](const QString& title, const QVariantList& groupRows) {
+        if (groupRows.isEmpty()) {
+            return;
+        }
+        QVariantMap header;
+        header[QStringLiteral("rowType")] = QStringLiteral("header");
+        header[QStringLiteral("title")] = title;
+        rows.append(header);
+        for (const QVariant& row : groupRows) {
+            rows.append(row);
+        }
+    };
+
+    appendGroup(QStringLiteral("Recently Opened"), recentRows);
+    appendGroup(QStringLiteral("Folders"), folderRows);
+    appendGroup(QStringLiteral("Files"), fileRows);
+
+    m_resultRows = std::move(rows);
+}
+
+int SearchController::resultIndexForRow(int rowIndex) const
+{
+    if (rowIndex < 0 || rowIndex >= m_resultRows.size()) {
+        return -1;
+    }
+
+    const QVariantMap row = m_resultRows.at(rowIndex).toMap();
+    if (row.value(QStringLiteral("rowType")).toString() != QLatin1String("result")) {
+        return -1;
+    }
+    bool ok = false;
+    const int resultIndex = row.value(QStringLiteral("resultIndex")).toInt(&ok);
+    return ok ? resultIndex : -1;
+}
+
+int SearchController::firstSelectableRow() const
+{
+    return nextSelectableRow(-1, +1);
+}
+
+int SearchController::nextSelectableRow(int fromIndex, int delta) const
+{
+    if (m_resultRows.isEmpty() || delta == 0) {
+        return -1;
+    }
+
+    const int step = delta > 0 ? 1 : -1;
+    int idx = fromIndex + step;
+    while (idx >= 0 && idx < m_resultRows.size()) {
+        if (resultIndexForRow(idx) >= 0) {
+            return idx;
+        }
+        idx += step;
+    }
+    return -1;
 }
 
 QString SearchController::pathForResult(int index) const

@@ -2,6 +2,7 @@
 #include "core/shared/logging.h"
 
 #include <Carbon/Carbon.h>
+#include <QStringList>
 
 namespace bs {
 
@@ -19,6 +20,21 @@ HotkeyManager::~HotkeyManager()
 QString HotkeyManager::hotkey() const
 {
     return m_hotkeyString;
+}
+
+bool HotkeyManager::hotkeyHealthy() const
+{
+    return m_hotkeyHealthy;
+}
+
+QString HotkeyManager::registrationError() const
+{
+    return m_registrationError;
+}
+
+QStringList HotkeyManager::suggestedAlternatives() const
+{
+    return m_suggestedAlternatives;
 }
 
 void HotkeyManager::setHotkey(const QString& hotkey)
@@ -52,6 +68,8 @@ bool HotkeyManager::registerHotkey()
     if (!parseHotkeyString(m_hotkeyString, modifiers, keyCode)) {
         LOG_ERROR(bsCore, "HotkeyManager: failed to parse hotkey string '%s'",
                   qPrintable(m_hotkeyString));
+        setRegistrationState(false, QStringLiteral("Unsupported hotkey format."),
+                             fallbackSuggestions());
         return false;
     }
 
@@ -70,6 +88,7 @@ bool HotkeyManager::registerHotkey()
     if (status != noErr) {
         LOG_ERROR(bsCore, "HotkeyManager: InstallApplicationEventHandler failed (%d)",
                   static_cast<int>(status));
+        setRegistrationState(false, statusToMessage(status), fallbackSuggestions());
         return false;
     }
 
@@ -91,10 +110,12 @@ bool HotkeyManager::registerHotkey()
                   static_cast<int>(status));
         RemoveEventHandler(m_eventHandlerRef);
         m_eventHandlerRef = nullptr;
+        setRegistrationState(false, statusToMessage(status), fallbackSuggestions());
         return false;
     }
 
     m_registered = true;
+    setRegistrationState(true, QString());
     LOG_INFO(bsCore, "HotkeyManager: registered global hotkey '%s'",
              qPrintable(m_hotkeyString));
     return true;
@@ -113,7 +134,49 @@ void HotkeyManager::unregisterHotkey()
     }
 
     m_registered = false;
+    setRegistrationState(true, QString());
     LOG_INFO(bsCore, "HotkeyManager: unregistered global hotkey");
+}
+
+bool HotkeyManager::applyHotkey(const QString& hotkey)
+{
+    if (hotkey.isEmpty()) {
+        return false;
+    }
+
+    if (hotkey == m_hotkeyString) {
+        if (m_registered) {
+            return true;
+        }
+        return registerHotkey();
+    }
+
+    const QString previousHotkey = m_hotkeyString;
+    const bool wasRegistered = m_registered;
+
+    if (wasRegistered) {
+        unregisterHotkey();
+    }
+
+    m_hotkeyString = hotkey;
+    emit hotkeyChanged();
+
+    if (!registerHotkey()) {
+        const QString error = m_registrationError;
+        const QStringList suggestions = m_suggestedAlternatives;
+
+        m_hotkeyString = previousHotkey;
+        emit hotkeyChanged();
+
+        if (!previousHotkey.isEmpty()) {
+            registerHotkey();
+        }
+
+        emit hotkeyConflictDetected(hotkey, error, suggestions);
+        return false;
+    }
+
+    return true;
 }
 
 bool HotkeyManager::parseHotkeyString(const QString& str, UInt32& outModifiers, UInt32& outKeyCode)
@@ -229,6 +292,44 @@ OSStatus HotkeyManager::carbonEventHandler(EventHandlerCallRef /*nextHandler*/,
     }
 
     return eventNotHandledErr;
+}
+
+QString HotkeyManager::statusToMessage(OSStatus status)
+{
+    switch (status) {
+    case noErr:
+        return QString();
+    case eventHotKeyExistsErr:
+        return QStringLiteral("This hotkey is already in use by another application.");
+    case eventHotKeyInvalidErr:
+        return QStringLiteral("The hotkey is invalid or unsupported.");
+    default:
+        return QStringLiteral("Failed to register hotkey (code %1).").arg(static_cast<int>(status));
+    }
+}
+
+QStringList HotkeyManager::fallbackSuggestions()
+{
+    return {
+        QStringLiteral("Cmd+Shift+Space"),
+        QStringLiteral("Ctrl+Space"),
+        QStringLiteral("Cmd+Alt+Space"),
+    };
+}
+
+void HotkeyManager::setRegistrationState(bool healthy,
+                                         const QString& error,
+                                         const QStringList& suggestions)
+{
+    const bool changed = (m_hotkeyHealthy != healthy)
+                         || (m_registrationError != error)
+                         || (m_suggestedAlternatives != suggestions);
+    m_hotkeyHealthy = healthy;
+    m_registrationError = error;
+    m_suggestedAlternatives = suggestions;
+    if (changed) {
+        emit hotkeyStatusChanged();
+    }
 }
 
 } // namespace bs

@@ -5,6 +5,7 @@
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QVariantList>
 #include <memory>
 
 namespace bs {
@@ -38,6 +39,7 @@ public:
     Q_INVOKABLE void rebuildVectorIndex();
     Q_INVOKABLE void clearExtractionCache();
     Q_INVOKABLE void reindexPath(const QString& path);
+    Q_INVOKABLE QVariantList serviceDiagnostics() const;
 
 signals:
     void serviceStatusChanged();

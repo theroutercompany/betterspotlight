@@ -15,6 +15,7 @@ class SearchController : public QObject {
 
     Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY queryChanged)
     Q_PROPERTY(QVariantList results READ results NOTIFY resultsChanged)
+    Q_PROPERTY(QVariantList resultRows READ resultRows NOTIFY resultRowsChanged)
     Q_PROPERTY(bool isSearching READ isSearching NOTIFY isSearchingChanged)
     Q_PROPERTY(int selectedIndex READ selectedIndex WRITE setSelectedIndex NOTIFY selectedIndexChanged)
 
@@ -29,6 +30,7 @@ public:
     void setQuery(const QString& query);
 
     QVariantList results() const;
+    QVariantList resultRows() const;
     bool isSearching() const;
 
     int selectedIndex() const;
@@ -38,6 +40,7 @@ public:
     Q_INVOKABLE void revealInFinder(int index);
     Q_INVOKABLE void copyPath(int index);
     Q_INVOKABLE void clearResults();
+    Q_INVOKABLE void moveSelection(int delta);
 
     // Request index health from the query service
     Q_INVOKABLE QVariantMap getHealthSync();
@@ -45,6 +48,7 @@ public:
 signals:
     void queryChanged();
     void resultsChanged();
+    void resultRowsChanged();
     void isSearchingChanged();
     void selectedIndexChanged();
 
@@ -53,11 +57,16 @@ private slots:
 
 private:
     void parseSearchResponse(const QJsonObject& response);
+    void rebuildResultRows();
+    int resultIndexForRow(int rowIndex) const;
+    int firstSelectableRow() const;
+    int nextSelectableRow(int fromIndex, int delta) const;
     QString pathForResult(int index) const;
 
     Supervisor* m_supervisor = nullptr;
     QString m_query;
     QVariantList m_results;
+    QVariantList m_resultRows;
     bool m_isSearching = false;
     int m_selectedIndex = -1;
     QVariantMap m_lastHealthSnapshot;
