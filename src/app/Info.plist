@@ -26,5 +26,11 @@
     <string>Copyright 2026 BetterSpotlight. All rights reserved.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://updates.betterspotlight.com/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_SPARKLE_ED25519_PUBLIC_KEY</string>
 </dict>
 </plist>
