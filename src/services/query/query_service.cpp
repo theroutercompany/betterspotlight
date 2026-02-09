@@ -1545,6 +1545,7 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     }
     const bool lowCoverage = contentCoveragePct < 50.0;
     const bool highBacklog = queuePending > 2000;
+    const bool highRootFanout = queueRoots.size() > 32;
     if (includesHomeRoot && (lowCoverage || highBacklog)) {
         QJsonObject advisory;
         advisory[QStringLiteral("code")] = QStringLiteral("curated_roots_recommended");
@@ -1553,6 +1554,18 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
             QStringLiteral("Index roots include the full home directory while coverage is low or backlog is high.");
         advisory[QStringLiteral("recommendation")] =
             QStringLiteral("Prefer curated roots (Documents/Projects/Downloads) to reduce lexical noise and improve extraction coverage.");
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        indexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    } else if (highRootFanout && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("root_fanout_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots fan out across many directories while backlog is high or coverage is low.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Reduce roots to high-signal folders (for example Documents/Desktop/Downloads) to improve quality and indexing throughput.");
+        advisory[QStringLiteral("rootCount")] = queueRoots.size();
         advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
         advisory[QStringLiteral("queuePending")] = queuePending;
         indexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
