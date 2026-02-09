@@ -1284,10 +1284,37 @@ IndexHealth SQLiteStore::getHealth()
         sqlite3_finalize(stmt);
     }
 
-    // Total actionable failures.
-    // NOTE: Missing optional extractor backends (Poppler/Tesseract) should
-    // not force global index health to "degraded". Those rows are still kept
-    // in the failures table for troubleshooting, but excluded from health.
+    // Expected extraction gaps: backend unavailable, unsupported formats,
+    // offline placeholders, encrypted/corrupted office formats, etc.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(
+            m_db,
+            R"(
+                SELECT COUNT(*)
+                FROM failures
+                WHERE stage = 'extraction'
+                  AND (
+                      error_message LIKE 'PDF extraction unavailable (%'
+                      OR error_message LIKE 'OCR extraction unavailable (%'
+                      OR error_message LIKE 'Leptonica failed to read image%'
+                      OR error_message LIKE 'Extension % is not supported by extractor'
+                      OR error_message LIKE 'File size % exceeds configured limit %'
+                      OR error_message = 'File does not exist or is not a regular file'
+                      OR error_message = 'File is not readable'
+                      OR error_message = 'Failed to load PDF document'
+                      OR error_message = 'PDF is encrypted or password-protected'
+                      OR error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
+                  )
+            )",
+            -1, &stmt, nullptr);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            health.expectedGapFailures = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // Critical failures remain blocking for overall index health.
     {
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(
@@ -1307,12 +1334,13 @@ IndexHealth SQLiteStore::getHealth()
                         OR error_message = 'File is not readable'
                         OR error_message = 'Failed to load PDF document'
                         OR error_message = 'PDF is encrypted or password-protected'
+                        OR error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
                     )
                 )
             )",
             -1, &stmt, nullptr);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            health.totalFailures = sqlite3_column_int64(stmt, 0);
+            health.criticalFailures = sqlite3_column_int64(stmt, 0);
         }
         sqlite3_finalize(stmt);
     }
@@ -1355,7 +1383,9 @@ IndexHealth SQLiteStore::getHealth()
         }
     }
 
-    health.isHealthy = (health.totalFailures == 0);
+    // Preserve totalFailures semantics as "blocking failures" for compatibility.
+    health.totalFailures = health.criticalFailures;
+    health.isHealthy = (health.criticalFailures == 0);
     return health;
 }
 

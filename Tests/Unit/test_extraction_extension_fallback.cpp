@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 
 #include "core/extraction/extraction_manager.h"
+#include "core/extraction/text_extractor.h"
 
 class TestExtractionExtensionFallback : public QObject {
     Q_OBJECT
@@ -12,6 +13,8 @@ private slots:
     void testUnknownCodeExtensionFallsBackWhenTextLike();
     void testUnknownKindFallsBackWhenTextLike();
     void testUnknownCodeExtensionRejectsBinaryLikePayload();
+    void testElExtensionIsExplicitlySupported();
+    void testUnsupportedFallbackHasActionableMessage();
 };
 
 void TestExtractionExtensionFallback::testKnownCodeExtensionElExtractsAsText()
@@ -89,6 +92,32 @@ void TestExtractionExtensionFallback::testUnknownCodeExtensionRejectsBinaryLikeP
     const auto result = manager.extract(path, bs::ItemKind::Code);
 
     QCOMPARE(result.status, bs::ExtractionResult::Status::UnsupportedFormat);
+}
+
+void TestExtractionExtensionFallback::testElExtensionIsExplicitlySupported()
+{
+    bs::TextExtractor extractor;
+    QVERIFY(extractor.supports(QStringLiteral("el")));
+}
+
+void TestExtractionExtensionFallback::testUnsupportedFallbackHasActionableMessage()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString path = dir.path() + QStringLiteral("/artifact.zzzzunsupported");
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    const QByteArray binary("\x00\x00\xff\x01\x02\x03\x04\x05", 8);
+    file.write(binary);
+    file.close();
+
+    bs::ExtractionManager manager;
+    const auto result = manager.extract(path, bs::ItemKind::Unknown);
+    QCOMPARE(result.status, bs::ExtractionResult::Status::UnsupportedFormat);
+    QVERIFY(result.errorMessage.has_value());
+    QVERIFY(result.errorMessage.value().contains(QStringLiteral("not supported by extractor"),
+                                                 Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestExtractionExtensionFallback)
