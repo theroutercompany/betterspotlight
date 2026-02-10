@@ -1433,7 +1433,7 @@ bool SQLiteStore::applyBm25Weights()
                                              kDefaultContentWeight);
 
     const QString sql = QStringLiteral(
-        "INSERT INTO search_index(search_index, rank) VALUES('fts5', 'bm25(%1, %2, %3)')")
+        "INSERT INTO search_index(search_index, rank) VALUES('rank', 'bm25(%1, %2, %3)')")
                             .arg(nameWeight, 0, 'g', 17)
                             .arg(pathWeight, 0, 'g', 17)
                             .arg(contentWeight, 0, 'g', 17);

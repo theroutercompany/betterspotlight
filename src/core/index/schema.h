@@ -153,7 +153,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 
 // BM25 weight configuration (doc 04 Section 3.9)
 constexpr const char* kFts5WeightConfig =
-    "INSERT INTO search_index(search_index, rank) VALUES('fts5', 'bm25(10.0, 5.0, 0.5)')";
+    "INSERT INTO search_index(search_index, rank) VALUES('rank', 'bm25(10.0, 5.0, 0.5)')";
 
 // Default settings rows (doc 04 Section 10.1)
 constexpr const char* kDefaultSettings = R"(
