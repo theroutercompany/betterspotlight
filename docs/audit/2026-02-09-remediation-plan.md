@@ -16,9 +16,9 @@ Convert audit findings into a release-safe backlog with concrete file targets, t
 | R-007 | P2 | DONE | Add platform side-effect abstraction for settings (`launchAtLogin`, `showInDock`) with user-visible success/failure | `/Users/rexliu/betterspotlight/src/app/platform_integration.h`, `/Users/rexliu/betterspotlight/src/app/platform_integration.cpp`, `/Users/rexliu/betterspotlight/src/app/platform_integration_mac.mm`, `/Users/rexliu/betterspotlight/src/app/settings_controller.h`, `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`, `/Users/rexliu/betterspotlight/src/app/CMakeLists.txt` | Full app build + `ctest` pass | Fallback to persistence-only behavior by routing to default platform integration and retaining status message |
 | R-008 | P3 | DONE | Update stale Sparkle gap-analysis statement in docs | `/Users/rexliu/betterspotlight/docs/milestones/m3/architecture-plan.md` | Documentation review | None; docs-only update |
 | R-009 | P2 | DONE | Implement clipboard-aware relevance signal with privacy gating and settings toggle | `/Users/rexliu/betterspotlight/src/services/query/query_service.cpp`, `/Users/rexliu/betterspotlight/src/app/search_controller.*`, `/Users/rexliu/betterspotlight/src/app/settings_controller.*`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`, `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp` | Full `ctest` pass + new integration scenario asserting clipboard signal re-ranking | Fallback: disable `clipboardSignalEnabled` in settings defaults if regressions appear |
-| R-010 | P1 | IN_PROGRESS | Run/automate 48h stress and 24h memory-drift gates for release readiness | `/Users/rexliu/betterspotlight/Tests/benchmarks/stress_48h.sh`, `/Users/rexliu/betterspotlight/Tests/benchmarks/memory_drift_24h.sh`, `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`, `/Users/rexliu/betterspotlight/src/core/ipc/service_base.cpp` | Smoke runs passed locally (30s each) with deterministic artifact dirs; scheduled self-hosted CI workflow added for full-duration evidence | Fallback: block external release until full-duration artifacts are attached |
-| R-011 | P1 | IN_PROGRESS | Validate signing/notarization/stapling pipeline with Sparkle-enabled distribution artifacts | `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`, `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`, `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml` | Local preflight signing/packaging smoke passed (ad-hoc signing, no notarization); workflow now supports full Sparkle-required notarization when credentials are present | Fallback: unsigned internal artifacts only until Apple credentialed run succeeds |
-| R-012 | P2 | OPEN | Add targeted tests for tray-state transitions and onboarding-indexing lifecycle | New tests under `/Users/rexliu/betterspotlight/Tests/Integration/` | New tests in CI, deterministic pass | Fallback: manual QA checklist until deterministic tests land |
+| R-010 | P1 | IN_PROGRESS | Run/automate 48h stress and 24h memory-drift gates for release readiness | `/Users/rexliu/betterspotlight/Tests/benchmarks/stress_48h.sh`, `/Users/rexliu/betterspotlight/Tests/benchmarks/memory_drift_24h.sh`, `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`, `/Users/rexliu/betterspotlight/src/core/ipc/service_base.cpp` | Smoke runs passed locally (30s each) with deterministic artifact dirs; self-hosted full-duration workflow dispatched on `2026-02-10` (`run 21847178417`) | Fallback: block external release until full-duration artifacts are attached |
+| R-011 | P1 | IN_PROGRESS | Validate signing/notarization/stapling pipeline with Sparkle-enabled distribution artifacts | `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`, `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`, `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml` | Local preflight signing/packaging smoke passed (ad-hoc signing, no notarization); credentialed workflow dispatched on `2026-02-10` (`run 21847178969`) | Fallback: unsigned internal artifacts only until Apple credentialed run succeeds |
+| R-012 | P2 | DONE | Add targeted tests for tray-state transitions and onboarding-indexing lifecycle | `/Users/rexliu/betterspotlight/Tests/Integration/test_app_lifecycle_states.cpp`, `/Users/rexliu/betterspotlight/Tests/CMakeLists.txt` | `test-app-lifecycle-states` added and passing; full `ctest` pass now `53/53` | Fallback: n/a (deterministic integration coverage landed) |
 
 ## Explicit API / Interface Changes Landed
 - `ServiceManager` now exposes tray state as a first-class interface:
@@ -45,13 +45,19 @@ Convert audit findings into a release-safe backlog with concrete file targets, t
 - Added long-run gate automation workflows:
   - `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
   - `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
+- Added deterministic app lifecycle integration coverage:
+  - `/Users/rexliu/betterspotlight/Tests/Integration/test_app_lifecycle_states.cpp`
+  - `/Users/rexliu/betterspotlight/Tests/CMakeLists.txt`
 
 ## Current Gate Summary (Post-remediation)
-- Full suite gate: `52/52` passing in `build-local`.
+- Full suite gate: `53/53` passing in `build-local`.
 - UI simulation gate: both `test-ui-sim-query-suite` and stress variant passing.
 - Long-run harness smoke runs passed locally with isolated sockets and artifact capture:
   - `stress_48h.sh` smoke (`30s`) -> pass
   - `memory_drift_24h.sh` smoke (`30s`) -> pass
+- Full-duration/credentialed operational workflows dispatched on `2026-02-10`:
+  - `Long-Run Gates`: `run 21847178417` (queued on self-hosted macOS runner)
+  - `Notarization Verify`: `run 21847178969` (queued on self-hosted macOS runner)
 - Residual release gates are now operationally wired but still require credentialed / full-duration evidence to close:
   - full `48h` stress artifact
   - full `24h` memory drift artifact
