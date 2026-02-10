@@ -27,6 +27,7 @@ class SettingsController : public QObject {
     Q_PROPERTY(QStringList userPatterns READ userPatterns WRITE setUserPatterns NOTIFY userPatternsChanged)
     Q_PROPERTY(bool enableFeedbackLogging READ enableFeedbackLogging WRITE setEnableFeedbackLogging NOTIFY enableFeedbackLoggingChanged)
     Q_PROPERTY(bool enableInteractionTracking READ enableInteractionTracking WRITE setEnableInteractionTracking NOTIFY enableInteractionTrackingChanged)
+    Q_PROPERTY(bool clipboardSignalEnabled READ clipboardSignalEnabled WRITE setClipboardSignalEnabled NOTIFY clipboardSignalEnabledChanged)
     Q_PROPERTY(int feedbackRetentionDays READ feedbackRetentionDays WRITE setFeedbackRetentionDays NOTIFY feedbackRetentionDaysChanged)
     Q_PROPERTY(QStringList sensitivePaths READ sensitivePaths WRITE setSensitivePaths NOTIFY sensitivePathsChanged)
     Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY themeChanged)
@@ -52,6 +53,7 @@ public:
     QStringList userPatterns() const;
     bool enableFeedbackLogging() const;
     bool enableInteractionTracking() const;
+    bool clipboardSignalEnabled() const;
     int feedbackRetentionDays() const;
     QStringList sensitivePaths() const;
     QString theme() const;
@@ -74,6 +76,7 @@ public:
     void setUserPatterns(const QStringList& patterns);
     void setEnableFeedbackLogging(bool enabled);
     void setEnableInteractionTracking(bool enabled);
+    void setClipboardSignalEnabled(bool enabled);
     void setFeedbackRetentionDays(int days);
     void setSensitivePaths(const QStringList& paths);
     void setTheme(const QString& theme);
@@ -102,6 +105,7 @@ signals:
     void userPatternsChanged();
     void enableFeedbackLoggingChanged();
     void enableInteractionTrackingChanged();
+    void clipboardSignalEnabledChanged();
     void feedbackRetentionDaysChanged();
     void sensitivePathsChanged();
     void themeChanged();

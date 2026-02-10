@@ -55,6 +55,13 @@ int ServiceBase::run()
 
 QString ServiceBase::socketPath(const QString& serviceName)
 {
+    const QString customSocketDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_SOCKET_DIR").trimmed();
+    if (!customSocketDir.isEmpty()) {
+        return QDir::cleanPath(customSocketDir + QLatin1Char('/') + serviceName
+                               + QStringLiteral(".sock"));
+    }
+
     uid_t uid = getuid();
     return QStringLiteral("/tmp/betterspotlight-%1/%2.sock")
         .arg(uid)

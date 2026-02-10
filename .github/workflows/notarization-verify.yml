@@ -1,0 +1,63 @@
+name: Notarization Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Run Apple notarization and stapling (requires secrets)'
+        required: false
+        default: true
+        type: boolean
+      build_type:
+        description: 'CMake build type'
+        required: false
+        default: 'Release'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notarization-verify
+  cancel-in-progress: false
+
+jobs:
+  notarize:
+    name: Sparkle Signing + Notarization
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 240
+    env:
+      DEVELOPER_ID: ${{ secrets.DEVELOPER_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+      BS_RELEASE_BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
+      BS_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-release
+      BS_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/dist/notarization
+      BS_REQUIRE_SPARKLE: '1'
+      BS_CREATE_DMG: '1'
+      BS_NOTARIZE: ${{ inputs.notarize && '1' || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          if command -v brew >/dev/null 2>&1; then
+            brew install qt@6 poppler tesseract leptonica pkg-config || true
+          fi
+
+      - name: Run signing/notarization pipeline
+        run: |
+          set -euo pipefail
+          ./scripts/release/notarize_with_sparkle.sh
+
+      - name: Upload notarization artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarization_artifacts
+          path: |
+            ${{ github.workspace }}/dist/notarization
+          if-no-files-found: warn
+          retention-days: 30

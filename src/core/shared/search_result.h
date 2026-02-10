@@ -30,6 +30,9 @@ struct Highlight {
 struct QueryContext {
     std::optional<QString> cwdPath;
     std::optional<QString> frontmostAppBundleId;
+    std::optional<QString> clipboardBasename;
+    std::optional<QString> clipboardDirname;
+    std::optional<QString> clipboardExtension;
     std::vector<QString> recentPaths;
 };
 

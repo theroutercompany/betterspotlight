@@ -1,0 +1,149 @@
+name: Long-Run Gates
+
+on:
+  schedule:
+    - cron: '0 7 * * 0'
+  workflow_dispatch:
+    inputs:
+      stress_duration_seconds:
+        description: 'Stress harness duration in seconds (default 172800 = 48h)'
+        required: false
+        default: '172800'
+      memory_duration_seconds:
+        description: 'Memory drift harness duration in seconds (default 86400 = 24h)'
+        required: false
+        default: '86400'
+      memory_drift_limit_mb:
+        description: 'Memory drift limit per service in MB (default 10)'
+        required: false
+        default: '10'
+      memory_sample_interval_seconds:
+        description: 'Memory sample interval in seconds (default 60)'
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: long-run-gates
+  cancel-in-progress: false
+
+jobs:
+  stress_48h:
+    name: Stress Gate (48h)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 3000
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          if command -v brew >/dev/null 2>&1; then
+            brew install qt@6 poppler tesseract leptonica pkg-config || true
+          fi
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          CMAKE_ARGS=(
+            -S .
+            -B build-long-run
+            -DCMAKE_BUILD_TYPE=Release
+            -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+            -DBETTERSPOTLIGHT_ENABLE_SPARKLE=OFF
+          )
+          if command -v brew >/dev/null 2>&1; then
+            QT_PREFIX="$(brew --prefix qt@6 2>/dev/null || true)"
+            if [[ -n "$QT_PREFIX" ]]; then
+              CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$QT_PREFIX")
+            fi
+          fi
+          cmake "${CMAKE_ARGS[@]}"
+
+      - name: Build
+        run: cmake --build build-long-run -j"$(sysctl -n hw.ncpu)"
+
+      - name: Run stress harness
+        env:
+          BS_STRESS_DURATION_SECONDS: ${{ inputs.stress_duration_seconds || '172800' }}
+          BS_STRESS_QUERY_BIN: ${{ github.workspace }}/build-long-run/src/services/query/betterspotlight-query
+          BS_STRESS_INDEXER_BIN: ${{ github.workspace }}/build-long-run/src/services/indexer/betterspotlight-indexer
+          BS_STRESS_EXTRACTOR_BIN: ${{ github.workspace }}/build-long-run/src/services/extractor/betterspotlight-extractor
+          BS_STRESS_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/stress_48h
+        run: |
+          set -euo pipefail
+          mkdir -p "$BS_STRESS_ARTIFACT_DIR"
+          ./Tests/benchmarks/stress_48h.sh "$BS_STRESS_DURATION_SECONDS"
+
+      - name: Upload stress artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress_48h_artifacts
+          path: |
+            ${{ github.workspace }}/artifacts/stress_48h
+          if-no-files-found: warn
+          retention-days: 14
+
+  memory_drift_24h:
+    name: Memory Drift Gate (24h)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 1700
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          if command -v brew >/dev/null 2>&1; then
+            brew install qt@6 poppler tesseract leptonica pkg-config || true
+          fi
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          CMAKE_ARGS=(
+            -S .
+            -B build-long-run
+            -DCMAKE_BUILD_TYPE=Release
+            -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+            -DBETTERSPOTLIGHT_ENABLE_SPARKLE=OFF
+          )
+          if command -v brew >/dev/null 2>&1; then
+            QT_PREFIX="$(brew --prefix qt@6 2>/dev/null || true)"
+            if [[ -n "$QT_PREFIX" ]]; then
+              CMAKE_ARGS+=("-DCMAKE_PREFIX_PATH=$QT_PREFIX")
+            fi
+          fi
+          cmake "${CMAKE_ARGS[@]}"
+
+      - name: Build
+        run: cmake --build build-long-run -j"$(sysctl -n hw.ncpu)"
+
+      - name: Run memory drift harness
+        env:
+          BS_MEM_DURATION_SECONDS: ${{ inputs.memory_duration_seconds || '86400' }}
+          BS_MEM_SAMPLE_INTERVAL: ${{ inputs.memory_sample_interval_seconds || '60' }}
+          BS_MEM_DRIFT_LIMIT_MB: ${{ inputs.memory_drift_limit_mb || '10' }}
+          BS_MEM_QUERY_BIN: ${{ github.workspace }}/build-long-run/src/services/query/betterspotlight-query
+          BS_MEM_INDEXER_BIN: ${{ github.workspace }}/build-long-run/src/services/indexer/betterspotlight-indexer
+          BS_MEM_EXTRACTOR_BIN: ${{ github.workspace }}/build-long-run/src/services/extractor/betterspotlight-extractor
+          BS_MEM_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/memory_drift_24h
+        run: |
+          set -euo pipefail
+          mkdir -p "$BS_MEM_ARTIFACT_DIR"
+          ./Tests/benchmarks/memory_drift_24h.sh "$BS_MEM_DURATION_SECONDS"
+
+      - name: Upload memory artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory_drift_24h_artifacts
+          path: |
+            ${{ github.workspace }}/artifacts/memory_drift_24h
+          if-no-files-found: warn
+          retention-days: 14

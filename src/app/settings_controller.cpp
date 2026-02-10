@@ -198,6 +198,11 @@ bool SettingsController::enableInteractionTracking() const
     return m_settings.value(QStringLiteral("enableInteractionTracking")).toBool(false);
 }
 
+bool SettingsController::clipboardSignalEnabled() const
+{
+    return m_settings.value(QStringLiteral("clipboardSignalEnabled")).toBool(false);
+}
+
 int SettingsController::feedbackRetentionDays() const
 {
     return m_settings.value(QStringLiteral("feedbackRetentionDays")).toInt(90);
@@ -405,6 +410,17 @@ void SettingsController::setEnableInteractionTracking(bool enabled)
     emit settingsChanged(QStringLiteral("enableInteractionTracking"));
 }
 
+void SettingsController::setClipboardSignalEnabled(bool enabled)
+{
+    if (clipboardSignalEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("clipboardSignalEnabled")] = enabled;
+    saveSettings();
+    emit clipboardSignalEnabledChanged();
+    emit settingsChanged(QStringLiteral("clipboardSignalEnabled"));
+}
+
 void SettingsController::setFeedbackRetentionDays(int days)
 {
     const int clamped = std::clamp(days, 7, 365);
@@ -591,6 +607,7 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("userPatterns"), QJsonArray{});
     ensureDefault(m_settings, QStringLiteral("enableFeedbackLogging"), true);
     ensureDefault(m_settings, QStringLiteral("enableInteractionTracking"), true);
+    ensureDefault(m_settings, QStringLiteral("clipboardSignalEnabled"), false);
     ensureDefault(m_settings, QStringLiteral("feedbackRetentionDays"), 90);
     ensureDefault(m_settings, QStringLiteral("theme"), QStringLiteral("system"));
     ensureDefault(m_settings, QStringLiteral("language"), QStringLiteral("en"));

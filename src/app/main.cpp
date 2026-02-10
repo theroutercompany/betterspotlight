@@ -75,6 +75,16 @@ int main(int argc, char* argv[])
 
     // Wire the search controller to the supervisor for IPC
     searchController.setSupervisor(serviceManager.supervisor());
+    const auto syncClipboardSignalsFromSettings = [&]() {
+        searchController.setClipboardSignalsEnabled(
+            settingsController.enableInteractionTracking()
+            && settingsController.clipboardSignalEnabled());
+    };
+    syncClipboardSignalsFromSettings();
+    QObject::connect(&settingsController, &bs::SettingsController::clipboardSignalEnabledChanged,
+                     &app, syncClipboardSignalsFromSettings);
+    QObject::connect(&settingsController, &bs::SettingsController::enableInteractionTrackingChanged,
+                     &app, syncClipboardSignalsFromSettings);
 
     // Load and keep global hotkey in sync with persisted settings.
     bool hotkeySyncInProgress = false;

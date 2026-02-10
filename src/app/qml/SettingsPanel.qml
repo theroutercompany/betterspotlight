@@ -710,6 +710,28 @@ Window {
                                     spacing: 12
                                     Layout.fillWidth: true
 
+                                    ColumnLayout {
+                                        spacing: 2
+                                        Layout.fillWidth: true
+                                        Label { text: qsTr("Clipboard path signals"); font.pixelSize: 13; color: "#1A1A1A" }
+                                        Label {
+                                            text: qsTr("Boost results using path-like clipboard hints only. Clipboard text is never persisted.")
+                                            font.pixelSize: 11; color: "#999999"; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                                        }
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.clipboardSignalEnabled : false
+                                        enabled: settingsController ? settingsController.enableInteractionTracking : false
+                                        onToggled: { if (settingsController) settingsController.clipboardSignalEnabled = checked }
+                                    }
+                                }
+
+                                Rectangle { Layout.fillWidth: true; height: 1; color: "#C0C0C0" }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
                                     Label { text: qsTr("Feedback data retention"); font.pixelSize: 13; color: "#1A1A1A"; Layout.fillWidth: true }
 
                                     ComboBox {

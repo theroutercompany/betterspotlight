@@ -6,7 +6,7 @@
 - **Technical verdict:** Architecture and implementation are now broadly aligned for current milestone intent.
 - **Quality verdict:** Core correctness and integration gates are green in the audited environment (`52/52` tests passed).
 - **Release verdict:** **Conditional GO** for internal dogfood / release-candidate progression.
-- **External release remains gated** by operational proof obligations not executed in this pass: 48h stress, 24h memory drift, and notarization/signing verification.
+- **External release remains gated** by proof obligations that require longer runtime windows or release credentials: full 48h stress, full 24h memory drift, and credentialed Sparkle notarization.
 
 ## What Was Remediated During This Audit Pass
 1. **BM25 SQL logic defect fixed**
@@ -54,6 +54,31 @@
      - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp:247`
      - `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml:176`
 
+7. **Clipboard-aware relevance signals implemented with privacy gating**
+   - Added opt-in clipboard signal toggle and ephemeral signal extraction (no raw clipboard persistence).
+   - Added query-context propagation + deterministic boost application.
+   - Changes:
+     - `/Users/rexliu/betterspotlight/src/app/settings_controller.h`
+     - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp`
+     - `/Users/rexliu/betterspotlight/src/app/search_controller.h`
+     - `/Users/rexliu/betterspotlight/src/app/search_controller.cpp`
+     - `/Users/rexliu/betterspotlight/src/services/query/query_service.cpp`
+     - `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`
+     - `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp`
+
+8. **Long-run gates and notarization pipeline operationalized**
+   - Added deterministic artifact-dir support and isolated socket namespace for benchmark harnesses.
+   - Added self-hosted long-run workflow and notarization verification workflow.
+   - Added release script for Sparkle-aware signing/notarization/stapling.
+   - Changes:
+     - `/Users/rexliu/betterspotlight/src/core/ipc/service_base.cpp`
+     - `/Users/rexliu/betterspotlight/Tests/benchmarks/stress_48h.sh`
+     - `/Users/rexliu/betterspotlight/Tests/benchmarks/memory_drift_24h.sh`
+     - `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
+     - `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
+     - `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`
+     - `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`
+
 ## Evidence Snapshot
 - Build evidence:
   - `cmake --build build-local -j8` completed successfully for app/services/tests.
@@ -64,23 +89,24 @@
   - `ctest --test-dir build-local -V -R ^test-query-service-core-improvements$ --timeout 120`
   - Contains `Applied BM25 weights...` and no BM25 SQL error.
 - UI-sim evidence:
-  - `test-ui-sim-query-suite` passed in 38.37s.
-  - `test-ui-sim-query-suite-stress` passed in 19.94s.
+  - `test-ui-sim-query-suite` passed in 28.41s (latest rerun).
+  - `test-ui-sim-query-suite-stress` passed in 21.45s (latest rerun).
+- Long-run harness smoke evidence:
+  - `stress_48h.sh` smoke (`30s`) passed with isolated sockets/artifacts.
+  - `memory_drift_24h.sh` smoke (`30s`) passed with isolated sockets/artifacts.
+- Notarization pipeline smoke evidence:
+  - `notarize_with_sparkle.sh` preflight passed in ad-hoc sign mode (`DEVELOPER_ID=-`, notarization disabled).
 
 ## Findings by Severity
 - **P1 (core correctness):** Closed in this pass.
   - BM25 application failure fixed and regressed.
-- **P2 (product behavior gaps):** One residual functional gap remains.
-  - Clipboard-aware relevance signal path (monitor + privacy toggle + boost) not implemented yet.
-- **P3 (documentation hygiene):** One stale spec statement identified.
-  - M3 architecture plan still states no Sparkle integration despite current implementation.
+- **P2 (product behavior gaps):** Clipboard-aware relevance signal gap is closed in this pass.
+- **P3 (documentation hygiene):** Sparkle stale statement is closed in this pass.
 
 ## Required Gates Before External Release
-1. Execute and pass 48-hour crash-free stress run with artifact retention.
-2. Execute and pass 24-hour memory drift gate (<10MB drift target).
-3. Validate notarization/signing/stapling flow with Sparkle-enabled distribution build.
-4. Close clipboard-aware relevance capability or explicitly de-scope and update acceptance criteria.
-5. Update stale Sparkle statement in `/Users/rexliu/betterspotlight/docs/milestones/m3/architecture-plan.md`.
+1. Execute and pass full 48-hour crash-free stress run with artifact retention.
+2. Execute and pass full 24-hour memory drift gate (<10MB drift target).
+3. Execute credentialed notarization/signing/stapling flow with Sparkle-enabled distribution build on self-hosted runner.
 
 ## Recommendation
 Proceed with internal RC promotion immediately; block public GA until operational gates and remaining P2/P3 deltas above are closed or formally accepted as scope adjustments.

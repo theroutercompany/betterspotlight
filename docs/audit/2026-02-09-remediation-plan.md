@@ -14,10 +14,10 @@ Convert audit findings into a release-safe backlog with concrete file targets, t
 | R-005 | P2 | DONE | Introduce explicit tray state model (`idle/indexing/error`) with queue-informed updates | `/Users/rexliu/betterspotlight/src/app/service_manager.h`, `/Users/rexliu/betterspotlight/src/app/service_manager.cpp`, `/Users/rexliu/betterspotlight/src/app/main.cpp` | Full `ctest` pass, compile/run verification | Fallback to tooltip-only status if queue polling causes instability |
 | R-006 | P2 | DONE | Make tray click open Index Health directly | `/Users/rexliu/betterspotlight/src/app/status_bar_bridge.h`, `/Users/rexliu/betterspotlight/src/app/qml/Main.qml`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`, `/Users/rexliu/betterspotlight/src/app/main.cpp` | UI-sim suite pass, runtime wiring review | Fallback to prior `showSearchRequested` trigger if product direction changes |
 | R-007 | P2 | DONE | Add platform side-effect abstraction for settings (`launchAtLogin`, `showInDock`) with user-visible success/failure | `/Users/rexliu/betterspotlight/src/app/platform_integration.h`, `/Users/rexliu/betterspotlight/src/app/platform_integration.cpp`, `/Users/rexliu/betterspotlight/src/app/platform_integration_mac.mm`, `/Users/rexliu/betterspotlight/src/app/settings_controller.h`, `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`, `/Users/rexliu/betterspotlight/src/app/CMakeLists.txt` | Full app build + `ctest` pass | Fallback to persistence-only behavior by routing to default platform integration and retaining status message |
-| R-008 | P3 | OPEN | Update stale Sparkle gap-analysis statement in docs | `/Users/rexliu/betterspotlight/docs/milestones/m3/architecture-plan.md` | Documentation review | None; docs-only update |
-| R-009 | P2 | OPEN | Implement clipboard-aware relevance signal with privacy gating and settings toggle | `/Users/rexliu/betterspotlight/src/services/query/query_service.cpp`, `/Users/rexliu/betterspotlight/src/app/settings_controller.*`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml` | New unit/integration tests + relevance fixture delta report | Fallback: keep clipboard feature disabled by default and compile-time guard |
-| R-010 | P1 | OPEN | Run/automate 48h stress and 24h memory-drift gates for release readiness | `/Users/rexliu/betterspotlight/tests/benchmarks/stress_48h.sh`, `/Users/rexliu/betterspotlight/tests/benchmarks/memory_drift_24h.sh`, CI workflows | Published artifacts + pass/fail thresholds | Fallback: block external release and ship internal-only builds |
-| R-011 | P1 | OPEN | Validate signing/notarization/stapling pipeline with Sparkle-enabled distribution artifacts | Packaging scripts / release workflow docs | Successful notarization + staple logs | Fallback: unsigned internal artifacts only |
+| R-008 | P3 | DONE | Update stale Sparkle gap-analysis statement in docs | `/Users/rexliu/betterspotlight/docs/milestones/m3/architecture-plan.md` | Documentation review | None; docs-only update |
+| R-009 | P2 | DONE | Implement clipboard-aware relevance signal with privacy gating and settings toggle | `/Users/rexliu/betterspotlight/src/services/query/query_service.cpp`, `/Users/rexliu/betterspotlight/src/app/search_controller.*`, `/Users/rexliu/betterspotlight/src/app/settings_controller.*`, `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`, `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp` | Full `ctest` pass + new integration scenario asserting clipboard signal re-ranking | Fallback: disable `clipboardSignalEnabled` in settings defaults if regressions appear |
+| R-010 | P1 | IN_PROGRESS | Run/automate 48h stress and 24h memory-drift gates for release readiness | `/Users/rexliu/betterspotlight/Tests/benchmarks/stress_48h.sh`, `/Users/rexliu/betterspotlight/Tests/benchmarks/memory_drift_24h.sh`, `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`, `/Users/rexliu/betterspotlight/src/core/ipc/service_base.cpp` | Smoke runs passed locally (30s each) with deterministic artifact dirs; scheduled self-hosted CI workflow added for full-duration evidence | Fallback: block external release until full-duration artifacts are attached |
+| R-011 | P1 | IN_PROGRESS | Validate signing/notarization/stapling pipeline with Sparkle-enabled distribution artifacts | `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`, `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`, `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml` | Local preflight signing/packaging smoke passed (ad-hoc signing, no notarization); workflow now supports full Sparkle-required notarization when credentials are present | Fallback: unsigned internal artifacts only until Apple credentialed run succeeds |
 | R-012 | P2 | OPEN | Add targeted tests for tray-state transitions and onboarding-indexing lifecycle | New tests under `/Users/rexliu/betterspotlight/Tests/Integration/` | New tests in CI, deterministic pass | Fallback: manual QA checklist until deterministic tests land |
 
 ## Explicit API / Interface Changes Landed
@@ -28,16 +28,31 @@ Convert audit findings into a release-safe backlog with concrete file targets, t
   - `signal onboardingCompleted()`
 - `SettingsController` now exposes platform application status:
   - `platformStatusMessage`, `platformStatusKey`, `platformStatusSuccess`
+- `SettingsController` now exposes clipboard privacy toggle:
+  - `clipboardSignalEnabled`
 - New platform abstraction layer:
   - `PlatformIntegration` with macOS implementation (`SMAppService`, `NSApplicationActivationPolicy`)
+- `SearchController` now forwards opt-in clipboard path hints (`clipboardBasename`, `clipboardDirname`, `clipboardExtension`) to query context.
+- `ServiceBase::socketPath(...)` now supports `BETTERSPOTLIGHT_SOCKET_DIR` override for isolated benchmark/test runs.
 
 ## Test Additions / Updates Landed
 - Added BM25 regression unit test:
   - `testBm25WeightsCanBeApplied()` in `/Users/rexliu/betterspotlight/Tests/Unit/test_sqlite_store.cpp`
 - Updated adaptive merge assertions in integration test:
   - `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp`
+- Added clipboard context re-ranking assertions in integration test:
+  - `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp`
+- Added long-run gate automation workflows:
+  - `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
+  - `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
 
 ## Current Gate Summary (Post-remediation)
 - Full suite gate: `52/52` passing in `build-local`.
 - UI simulation gate: both `test-ui-sim-query-suite` and stress variant passing.
-- Residual release gates are operational (stress/memory/notarization), not immediate correctness defects.
+- Long-run harness smoke runs passed locally with isolated sockets and artifact capture:
+  - `stress_48h.sh` smoke (`30s`) -> pass
+  - `memory_drift_24h.sh` smoke (`30s`) -> pass
+- Residual release gates are now operationally wired but still require credentialed / full-duration evidence to close:
+  - full `48h` stress artifact
+  - full `24h` memory drift artifact
+  - Sparkle-enabled notarized artifact + staple logs
