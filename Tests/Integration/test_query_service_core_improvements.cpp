@@ -324,12 +324,20 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                  QStringLiteral("consumer_curated_prefilter"));
         QCOMPARE(debugInfo.value(QStringLiteral("queryClass")).toString(),
                  QStringLiteral("natural_language"));
-        QVERIFY(std::abs(
-                    debugInfo.value(QStringLiteral("mergeLexicalWeightApplied")).toDouble() - 0.55)
-                < 1e-6);
-        QVERIFY(std::abs(
-                    debugInfo.value(QStringLiteral("mergeSemanticWeightApplied")).toDouble() - 0.45)
-                < 1e-6);
+        const double lexicalWeight =
+            debugInfo.value(QStringLiteral("mergeLexicalWeightApplied")).toDouble();
+        const double semanticWeight =
+            debugInfo.value(QStringLiteral("mergeSemanticWeightApplied")).toDouble();
+        const bool adaptiveApplied =
+            debugInfo.value(QStringLiteral("adaptiveMergeWeightsApplied")).toBool(false);
+        if (adaptiveApplied) {
+            QVERIFY(std::abs(lexicalWeight - 0.45) < 1e-6);
+            QVERIFY(std::abs(semanticWeight - 0.55) < 1e-6);
+        } else {
+            QVERIFY(std::abs(lexicalWeight - 0.55) < 1e-6);
+            QVERIFY(std::abs(semanticWeight - 0.45) < 1e-6);
+        }
+        QVERIFY(std::abs((lexicalWeight + semanticWeight) - 1.0) < 1e-6);
         QVERIFY(debugInfo.contains(QStringLiteral("semanticOnlySuppressedCount")));
         QVERIFY(debugInfo.contains(QStringLiteral("semanticOnlyAdmittedCount")));
         QVERIFY(debugInfo.value(QStringLiteral("semanticOnlyAdmitReasonSummary")).isObject());

@@ -24,6 +24,7 @@ private slots:
     void testHealthStats();
     void testPorterStemmer();
     void testBm25FileNameBoost();
+    void testBm25WeightsCanBeApplied();
     void testDeleteAll();
 };
 
@@ -414,6 +415,26 @@ void TestSQLiteStore::testBm25FileNameBoost()
     QVERIFY(hits.size() >= 2);
     QCOMPARE(hits[0].fileId, *id1);  // README.md should be first
     QCOMPARE(hits[1].fileId, *id2);  // notes.txt second
+}
+
+void TestSQLiteStore::testBm25WeightsCanBeApplied()
+{
+    QTemporaryDir dir;
+    const QString dbPath = dir.path() + "/test.db";
+    auto store = bs::SQLiteStore::open(dbPath);
+    QVERIFY(store.has_value());
+
+    QVERIFY(store->setBm25Weights(9.5, 4.0, 0.25));
+
+    auto nameWeight = store->getSetting(QStringLiteral("bm25WeightName"));
+    auto pathWeight = store->getSetting(QStringLiteral("bm25WeightPath"));
+    auto contentWeight = store->getSetting(QStringLiteral("bm25WeightContent"));
+    QVERIFY(nameWeight.has_value());
+    QVERIFY(pathWeight.has_value());
+    QVERIFY(contentWeight.has_value());
+    QCOMPARE(*nameWeight, QStringLiteral("9.5"));
+    QCOMPARE(*pathWeight, QStringLiteral("4"));
+    QCOMPARE(*contentWeight, QStringLiteral("0.25"));
 }
 
 void TestSQLiteStore::testDeleteAll()
