@@ -23,6 +23,7 @@ namespace bs {
 
 namespace {
 
+#if BS_WITH_ONNX
 QString buildDocumentText(const SearchResult& result)
 {
     // "name | parentPath | plainSnippet"
@@ -40,6 +41,7 @@ QString buildDocumentText(const SearchResult& result)
     }
     return doc;
 }
+#endif
 
 } // namespace
 
