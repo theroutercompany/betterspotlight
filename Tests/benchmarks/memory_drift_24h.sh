@@ -9,6 +9,7 @@
 #   BS_MEM_SAMPLE_INTERVAL (default 60)
 #   BS_MEM_DRIFT_LIMIT_MB (default 10)
 #   BS_MEM_QUERY_BIN / BS_MEM_INDEXER_BIN / BS_MEM_EXTRACTOR_BIN
+#   BS_MEM_ARTIFACT_DIR (optional explicit artifact directory)
 #
 # Artifacts are written to /tmp/bs_memory_drift_<timestamp>/
 
@@ -22,6 +23,7 @@ DRIFT_LIMIT_MB="${BS_MEM_DRIFT_LIMIT_MB:-10}"
 QUERY_BIN="${BS_MEM_QUERY_BIN:-$ROOT_DIR/build/src/services/query/betterspotlight-query}"
 INDEXER_BIN="${BS_MEM_INDEXER_BIN:-$ROOT_DIR/build/src/services/indexer/betterspotlight-indexer}"
 EXTRACTOR_BIN="${BS_MEM_EXTRACTOR_BIN:-$ROOT_DIR/build/src/services/extractor/betterspotlight-extractor}"
+ARTIFACT_DIR_OVERRIDE="${BS_MEM_ARTIFACT_DIR:-}"
 
 for bin in "$QUERY_BIN" "$INDEXER_BIN" "$EXTRACTOR_BIN"; do
     if [[ ! -x "$bin" ]]; then
@@ -36,7 +38,7 @@ echo "Sample interval: ${SAMPLE_INTERVAL}s"
 echo "Drift limit: ${DRIFT_LIMIT_MB} MB"
 
 python3 - "$DURATION_SECONDS" "$SAMPLE_INTERVAL" "$DRIFT_LIMIT_MB" \
-    "$QUERY_BIN" "$INDEXER_BIN" "$EXTRACTOR_BIN" <<'PY'
+    "$QUERY_BIN" "$INDEXER_BIN" "$EXTRACTOR_BIN" "$ARTIFACT_DIR_OVERRIDE" <<'PY'
 import json
 import os
 import socket
@@ -52,9 +54,13 @@ drift_limit_mb = float(sys.argv[3])
 query_bin = sys.argv[4]
 indexer_bin = sys.argv[5]
 extractor_bin = sys.argv[6]
+artifact_dir_override = sys.argv[7].strip()
 
 ts = time.strftime("%Y%m%d_%H%M%S")
-artifact_dir = Path(f"/tmp/bs_memory_drift_{ts}")
+if artifact_dir_override:
+    artifact_dir = Path(artifact_dir_override).expanduser()
+else:
+    artifact_dir = Path(f"/tmp/bs_memory_drift_{ts}")
 artifact_dir.mkdir(parents=True, exist_ok=True)
 home_dir = artifact_dir / "home"
 home_dir.mkdir(parents=True, exist_ok=True)
@@ -63,15 +69,17 @@ corpus_dir.mkdir(parents=True, exist_ok=True)
 (corpus_dir / "idle.txt").write_text("idle drift baseline corpus\n", encoding="utf-8")
 
 uid = os.getuid()
-socket_dir = Path(f"/tmp/betterspotlight-{uid}")
-query_sock = socket_dir / "query.sock"
-indexer_sock = socket_dir / "indexer.sock"
-extractor_sock = socket_dir / "extractor.sock"
-
 env = os.environ.copy()
 env["HOME"] = str(home_dir)
 env["TMPDIR"] = str(artifact_dir / "tmp")
+env["BETTERSPOTLIGHT_SOCKET_DIR"] = str(artifact_dir / "sockets")
 Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+
+socket_dir = Path(env["BETTERSPOTLIGHT_SOCKET_DIR"])
+socket_dir.mkdir(parents=True, exist_ok=True)
+query_sock = socket_dir / "query.sock"
+indexer_sock = socket_dir / "indexer.sock"
+extractor_sock = socket_dir / "extractor.sock"
 
 for stale in (query_sock, indexer_sock, extractor_sock):
     try:
@@ -129,17 +137,31 @@ def rpc(sock_path: Path, method: str, params=None, rid: int = 1, timeout: float 
         raise RuntimeError("short body")
     return json.loads(body.decode("utf-8"))
 
+def rpc_with_retry(sock_path: Path, method: str, params=None, rid: int = 1,
+                   timeout: float = 10.0, attempts: int = 3, delay: float = 0.25):
+    last_error = None
+    for _ in range(max(1, attempts)):
+        try:
+            return rpc(sock_path, method, params=params, rid=rid, timeout=timeout)
+        except Exception as ex:
+            last_error = ex
+            time.sleep(delay)
+    raise last_error
+
 
 for sock in (query_sock, indexer_sock, extractor_sock):
     if not wait_socket(sock):
         raise RuntimeError(f"socket unavailable: {sock}")
 
 rid = 1
-rpc(indexer_sock, "startIndexing", {"roots": [str(corpus_dir)]}, rid=rid, timeout=20.0)
+rpc_with_retry(indexer_sock, "startIndexing", {"roots": [str(corpus_dir)]},
+               rid=rid, timeout=30.0, attempts=4)
 rid += 1
-rpc(indexer_sock, "reindexPath", {"path": str(corpus_dir)}, rid=rid, timeout=20.0)
+rpc_with_retry(indexer_sock, "reindexPath", {"path": str(corpus_dir)},
+               rid=rid, timeout=20.0, attempts=4)
 rid += 1
-rpc(query_sock, "search", {"query": "idle drift baseline", "limit": 5}, rid=rid, timeout=10.0)
+rpc_with_retry(query_sock, "search", {"query": "idle drift baseline", "limit": 5},
+               rid=rid, timeout=20.0, attempts=4)
 rid += 1
 
 samples = {"query": [], "indexer": [], "extractor": []}
@@ -191,7 +213,7 @@ with open(artifact_dir / "summary.json", "w", encoding="utf-8") as f:
 
 for sock, method in ((query_sock, "shutdown"), (indexer_sock, "shutdown"), (extractor_sock, "shutdown")):
     try:
-        rpc(sock, method, {}, rid=rid, timeout=3.0)
+        rpc_with_retry(sock, method, {}, rid=rid, timeout=3.0, attempts=2, delay=0.1)
         rid += 1
     except Exception:
         pass

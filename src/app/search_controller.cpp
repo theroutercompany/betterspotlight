@@ -4,10 +4,12 @@
 
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDir>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QUrl>
 
 namespace bs {
@@ -19,6 +21,15 @@ SearchController::SearchController(QObject* parent)
     m_debounceTimer.setInterval(kDebounceMs);
     connect(&m_debounceTimer, &QTimer::timeout,
             this, &SearchController::executeSearch);
+
+    if (QClipboard* clipboard = QGuiApplication::clipboard()) {
+        connect(clipboard, &QClipboard::changed,
+                this, [this](QClipboard::Mode mode) {
+            if (mode == QClipboard::Clipboard) {
+                handleClipboardChanged();
+            }
+        });
+    }
 }
 
 SearchController::~SearchController() = default;
@@ -26,6 +37,21 @@ SearchController::~SearchController() = default;
 void SearchController::setSupervisor(Supervisor* supervisor)
 {
     m_supervisor = supervisor;
+}
+
+void SearchController::setClipboardSignalsEnabled(bool enabled)
+{
+    if (m_clipboardSignalsEnabled == enabled) {
+        return;
+    }
+    m_clipboardSignalsEnabled = enabled;
+
+    if (!m_clipboardSignalsEnabled) {
+        clearClipboardSignals();
+        return;
+    }
+
+    handleClipboardChanged();
 }
 
 QString SearchController::query() const
@@ -346,6 +372,21 @@ void SearchController::executeSearch()
     QJsonObject params;
     params[QStringLiteral("query")] = trimmedQuery;
     params[QStringLiteral("limit")] = 20;
+    QJsonObject context;
+    if (m_clipboardSignalsEnabled) {
+        if (m_clipboardBasenameSignal.has_value()) {
+            context[QStringLiteral("clipboardBasename")] = *m_clipboardBasenameSignal;
+        }
+        if (m_clipboardDirnameSignal.has_value()) {
+            context[QStringLiteral("clipboardDirname")] = *m_clipboardDirnameSignal;
+        }
+        if (m_clipboardExtensionSignal.has_value()) {
+            context[QStringLiteral("clipboardExtension")] = *m_clipboardExtensionSignal;
+        }
+    }
+    if (!context.isEmpty()) {
+        params[QStringLiteral("context")] = context;
+    }
 
     auto response = client->sendRequest(QStringLiteral("search"), params, kSearchTimeoutMs);
 
@@ -513,6 +554,93 @@ QString SearchController::pathForResult(int index) const
 
     QVariantMap item = m_results.at(index).toMap();
     return item.value(QStringLiteral("path")).toString();
+}
+
+void SearchController::handleClipboardChanged()
+{
+    if (!m_clipboardSignalsEnabled) {
+        clearClipboardSignals();
+        return;
+    }
+
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (!clipboard) {
+        clearClipboardSignals();
+        return;
+    }
+    updateClipboardSignalsFromText(clipboard->text(QClipboard::Clipboard));
+}
+
+void SearchController::clearClipboardSignals()
+{
+    m_clipboardBasenameSignal.reset();
+    m_clipboardDirnameSignal.reset();
+    m_clipboardExtensionSignal.reset();
+}
+
+void SearchController::updateClipboardSignalsFromText(const QString& text)
+{
+    clearClipboardSignals();
+    if (!m_clipboardSignalsEnabled) {
+        return;
+    }
+
+    QString candidate = text;
+    const int newline = candidate.indexOf(QLatin1Char('\n'));
+    if (newline >= 0) {
+        candidate = candidate.left(newline);
+    }
+    candidate = candidate.trimmed();
+    if (candidate.isEmpty() || candidate.size() > 2048) {
+        return;
+    }
+
+    if (candidate.startsWith(QStringLiteral("file://"), Qt::CaseInsensitive)) {
+        const QUrl url(candidate);
+        if (!url.isLocalFile()) {
+            return;
+        }
+        candidate = url.toLocalFile();
+    }
+    if (candidate.startsWith(QStringLiteral("~/"))) {
+        candidate = QDir::home().filePath(candidate.mid(2));
+    }
+
+    const auto setSignalsFromFileInfo = [this](const QFileInfo& info) {
+        const QString fileName = info.fileName().toLower();
+        if (!fileName.isEmpty()) {
+            m_clipboardBasenameSignal = fileName;
+            const QString ext = info.suffix().toLower();
+            if (!ext.isEmpty()) {
+                m_clipboardExtensionSignal = ext;
+            }
+        }
+        const QString parentName = info.dir().dirName().toLower();
+        if (!parentName.isEmpty() && parentName != QLatin1String(".")) {
+            m_clipboardDirnameSignal = parentName;
+        }
+    };
+
+    if (candidate.contains(QLatin1Char('/')) || candidate.contains(QLatin1Char('\\'))
+        || candidate.startsWith(QLatin1Char('.'))) {
+        setSignalsFromFileInfo(QFileInfo(QDir::cleanPath(candidate)));
+        return;
+    }
+
+    static const QRegularExpression filenamePattern(
+        QStringLiteral(R"(\b([A-Za-z0-9._-]+\.[A-Za-z0-9]{1,10})\b)"));
+    const QRegularExpressionMatch filenameMatch = filenamePattern.match(candidate);
+    if (filenameMatch.hasMatch()) {
+        const QString filename = filenameMatch.captured(1).toLower();
+        if (!filename.isEmpty()) {
+            m_clipboardBasenameSignal = filename;
+            const QFileInfo info(filename);
+            const QString ext = info.suffix().toLower();
+            if (!ext.isEmpty()) {
+                m_clipboardExtensionSignal = ext;
+            }
+        }
+    }
 }
 
 } // namespace bs

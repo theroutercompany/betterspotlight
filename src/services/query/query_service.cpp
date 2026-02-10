@@ -825,6 +825,27 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             context.frontmostAppBundleId = ctxObj.value(
                 QStringLiteral("frontmostAppBundleId")).toString();
         }
+        if (ctxObj.contains(QStringLiteral("clipboardBasename"))) {
+            const QString basename = ctxObj.value(QStringLiteral("clipboardBasename"))
+                .toString().trimmed().toLower();
+            if (!basename.isEmpty()) {
+                context.clipboardBasename = basename;
+            }
+        }
+        if (ctxObj.contains(QStringLiteral("clipboardDirname"))) {
+            const QString dirname = ctxObj.value(QStringLiteral("clipboardDirname"))
+                .toString().trimmed().toLower();
+            if (!dirname.isEmpty()) {
+                context.clipboardDirname = dirname;
+            }
+        }
+        if (ctxObj.contains(QStringLiteral("clipboardExtension"))) {
+            const QString extension = normalizeFileTypeToken(
+                ctxObj.value(QStringLiteral("clipboardExtension")).toString());
+            if (!extension.isEmpty()) {
+                context.clipboardExtension = extension;
+            }
+        }
         if (ctxObj.contains(QStringLiteral("recentPaths"))) {
             QJsonArray recentArr = ctxObj.value(QStringLiteral("recentPaths")).toArray();
             context.recentPaths.reserve(static_cast<size_t>(recentArr.size()));
@@ -1647,6 +1668,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             || ext == QLatin1String("txt")
             || ext == QLatin1String("log");
     };
+    int clipboardSignalBoostedResults = 0;
 
     for (auto& sr : results) {
         double feedbackBoost = 0.0;
@@ -1679,6 +1701,32 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                 : std::min(naturalLanguageQuery ? 18.0 : 8.0, normalizedSemantic * (naturalLanguageQuery ? 18.0 : 8.0));
             m2SignalBoost += semanticBoost;
             sr.scoreBreakdown.semanticBoost += semanticBoost;
+        }
+
+        double clipboardSignalBoost = 0.0;
+        const QFileInfo pathInfo(sr.path);
+        const QString fileNameLower = pathInfo.fileName().toLower();
+        const QString parentNameLower = pathInfo.dir().dirName().toLower();
+        if (context.clipboardBasename.has_value()) {
+            if (fileNameLower == *context.clipboardBasename) {
+                clipboardSignalBoost += 16.0;
+            } else if (!fileNameLower.isEmpty()
+                       && fileNameLower.contains(*context.clipboardBasename)) {
+                clipboardSignalBoost += 8.0;
+            }
+        }
+        if (context.clipboardDirname.has_value()
+            && !parentNameLower.isEmpty()
+            && parentNameLower == *context.clipboardDirname) {
+            clipboardSignalBoost += 7.0;
+        }
+        if (context.clipboardExtension.has_value()
+            && ext == *context.clipboardExtension) {
+            clipboardSignalBoost += 3.0;
+        }
+        if (clipboardSignalBoost > 0.0) {
+            m2SignalBoost += std::min(24.0, clipboardSignalBoost);
+            ++clipboardSignalBoostedResults;
         }
 
         if (!querySignalTokens.isEmpty()) {
@@ -1902,6 +1950,12 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("effectiveSemanticOnlySafetySimilarity")] =
             static_cast<double>(kSemanticOnlySafetySimilarity);
         debugInfo[QStringLiteral("queryAfterParse")] = query;
+        debugInfo[QStringLiteral("clipboardSignalsProvided")] =
+            (context.clipboardBasename.has_value()
+             || context.clipboardDirname.has_value()
+             || context.clipboardExtension.has_value());
+        debugInfo[QStringLiteral("clipboardSignalBoostedResults")] =
+            clipboardSignalBoostedResults;
         QJsonArray parsedTypes;
         for (const QString& extractedType : parsed.extractedTypes) {
             parsedTypes.append(normalizeFileTypeToken(extractedType));

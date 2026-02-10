@@ -11,6 +11,7 @@
 #   BS_STRESS_EXTRACTOR_BIN
 #   BS_STRESS_SAMPLE_INTERVAL (default 5)
 #   BS_STRESS_INTEGRITY_INTERVAL (default 120)
+#   BS_STRESS_ARTIFACT_DIR (optional explicit artifact directory)
 #
 # Artifacts are written to /tmp/bs_stress_48h_<timestamp>/
 
@@ -24,6 +25,7 @@ INDEXER_BIN="${BS_STRESS_INDEXER_BIN:-$ROOT_DIR/build/src/services/indexer/bette
 EXTRACTOR_BIN="${BS_STRESS_EXTRACTOR_BIN:-$ROOT_DIR/build/src/services/extractor/betterspotlight-extractor}"
 SAMPLE_INTERVAL="${BS_STRESS_SAMPLE_INTERVAL:-5}"
 INTEGRITY_INTERVAL="${BS_STRESS_INTEGRITY_INTERVAL:-120}"
+ARTIFACT_DIR_OVERRIDE="${BS_STRESS_ARTIFACT_DIR:-}"
 
 for bin in "$QUERY_BIN" "$INDEXER_BIN" "$EXTRACTOR_BIN"; do
     if [[ ! -x "$bin" ]]; then
@@ -39,7 +41,7 @@ echo "Indexer:  $INDEXER_BIN"
 echo "Extractor:$EXTRACTOR_BIN"
 
 python3 - "$DURATION_SECONDS" "$QUERY_BIN" "$INDEXER_BIN" "$EXTRACTOR_BIN" \
-    "$SAMPLE_INTERVAL" "$INTEGRITY_INTERVAL" <<'PY'
+    "$SAMPLE_INTERVAL" "$INTEGRITY_INTERVAL" "$ARTIFACT_DIR_OVERRIDE" <<'PY'
 import json
 import os
 import random
@@ -58,9 +60,13 @@ indexer_bin = sys.argv[3]
 extractor_bin = sys.argv[4]
 sample_interval = int(sys.argv[5])
 integrity_interval = int(sys.argv[6])
+artifact_dir_override = sys.argv[7].strip()
 
 ts = time.strftime("%Y%m%d_%H%M%S")
-artifact_dir = Path(f"/tmp/bs_stress_48h_{ts}")
+if artifact_dir_override:
+    artifact_dir = Path(artifact_dir_override).expanduser()
+else:
+    artifact_dir = Path(f"/tmp/bs_stress_48h_{ts}")
 artifact_dir.mkdir(parents=True, exist_ok=True)
 home_dir = artifact_dir / "home"
 home_dir.mkdir(parents=True, exist_ok=True)
@@ -68,18 +74,20 @@ corpus_dir = artifact_dir / "corpus"
 corpus_dir.mkdir(parents=True, exist_ok=True)
 
 uid = os.getuid()
-socket_dir = Path(f"/tmp/betterspotlight-{uid}")
-query_sock = socket_dir / "query.sock"
-indexer_sock = socket_dir / "indexer.sock"
-extractor_sock = socket_dir / "extractor.sock"
-
 db_path = home_dir / "Library" / "Application Support" / "betterspotlight" / "index.db"
 db_path.parent.mkdir(parents=True, exist_ok=True)
 
 env = os.environ.copy()
 env["HOME"] = str(home_dir)
 env["TMPDIR"] = str(artifact_dir / "tmp")
+env["BETTERSPOTLIGHT_SOCKET_DIR"] = str(artifact_dir / "sockets")
 Path(env["TMPDIR"]).mkdir(parents=True, exist_ok=True)
+
+socket_dir = Path(env["BETTERSPOTLIGHT_SOCKET_DIR"])
+socket_dir.mkdir(parents=True, exist_ok=True)
+query_sock = socket_dir / "query.sock"
+indexer_sock = socket_dir / "indexer.sock"
+extractor_sock = socket_dir / "extractor.sock"
 
 for stale in (query_sock, indexer_sock, extractor_sock):
     try:

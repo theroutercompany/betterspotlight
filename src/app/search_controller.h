@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
+#include <optional>
 
 namespace bs {
 
@@ -25,6 +26,7 @@ public:
 
     // Set the supervisor to obtain the query service client
     void setSupervisor(Supervisor* supervisor);
+    void setClipboardSignalsEnabled(bool enabled);
 
     QString query() const;
     void setQuery(const QString& query);
@@ -62,6 +64,9 @@ private:
     int firstSelectableRow() const;
     int nextSelectableRow(int fromIndex, int delta) const;
     QString pathForResult(int index) const;
+    void handleClipboardChanged();
+    void clearClipboardSignals();
+    void updateClipboardSignalsFromText(const QString& text);
 
     Supervisor* m_supervisor = nullptr;
     QString m_query;
@@ -70,6 +75,10 @@ private:
     bool m_isSearching = false;
     int m_selectedIndex = -1;
     QVariantMap m_lastHealthSnapshot;
+    bool m_clipboardSignalsEnabled = false;
+    std::optional<QString> m_clipboardBasenameSignal;
+    std::optional<QString> m_clipboardDirnameSignal;
+    std::optional<QString> m_clipboardExtensionSignal;
 
     QTimer m_debounceTimer;
     static constexpr int kDebounceMs = 100;

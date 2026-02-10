@@ -151,6 +151,12 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
     const QString apiDeploymentPath = QDir(docsDir).filePath(QStringLiteral("API-deployment-guide.md"));
     QVERIFY(upsertItem(store, apiDeploymentPath, QStringLiteral(".md"), bs::ItemKind::Markdown,
                        QStringLiteral("API deployment guide for release operations")).has_value());
+    const QString baselineClipboardPath = QDir(docsDir).filePath(QStringLiteral("meeting-rollout-notes.md"));
+    QVERIFY(upsertItem(store, baselineClipboardPath, QStringLiteral(".md"), bs::ItemKind::Markdown,
+                       QStringLiteral("rollout checklist reliability agenda")).has_value());
+    const QString targetedClipboardPath = QDir(docsDir).filePath(QStringLiteral("deep-dive-notes.md"));
+    QVERIFY(upsertItem(store, targetedClipboardPath, QStringLiteral(".md"), bs::ItemKind::Markdown,
+                       QStringLiteral("rollout checklist reliability agenda")).has_value());
 
     // Placeholder/offline corpus.
     const QString creditPath = QDir(docsDir).filePath(QStringLiteral("credit report.pdf"));
@@ -420,6 +426,40 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(!ranked.isEmpty());
         const QString topName = ranked.first().toObject().value(QStringLiteral("name")).toString();
         QCOMPARE(topName, QStringLiteral("API-deployment-guide.md"));
+    }
+
+    // Clipboard context signals should boost matching path hints without storing raw clipboard text.
+    {
+        QJsonObject baseParams;
+        baseParams[QStringLiteral("query")] = QStringLiteral("rollout checklist");
+        baseParams[QStringLiteral("limit")] = 10;
+        baseParams[QStringLiteral("debug")] = true;
+        const QJsonObject baseResponse = sendOrFail(queryClient, QStringLiteral("search"), baseParams);
+        QCOMPARE(baseResponse.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonArray baseResults = baseResponse.value(QStringLiteral("result"))
+                                     .toObject()
+                                     .value(QStringLiteral("results"))
+                                     .toArray();
+        QVERIFY(baseResults.size() >= 2);
+        const QString baseTopPath = baseResults.first().toObject().value(QStringLiteral("path")).toString();
+        QCOMPARE(baseTopPath, baselineClipboardPath);
+
+        QJsonObject context;
+        context[QStringLiteral("clipboardBasename")] = QStringLiteral("deep-dive-notes.md");
+        context[QStringLiteral("clipboardDirname")] = QStringLiteral("documents");
+        context[QStringLiteral("clipboardExtension")] = QStringLiteral("md");
+        baseParams[QStringLiteral("context")] = context;
+        const QJsonObject boostedResponse = sendOrFail(queryClient, QStringLiteral("search"), baseParams);
+        QCOMPARE(boostedResponse.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject boostedResult = boostedResponse.value(QStringLiteral("result")).toObject();
+        const QJsonArray boostedResults = boostedResult.value(QStringLiteral("results")).toArray();
+        QVERIFY(boostedResults.size() >= 2);
+        const QString boostedTopPath = boostedResults.first().toObject().value(QStringLiteral("path")).toString();
+        QCOMPARE(boostedTopPath, targetedClipboardPath);
+
+        const QJsonObject debugInfo = boostedResult.value(QStringLiteral("debugInfo")).toObject();
+        QVERIFY(debugInfo.value(QStringLiteral("clipboardSignalsProvided")).toBool(false));
+        QVERIFY(debugInfo.value(QStringLiteral("clipboardSignalBoostedResults")).toInt() > 0);
     }
 
     // Availability metadata for offline placeholder result.

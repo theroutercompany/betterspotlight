@@ -45,6 +45,22 @@
   - `/Users/rexliu/betterspotlight/src/app/platform_integration_mac.mm:21`
   - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp:247`
   - `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml:176`
+- Clipboard relevance signals (privacy-gated):
+  - `/Users/rexliu/betterspotlight/src/app/settings_controller.h`
+  - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp`
+  - `/Users/rexliu/betterspotlight/src/app/search_controller.cpp`
+  - `/Users/rexliu/betterspotlight/src/services/query/query_service.cpp`
+  - `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml`
+  - `/Users/rexliu/betterspotlight/Tests/Integration/test_query_service_core_improvements.cpp`
+- Long-run gate hardening + automation:
+  - `/Users/rexliu/betterspotlight/src/core/ipc/service_base.cpp` (`BETTERSPOTLIGHT_SOCKET_DIR` override)
+  - `/Users/rexliu/betterspotlight/Tests/benchmarks/stress_48h.sh` (artifact-dir + isolated socket support)
+  - `/Users/rexliu/betterspotlight/Tests/benchmarks/memory_drift_24h.sh` (artifact-dir + isolated socket support + RPC retries)
+  - `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
+- Signing/notarization pipeline artifacts:
+  - `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`
+  - `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`
+  - `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
 
 ## Post-remediation Build + Test Commands
 
@@ -78,8 +94,8 @@ Result:
 ctest --test-dir build-local --output-on-failure -R "^test-ui-sim-query-suite$|^test-ui-sim-query-suite-stress$" --timeout 45
 ```
 Result:
-- `test-ui-sim-query-suite` passed in `38.37 sec`.
-- `test-ui-sim-query-suite-stress` passed in `19.94 sec`.
+- `test-ui-sim-query-suite` passed in `28.41 sec` (latest run).
+- `test-ui-sim-query-suite-stress` passed in `21.45 sec` (latest run).
 
 ### 5) Full suite verification
 ```bash
@@ -87,7 +103,7 @@ ctest --test-dir build-local --output-on-failure --timeout 120
 ```
 Result:
 - `100% tests passed, 0 tests failed out of 52`.
-- Total runtime: `70.78 sec`.
+- Total runtime: `61.78 sec` (latest rerun after operational + clipboard changes).
 
 ### 6) Inventory check
 ```bash
@@ -105,8 +121,53 @@ rg -n "INSERT INTO search_index\(search_index, rank\) VALUES\('fts5'" src || tru
 Result:
 - No matches.
 
+### 7) Long-run harness smoke (artifact-dir + isolated-socket verification)
+```bash
+BS_STRESS_QUERY_BIN=build-local/src/services/query/betterspotlight-query \
+BS_STRESS_INDEXER_BIN=build-local/src/services/indexer/betterspotlight-indexer \
+BS_STRESS_EXTRACTOR_BIN=build-local/src/services/extractor/betterspotlight-extractor \
+BS_STRESS_SAMPLE_INTERVAL=2 \
+BS_STRESS_INTEGRITY_INTERVAL=10 \
+BS_STRESS_ARTIFACT_DIR=/tmp/bs_stress_smoke \
+./Tests/benchmarks/stress_48h.sh 30
+```
+Result:
+- Pass (`errors=[]`, `integrityFailures=0`).
+- Artifact directory created deterministically at `/tmp/bs_stress_smoke`.
+
+```bash
+BS_MEM_QUERY_BIN=build-local/src/services/query/betterspotlight-query \
+BS_MEM_INDEXER_BIN=build-local/src/services/indexer/betterspotlight-indexer \
+BS_MEM_EXTRACTOR_BIN=build-local/src/services/extractor/betterspotlight-extractor \
+BS_MEM_SAMPLE_INTERVAL=5 \
+BS_MEM_DRIFT_LIMIT_MB=50 \
+BS_MEM_ARTIFACT_DIR=/tmp/bs_memory_smoke \
+./Tests/benchmarks/memory_drift_24h.sh 30
+```
+Result:
+- Pass for all services (`query`, `indexer`, `extractor`) under smoke threshold.
+- Artifact directory created deterministically at `/tmp/bs_memory_smoke`.
+
+### 8) Notarization pipeline preflight smoke
+```bash
+BS_SKIP_BUILD=1 \
+BS_REQUIRE_SPARKLE=0 \
+BS_NOTARIZE=0 \
+BS_CREATE_DMG=0 \
+BS_RELEASE_BUILD_DIR=/Users/rexliu/betterspotlight/build-local \
+BS_RELEASE_OUTPUT_DIR=/tmp/bs_notary_smoke \
+DEVELOPER_ID=- \
+./scripts/release/notarize_with_sparkle.sh
+```
+Result:
+- Pass (ad-hoc sign + bundle zip generation).
+- Produced `/tmp/bs_notary_smoke/release_summary.json`.
+- Full notarization remains credential-gated (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `TEAM_ID`).
+
 ## Evidence-based Conclusions
 - BM25 configuration bug is remediated and verified by integration runtime logs plus unit coverage.
 - Adaptive merge debug contract mismatch is remediated and integration-verified.
-- Prior timeout-prone UI-sim tests now complete under the same 45s timeout budget.
+- Clipboard-aware relevance signal path is implemented and integration-verified.
+- Prior timeout-prone UI-sim tests continue to complete under the same 45s timeout budget.
+- Long-run and notarization gates are now automated/scripted and smoke-validated locally.
 - Current source state in `build-local` meets full-suite pass gate (52/52).

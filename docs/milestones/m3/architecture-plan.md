@@ -104,26 +104,33 @@ Acceptance criteria reference: `docs/milestones/acceptance-criteria.md` (M3 sect
 
 **Current state**
 
-- No Sparkle integration in tree (no `Sparkle`, `SUUpdater`, `SPU*` references).
-- Setting exists for update checks: `SettingsController::checkForUpdates` defaulted to true in `src/app/settings_controller.cpp`.
+- Sparkle bridge is implemented in app layer:
+  - `src/app/update_manager.mm`
+  - `src/app/main.cpp` wiring and status reporting
+  - `src/app/CMakeLists.txt` Sparkle linkage behind `BETTERSPOTLIGHT_ENABLE_SPARKLE`
+- Settings toggle for update checks is implemented via `SettingsController::checkForUpdates`.
+- Distribution notarization/signing was not previously wired into repo automation.
 
 **Delta required**
 
-- Integrate Sparkle 2 via an Objective-C++ bridge in app layer.
-- Define update channels (stable/beta optional), appcast, signing keys, and notarization-compatible packaging.
+- Verify Sparkle-enabled artifacts in CI/release automation and enforce signing/notarization/stapling gates.
+- Define update channels (stable/beta optional), appcast signing keys, and release promotion criteria.
 
 ### 1.7 Clipboard/context awareness
 
 **Current state**
 
 - Context signals exist in ranking: `src/core/ranking/scorer.cpp` uses `QueryContext.cwdPath` and `QueryContext.frontmostAppBundleId`.
-- Clipboard is only used for "Copy path" action: `src/app/search_controller.cpp`.
-- No clipboard monitoring / boosting.
+- Clipboard signal monitoring is now opt-in via settings:
+  - `SettingsController::clipboardSignalEnabled`
+  - Privacy tab toggle in `src/app/qml/SettingsPanel.qml`
+- Search controller forwards ephemeral clipboard-derived path hints (`basename`, `dirname`, `extension`) in query context.
+- QueryService applies deterministic boost based on clipboard hints without persisting raw clipboard text.
 
 **Delta required**
 
-- Add opt-in clipboard monitor and ephemeral in-memory state.
-- Extend query context passing so QueryService can boost results matching clipboard-derived signal (path-like or filename-like tokens), without logging clipboard contents.
+- Expand automated coverage with dedicated UI-level tests for toggle behavior and signal freshness.
+- Validate signal weights against the 100-query relevance corpus to avoid regressions.
 
 ### 1.8 Hotkey conflict detection
 
