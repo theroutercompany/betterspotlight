@@ -4,7 +4,7 @@
 
 ## Executive Verdict
 - **Technical verdict:** Architecture and implementation are now broadly aligned for current milestone intent.
-- **Quality verdict:** Core correctness and integration gates are green in the audited environment (`52/52` tests passed).
+- **Quality verdict:** Core correctness and integration gates are green in the audited environment (`53/53` tests passed).
 - **Release verdict:** **Conditional GO** for internal dogfood / release-candidate progression.
 - **External release remains gated** by proof obligations that require longer runtime windows or release credentials: full 48h stress, full 24h memory drift, and credentialed Sparkle notarization.
 
@@ -79,12 +79,18 @@
      - `/Users/rexliu/betterspotlight/scripts/release/notarize_with_sparkle.sh`
      - `/Users/rexliu/betterspotlight/packaging/macos/entitlements.plist`
 
+9. **Targeted lifecycle integration coverage added**
+   - Added deterministic tests for tray state transitions and onboarding/indexing first-run gating semantics.
+   - Changes:
+     - `/Users/rexliu/betterspotlight/Tests/Integration/test_app_lifecycle_states.cpp`
+     - `/Users/rexliu/betterspotlight/Tests/CMakeLists.txt`
+
 ## Evidence Snapshot
 - Build evidence:
   - `cmake --build build-local -j8` completed successfully for app/services/tests.
 - Suite evidence:
   - `ctest --test-dir build-local --output-on-failure --timeout 120`
-  - Result: **100% pass, 0 failed, 52 total**.
+  - Result: **100% pass, 0 failed, 53 total**.
 - Targeted integration evidence:
   - `ctest --test-dir build-local -V -R ^test-query-service-core-improvements$ --timeout 120`
   - Contains `Applied BM25 weights...` and no BM25 SQL error.
@@ -96,11 +102,14 @@
   - `memory_drift_24h.sh` smoke (`30s`) passed with isolated sockets/artifacts.
 - Notarization pipeline smoke evidence:
   - `notarize_with_sparkle.sh` preflight passed in ad-hoc sign mode (`DEVELOPER_ID=-`, notarization disabled).
+- Operational workflow dispatch evidence (`2026-02-10`):
+  - `Long-Run Gates`: [run 21847178417](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178417) (queued on self-hosted macOS runner).
+  - `Notarization Verify`: [run 21847178969](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178969) (queued on self-hosted macOS runner).
 
 ## Findings by Severity
 - **P1 (core correctness):** Closed in this pass.
   - BM25 application failure fixed and regressed.
-- **P2 (product behavior gaps):** Clipboard-aware relevance signal gap is closed in this pass.
+- **P2 (product behavior gaps):** Clipboard-aware relevance and app-lifecycle targeted test coverage are closed in this pass.
 - **P3 (documentation hygiene):** Sparkle stale statement is closed in this pass.
 
 ## Required Gates Before External Release

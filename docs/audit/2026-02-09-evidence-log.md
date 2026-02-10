@@ -102,16 +102,16 @@ Result:
 ctest --test-dir build-local --output-on-failure --timeout 120
 ```
 Result:
-- `100% tests passed, 0 tests failed out of 52`.
-- Total runtime: `61.78 sec` (latest rerun after operational + clipboard changes).
+- `100% tests passed, 0 tests failed out of 53`.
+- Total runtime: `57.17 sec` (latest rerun after app lifecycle test addition).
 
 ### 6) Inventory check
 ```bash
 ctest --test-dir build-local -N | tail -n 6
 ```
 Result:
-- Shows tests `#49` through `#52`.
-- `Total Tests: 52`.
+- Shows tests `#50` through `#53`.
+- `Total Tests: 53`.
 
 ## Additional Verification Snippets
 - Ensure old broken BM25 control statement is gone:
@@ -168,6 +168,10 @@ Result:
 - BM25 configuration bug is remediated and verified by integration runtime logs plus unit coverage.
 - Adaptive merge debug contract mismatch is remediated and integration-verified.
 - Clipboard-aware relevance signal path is implemented and integration-verified.
+- App lifecycle targeted coverage is now landed with deterministic integration assertions for tray-state transitions and onboarding/indexing first-run gating.
 - Prior timeout-prone UI-sim tests continue to complete under the same 45s timeout budget.
 - Long-run and notarization gates are now automated/scripted and smoke-validated locally.
-- Current source state in `build-local` meets full-suite pass gate (52/52).
+- Workflow dispatch evidence recorded for self-hosted operational gates:
+  - Long-Run Gates: [run 21847178417](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178417) (queued).
+  - Notarization Verify: [run 21847178969](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178969) (queued).
+- Current source state in `build-local` meets full-suite pass gate (53/53).
