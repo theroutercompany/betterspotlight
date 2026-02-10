@@ -172,12 +172,16 @@ void OnboardingController::saveHomeMap(const QVariantList& directories)
 void OnboardingController::completeOnboarding()
 {
     auto settings = readSettings();
+    const bool wasCompleted = settings.value(QStringLiteral("onboarding_completed")).toBool(false);
     settings[QStringLiteral("onboarding_completed")] = true;
     writeSettings(settings);
 
     if (m_needsOnboarding) {
         m_needsOnboarding = false;
         emit needsOnboardingChanged();
+    }
+    if (!wasCompleted) {
+        emit onboardingCompleted();
     }
 }
 

@@ -16,6 +16,7 @@ QtObject {
     // Signals that the C++ StatusBar bridges from QSystemTrayIcon actions
     signal showSearchRequested()
     signal showSettingsRequested()
+    signal showIndexHealthRequested()
 
     // Service state for icon appearance (idle, indexing, error)
     property string state: "idle"  // "idle", "indexing", "error"

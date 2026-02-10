@@ -10,6 +10,9 @@ qt_add_executable(betterspotlight
     search_controller.cpp
     update_manager.h
     update_manager.mm
+    platform_integration.h
+    platform_integration.cpp
+    platform_integration_mac.mm
     status_bar_bridge.h
     onboarding_controller.h
     onboarding_controller.cpp
@@ -62,6 +65,7 @@ target_link_libraries(betterspotlight PRIVATE
     Qt6::Widgets
     Qt6::Network
     "-framework Carbon"
+    "-framework ServiceManagement"
 )
 
 if(APPLE AND BETTERSPOTLIGHT_ENABLE_SPARKLE)

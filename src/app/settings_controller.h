@@ -1,10 +1,13 @@
 #pragma once
 
+#include "platform_integration.h"
+
 #include <QObject>
 #include <QJsonObject>
 #include <QVariantList>
 #include <QString>
 #include <QStringList>
+#include <memory>
 
 namespace bs {
 
@@ -28,6 +31,9 @@ class SettingsController : public QObject {
     Q_PROPERTY(QStringList sensitivePaths READ sensitivePaths WRITE setSensitivePaths NOTIFY sensitivePathsChanged)
     Q_PROPERTY(QString theme READ theme WRITE setTheme NOTIFY themeChanged)
     Q_PROPERTY(QString language READ language WRITE setLanguage NOTIFY languageChanged)
+    Q_PROPERTY(QString platformStatusMessage READ platformStatusMessage NOTIFY platformStatusChanged)
+    Q_PROPERTY(QString platformStatusKey READ platformStatusKey NOTIFY platformStatusChanged)
+    Q_PROPERTY(bool platformStatusSuccess READ platformStatusSuccess NOTIFY platformStatusChanged)
 
 public:
     explicit SettingsController(QObject* parent = nullptr);
@@ -50,6 +56,9 @@ public:
     QStringList sensitivePaths() const;
     QString theme() const;
     QString language() const;
+    QString platformStatusMessage() const;
+    QString platformStatusKey() const;
+    bool platformStatusSuccess() const;
 
     // Setters
     void setHotkey(const QString& hotkey);
@@ -97,6 +106,7 @@ signals:
     void sensitivePathsChanged();
     void themeChanged();
     void languageChanged();
+    void platformStatusChanged();
     void settingsChanged(const QString& key);
     void feedbackDataCleared();
     void indexingPaused();
@@ -110,8 +120,13 @@ private:
     void loadSettings();
     void saveSettings();
     QString settingsFilePath() const;
+    void setPlatformStatus(const QString& key, bool success, const QString& message);
 
     QJsonObject m_settings;
+    std::unique_ptr<PlatformIntegration> m_platformIntegration;
+    QString m_platformStatusMessage;
+    QString m_platformStatusKey;
+    bool m_platformStatusSuccess = true;
 };
 
 } // namespace bs

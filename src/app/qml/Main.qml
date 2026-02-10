@@ -51,6 +51,10 @@ QtObject {
             settingsPanel.raise()
             settingsPanel.requestActivate()
         }
+
+        function onShowIndexHealthRequested() {
+            settingsPanel.openIndexHealth()
+        }
     }
 
     // Monitor service readiness

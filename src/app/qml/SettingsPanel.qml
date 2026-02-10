@@ -24,6 +24,14 @@ Window {
     x: (Screen.width - width) / 2
     y: (Screen.height - height) / 2
 
+    function openIndexHealth() {
+        tabBar.currentIndex = 4
+        show()
+        raise()
+        requestActivate()
+        healthTab.refreshHealth()
+    }
+
     Rectangle {
         anchors.fill: parent
         color: "#F6F6F6"
@@ -163,6 +171,19 @@ Window {
                                             }
                                         }
                                     }
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    visible: settingsController
+                                             && settingsController.platformStatusMessage
+                                             && settingsController.platformStatusMessage.length > 0
+                                    text: settingsController ? settingsController.platformStatusMessage : ""
+                                    font.pixelSize: 11
+                                    wrapMode: Text.WordWrap
+                                    color: settingsController && settingsController.platformStatusSuccess
+                                           ? "#2E7D32"
+                                           : "#C62828"
                                 }
 
                                 Rectangle { Layout.fillWidth: true; height: 1; color: "#C0C0C0" }

@@ -27,6 +27,7 @@ signals:
     void needsOnboardingChanged();
     void fdaGrantedChanged();
     void homeDirectoriesChanged();
+    void onboardingCompleted();
 
 private:
     void scanHomeDirectories();

@@ -84,6 +84,11 @@ bool isSingleHomeRoot(const QJsonArray& roots)
     return roots.size() == 1 && roots.first().toString() == QDir::homePath();
 }
 
+bool isErrorStatus(const QString& status)
+{
+    return status == QLatin1String("error") || status == QLatin1String("crashed");
+}
+
 QJsonObject readAppSettings()
 {
     const QString settingsPath =
@@ -120,6 +125,10 @@ ServiceManager::ServiceManager(QObject* parent)
             this, &ServiceManager::onServiceCrashed);
     connect(m_supervisor.get(), &Supervisor::allServicesReady,
             this, &ServiceManager::onAllServicesReady);
+
+    m_indexingStatusTimer.setInterval(2000);
+    connect(&m_indexingStatusTimer, &QTimer::timeout,
+            this, &ServiceManager::refreshIndexerQueueStatus);
 }
 
 ServiceManager::~ServiceManager()
@@ -147,6 +156,11 @@ QString ServiceManager::queryStatus() const
     return m_queryStatus;
 }
 
+QString ServiceManager::trayState() const
+{
+    return trayStateToString(m_trayState);
+}
+
 Supervisor* ServiceManager::supervisor() const
 {
     return m_supervisor.get();
@@ -155,6 +169,8 @@ Supervisor* ServiceManager::supervisor() const
 void ServiceManager::start()
 {
     LOG_INFO(bsCore, "ServiceManager: starting services");
+    m_initialIndexingStarted = false;
+    m_indexingActive = false;
 
     // Register all three service binaries
     const QStringList serviceNames = {
@@ -182,6 +198,7 @@ void ServiceManager::start()
     if (!m_supervisor->startAll()) {
         LOG_WARN(bsCore, "ServiceManager: not all services started cleanly");
     }
+    updateTrayState();
 }
 
 void ServiceManager::stop()
@@ -190,10 +207,14 @@ void ServiceManager::stop()
     m_supervisor->stopAll();
 
     m_allReady = false;
+    m_initialIndexingStarted = false;
+    m_indexingActive = false;
+    m_indexingStatusTimer.stop();
     m_indexerStatus = QStringLiteral("stopped");
     m_extractorStatus = QStringLiteral("stopped");
     m_queryStatus = QStringLiteral("stopped");
     emit serviceStatusChanged();
+    updateTrayState();
 }
 
 void ServiceManager::onServiceStarted(const QString& name)
@@ -206,6 +227,10 @@ void ServiceManager::onServiceStopped(const QString& name)
 {
     LOG_INFO(bsCore, "ServiceManager: service '%s' stopped", qPrintable(name));
     m_allReady = false;
+    if (name == QLatin1String("indexer")) {
+        m_indexingActive = false;
+    }
+    m_indexingStatusTimer.stop();
     updateServiceStatus(name, QStringLiteral("stopped"));
 }
 
@@ -214,6 +239,10 @@ void ServiceManager::onServiceCrashed(const QString& name, int crashCount)
     LOG_WARN(bsCore, "ServiceManager: service '%s' crashed (count=%d)",
              qPrintable(name), crashCount);
     m_allReady = false;
+    if (name == QLatin1String("indexer")) {
+        m_indexingActive = false;
+    }
+    m_indexingStatusTimer.stop();
     updateServiceStatus(name, QStringLiteral("crashed"));
     emit serviceError(name,
                       QStringLiteral("Service crashed (%1 times)").arg(crashCount));
@@ -225,9 +254,11 @@ void ServiceManager::onAllServicesReady()
     m_allReady = true;
     emit serviceStatusChanged();
     emit allServicesReady();
-
-    // Auto-start indexing with default roots
-    startIndexing();
+    if (!m_indexingStatusTimer.isActive()) {
+        m_indexingStatusTimer.start();
+    }
+    refreshIndexerQueueStatus();
+    updateTrayState();
 }
 
 void ServiceManager::startIndexing()
@@ -237,17 +268,26 @@ void ServiceManager::startIndexing()
 
     LOG_INFO(bsCore, "ServiceManager: sending startIndexing (%d root(s))",
              static_cast<int>(params.value(QStringLiteral("roots")).toArray().size()));
-    sendIndexerRequest(QStringLiteral("startIndexing"), params);
+    if (sendIndexerRequest(QStringLiteral("startIndexing"), params)) {
+        m_indexingActive = true;
+        updateTrayState();
+    }
 }
 
 void ServiceManager::pauseIndexing()
 {
-    sendIndexerRequest(QStringLiteral("pauseIndexing"));
+    if (sendIndexerRequest(QStringLiteral("pauseIndexing"))) {
+        m_indexingActive = false;
+        updateTrayState();
+    }
 }
 
 void ServiceManager::resumeIndexing()
 {
-    sendIndexerRequest(QStringLiteral("resumeIndexing"));
+    if (sendIndexerRequest(QStringLiteral("resumeIndexing"))) {
+        m_indexingActive = true;
+        updateTrayState();
+    }
 }
 
 void ServiceManager::setIndexingUserActive(bool active)
@@ -259,7 +299,10 @@ void ServiceManager::setIndexingUserActive(bool active)
 
 void ServiceManager::rebuildAll()
 {
-    sendIndexerRequest(QStringLiteral("rebuildAll"));
+    if (sendIndexerRequest(QStringLiteral("rebuildAll"))) {
+        m_indexingActive = true;
+        updateTrayState();
+    }
 }
 
 void ServiceManager::rebuildVectorIndex()
@@ -318,7 +361,23 @@ void ServiceManager::reindexPath(const QString& path)
     }
     QJsonObject params;
     params[QStringLiteral("path")] = normalizedPath;
-    sendIndexerRequest(QStringLiteral("reindexPath"), params);
+    if (sendIndexerRequest(QStringLiteral("reindexPath"), params)) {
+        m_indexingActive = true;
+        updateTrayState();
+    }
+}
+
+void ServiceManager::triggerInitialIndexing()
+{
+    if (!m_allReady) {
+        LOG_WARN(bsCore, "ServiceManager: triggerInitialIndexing ignored; services are not ready");
+        return;
+    }
+    if (m_initialIndexingStarted) {
+        return;
+    }
+    m_initialIndexingStarted = true;
+    startIndexing();
 }
 
 QVariantList ServiceManager::serviceDiagnostics() const
@@ -460,6 +519,77 @@ void ServiceManager::updateServiceStatus(const QString& name, const QString& sta
         m_queryStatus = status;
     }
     emit serviceStatusChanged();
+    updateTrayState();
+}
+
+QString ServiceManager::trayStateToString(TrayState state)
+{
+    switch (state) {
+    case TrayState::Idle:
+        return QStringLiteral("idle");
+    case TrayState::Indexing:
+        return QStringLiteral("indexing");
+    case TrayState::Error:
+        return QStringLiteral("error");
+    }
+    return QStringLiteral("idle");
+}
+
+void ServiceManager::updateTrayState()
+{
+    TrayState nextState = TrayState::Idle;
+    if (isErrorStatus(m_indexerStatus)
+        || isErrorStatus(m_extractorStatus)
+        || isErrorStatus(m_queryStatus)) {
+        nextState = TrayState::Error;
+    } else if (!m_allReady
+               || m_indexingActive
+               || m_indexerStatus == QLatin1String("starting")
+               || m_extractorStatus == QLatin1String("starting")
+               || m_queryStatus == QLatin1String("starting")) {
+        nextState = TrayState::Indexing;
+    }
+
+    if (m_trayState == nextState) {
+        return;
+    }
+
+    m_trayState = nextState;
+    emit trayStateChanged();
+}
+
+void ServiceManager::refreshIndexerQueueStatus()
+{
+    if (!m_allReady || !m_supervisor) {
+        return;
+    }
+
+    SocketClient* client = m_supervisor->clientFor(QStringLiteral("indexer"));
+    if (!client || !client->isConnected()) {
+        return;
+    }
+
+    auto response = client->sendRequest(QStringLiteral("getQueueStatus"), {}, 500);
+    if (!response) {
+        return;
+    }
+    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        return;
+    }
+
+    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+    const qint64 pending = result.value(QStringLiteral("pending")).toInteger();
+    const qint64 processing = result.value(QStringLiteral("processing")).toInteger();
+    const qint64 preparing = result.value(QStringLiteral("preparing")).toInteger();
+    const qint64 writing = result.value(QStringLiteral("writing")).toInteger();
+    const bool active = pending > 0 || processing > 0 || preparing > 0 || writing > 0;
+
+    if (m_indexingActive == active) {
+        return;
+    }
+
+    m_indexingActive = active;
+    updateTrayState();
 }
 
 } // namespace bs

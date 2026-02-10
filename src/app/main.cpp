@@ -8,13 +8,39 @@
 #include "core/shared/logging.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QIcon>
 #include <QMenu>
+#include <QPainter>
+#include <QPixmap>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QTimer>
 #include <QtGui/QStyleHints>
 #include <QSystemTrayIcon>
+
+namespace {
+
+QIcon trayStateIcon(const QColor& color)
+{
+    constexpr int kSize = 24;
+    constexpr int kDot = 14;
+    QPixmap pixmap(kSize, kSize);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    const int x = (kSize - kDot) / 2;
+    const int y = (kSize - kDot) / 2;
+    painter.drawEllipse(x, y, kDot, kDot);
+
+    return QIcon(pixmap);
+}
+
+} // namespace
 
 int main(int argc, char* argv[])
 {
@@ -94,9 +120,12 @@ int main(int argc, char* argv[])
     // --- Set up the system tray icon (C++ for reliability on macOS) ---
 
     QSystemTrayIcon trayIcon;
-    trayIcon.setIcon(QIcon::fromTheme(QStringLiteral("edit-find"),
-                                       QIcon(QStringLiteral(":/icons/tray-icon.png"))));
-    trayIcon.setToolTip(QStringLiteral("BetterSpotlight"));
+    const QIcon idleTrayIcon = trayStateIcon(QColor(QStringLiteral("#1976D2")));
+    const QIcon indexingTrayIconA = trayStateIcon(QColor(QStringLiteral("#FB8C00")));
+    const QIcon indexingTrayIconB = trayStateIcon(QColor(QStringLiteral("#F57C00")));
+    const QIcon errorTrayIcon = trayStateIcon(QColor(QStringLiteral("#C62828")));
+    trayIcon.setIcon(indexingTrayIconA);
+    trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Starting services"));
 
     QMenu trayMenu;
     QAction* showSearchAction = trayMenu.addAction(QStringLiteral("Show Search"));
@@ -147,26 +176,49 @@ int main(int argc, char* argv[])
         app.quit();
     });
 
-    // Also support double-click on tray icon to show search
+    // Clicking the tray icon opens Index Health for quick diagnostics.
     QObject::connect(&trayIcon, &QSystemTrayIcon::activated,
                      [&statusBarBridge](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::DoubleClick ||
             reason == QSystemTrayIcon::Trigger) {
-            emit statusBarBridge.showSearchRequested();
+            emit statusBarBridge.showIndexHealthRequested();
         }
     });
 
     // --- Connect service status to tray icon state ---
 
-    QObject::connect(&serviceManager, &bs::ServiceManager::serviceStatusChanged, [&]() {
-        if (serviceManager.isReady()) {
-            trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Ready"));
-        } else {
-            QString tip = QStringLiteral("BetterSpotlight - Indexer: %1, Query: %2")
-                              .arg(serviceManager.indexerStatus(), serviceManager.queryStatus());
-            trayIcon.setToolTip(tip);
+    QTimer trayPulseTimer;
+    trayPulseTimer.setInterval(700);
+    bool trayPulseFlip = false;
+    const auto updateTrayPresentation = [&]() {
+        const QString state = serviceManager.trayState();
+        if (state == QLatin1String("error")) {
+            trayPulseTimer.stop();
+            trayIcon.setIcon(errorTrayIcon);
+            trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Error (click to open Index Health)"));
+            return;
         }
-    });
+        if (state == QLatin1String("indexing")) {
+            trayIcon.setIcon(trayPulseFlip ? indexingTrayIconA : indexingTrayIconB);
+            trayPulseFlip = !trayPulseFlip;
+            trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Indexing in progress (click to open Index Health)"));
+            if (!trayPulseTimer.isActive()) {
+                trayPulseTimer.start();
+            }
+            return;
+        }
+
+        trayPulseTimer.stop();
+        trayIcon.setIcon(idleTrayIcon);
+        trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Ready (idle, click to open Index Health)"));
+    };
+
+    QObject::connect(&trayPulseTimer, &QTimer::timeout, &app, updateTrayPresentation);
+    QObject::connect(&serviceManager, &bs::ServiceManager::trayStateChanged,
+                     &app, updateTrayPresentation);
+    QObject::connect(&serviceManager, &bs::ServiceManager::serviceStatusChanged,
+                     &app, updateTrayPresentation);
+    updateTrayPresentation();
 
     QObject::connect(&serviceManager, &bs::ServiceManager::serviceError,
                      [&](const QString& name, const QString& error) {
@@ -186,6 +238,28 @@ int main(int argc, char* argv[])
                              message,
                              QSystemTrayIcon::Warning,
                              7000);
+    });
+
+    // Gate initial indexing until services are ready and onboarding is complete.
+    bool servicesReady = false;
+    bool onboardingDone = !onboardingController.needsOnboarding();
+    bool initialIndexingTriggered = false;
+    const auto maybeStartInitialIndexing = [&]() {
+        if (initialIndexingTriggered || !servicesReady || !onboardingDone) {
+            return;
+        }
+        serviceManager.triggerInitialIndexing();
+        initialIndexingTriggered = true;
+    };
+    QObject::connect(&serviceManager, &bs::ServiceManager::allServicesReady,
+                     &app, [&]() {
+        servicesReady = true;
+        maybeStartInitialIndexing();
+    });
+    QObject::connect(&onboardingController, &bs::OnboardingController::onboardingCompleted,
+                     &app, [&]() {
+        onboardingDone = true;
+        maybeStartInitialIndexing();
     });
 
     // --- Start services ---

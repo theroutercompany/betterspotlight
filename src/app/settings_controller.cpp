@@ -1,4 +1,5 @@
 #include "settings_controller.h"
+#include "platform_integration.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -122,6 +123,14 @@ SettingsController::SettingsController(QObject* parent)
     : QObject(parent)
 {
     loadSettings();
+    m_platformIntegration = PlatformIntegration::create();
+
+    if (showInDock()) {
+        const PlatformOperationResult result = m_platformIntegration->setShowInDock(true);
+        if (!result.success) {
+            setPlatformStatus(QStringLiteral("showInDock"), false, result.message);
+        }
+    }
 }
 
 QString SettingsController::hotkey() const
@@ -209,6 +218,21 @@ QString SettingsController::language() const
     return m_settings.value(QStringLiteral("language")).toString(QStringLiteral("en"));
 }
 
+QString SettingsController::platformStatusMessage() const
+{
+    return m_platformStatusMessage;
+}
+
+QString SettingsController::platformStatusKey() const
+{
+    return m_platformStatusKey;
+}
+
+bool SettingsController::platformStatusSuccess() const
+{
+    return m_platformStatusSuccess;
+}
+
 void SettingsController::setHotkey(const QString& value)
 {
     if (hotkey() == value) {
@@ -225,8 +249,21 @@ void SettingsController::setLaunchAtLogin(bool enabled)
     if (launchAtLogin() == enabled) {
         return;
     }
+    const PlatformOperationResult result = m_platformIntegration
+        ? m_platformIntegration->setLaunchAtLogin(enabled)
+        : PlatformOperationResult{false, QStringLiteral("Platform integration is unavailable.")};
+    if (!result.success) {
+        setPlatformStatus(QStringLiteral("launchAtLogin"), false, result.message);
+        emit launchAtLoginChanged();
+        return;
+    }
+
     m_settings[QStringLiteral("launchAtLogin")] = enabled;
     saveSettings();
+    setPlatformStatus(QStringLiteral("launchAtLogin"), true,
+                      result.message.isEmpty()
+                          ? QStringLiteral("Launch-at-login preference applied.")
+                          : result.message);
     emit launchAtLoginChanged();
     emit settingsChanged(QStringLiteral("launchAtLogin"));
 }
@@ -236,8 +273,21 @@ void SettingsController::setShowInDock(bool enabled)
     if (showInDock() == enabled) {
         return;
     }
+    const PlatformOperationResult result = m_platformIntegration
+        ? m_platformIntegration->setShowInDock(enabled)
+        : PlatformOperationResult{false, QStringLiteral("Platform integration is unavailable.")};
+    if (!result.success) {
+        setPlatformStatus(QStringLiteral("showInDock"), false, result.message);
+        emit showInDockChanged();
+        return;
+    }
+
     m_settings[QStringLiteral("showInDock")] = enabled;
     saveSettings();
+    setPlatformStatus(QStringLiteral("showInDock"), true,
+                      result.message.isEmpty()
+                          ? QStringLiteral("Dock visibility preference applied.")
+                          : result.message);
     emit showInDockChanged();
     emit settingsChanged(QStringLiteral("showInDock"));
 }
@@ -573,6 +623,20 @@ QString SettingsController::settingsFilePath() const
 {
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
            + QStringLiteral("/settings.json");
+}
+
+void SettingsController::setPlatformStatus(const QString& key, bool success, const QString& message)
+{
+    if (m_platformStatusKey == key
+        && m_platformStatusSuccess == success
+        && m_platformStatusMessage == message) {
+        return;
+    }
+
+    m_platformStatusKey = key;
+    m_platformStatusSuccess = success;
+    m_platformStatusMessage = message;
+    emit platformStatusChanged();
 }
 
 } // namespace bs

@@ -15,6 +15,7 @@ public:
 signals:
     void showSearchRequested();
     void showSettingsRequested();
+    void showIndexHealthRequested();
 };
 
 } // namespace bs

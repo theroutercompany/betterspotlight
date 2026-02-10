@@ -5,6 +5,7 @@
 #include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTimer>
 #include <QVariantList>
 #include <memory>
 
@@ -17,8 +18,16 @@ class ServiceManager : public QObject {
     Q_PROPERTY(QString indexerStatus READ indexerStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString extractorStatus READ extractorStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString queryStatus READ queryStatus NOTIFY serviceStatusChanged)
+    Q_PROPERTY(QString trayState READ trayState NOTIFY trayStateChanged)
 
 public:
+    enum class TrayState {
+        Idle,
+        Indexing,
+        Error,
+    };
+    Q_ENUM(TrayState)
+
     explicit ServiceManager(QObject* parent = nullptr);
     ~ServiceManager() override;
 
@@ -26,6 +35,7 @@ public:
     QString indexerStatus() const;
     QString extractorStatus() const;
     QString queryStatus() const;
+    QString trayState() const;
 
     // Access to the underlying supervisor (e.g., for SearchController to get clients)
     Supervisor* supervisor() const;
@@ -40,11 +50,13 @@ public:
     Q_INVOKABLE void clearExtractionCache();
     Q_INVOKABLE void reindexPath(const QString& path);
     Q_INVOKABLE QVariantList serviceDiagnostics() const;
+    Q_INVOKABLE void triggerInitialIndexing();
 
 signals:
     void serviceStatusChanged();
     void allServicesReady();
     void serviceError(const QString& serviceName, const QString& error);
+    void trayStateChanged();
 
 private slots:
     void onServiceStarted(const QString& name);
@@ -55,6 +67,9 @@ private slots:
 private:
     QString findServiceBinary(const QString& name) const;
     void updateServiceStatus(const QString& name, const QString& status);
+    void updateTrayState();
+    void refreshIndexerQueueStatus();
+    static QString trayStateToString(TrayState state);
     void startIndexing();
     bool sendServiceRequest(const QString& serviceName,
                             const QString& method,
@@ -69,6 +84,10 @@ private:
     QString m_extractorStatus;
     QString m_queryStatus;
     bool m_allReady = false;
+    bool m_initialIndexingStarted = false;
+    bool m_indexingActive = false;
+    TrayState m_trayState = TrayState::Indexing;
+    QTimer m_indexingStatusTimer;
 };
 
 } // namespace bs
