@@ -53,6 +53,21 @@ set_tests_properties(test-query-service-relevance-fixture PROPERTIES
 #   after 3 consecutive clean runs of test-query-service-relevance-fixture.
 #
 
+add_executable(test-app-lifecycle-states
+    Integration/test_app_lifecycle_states.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/onboarding_controller.cpp
+)
+target_link_libraries(test-app-lifecycle-states PRIVATE
+    betterspotlight-core
+    sqlite3
+    Qt6::Core
+    Qt6::Test
+    Qt6::Network
+)
+target_compile_options(test-app-lifecycle-states PRIVATE -Wno-keyword-macro)
+add_test(NAME test-app-lifecycle-states COMMAND test-app-lifecycle-states)
+
 # ── M3 Query understanding tests ───────────────────────────────
 bs_add_test(test-temporal-parser     Unit/test_temporal_parser.cpp)
 bs_add_test(test-entity-extractor    Unit/test_entity_extractor.cpp)
