@@ -292,6 +292,63 @@ QStringList tokenizeWords(const QString& text)
     return tokens;
 }
 
+QStringList splitAnswerSentences(const QString& text)
+{
+    const QString normalized = text.simplified();
+    if (normalized.isEmpty()) {
+        return {};
+    }
+
+    const QStringList rawParts = normalized.split(
+        QRegularExpression(QStringLiteral("[\\n\\r\\.!\\?;]+")),
+        Qt::SkipEmptyParts);
+    QStringList parts;
+    parts.reserve(rawParts.size());
+    for (const QString& part : rawParts) {
+        const QString simplified = part.simplified();
+        if (!simplified.isEmpty()) {
+            parts.append(simplified);
+        }
+    }
+    return parts;
+}
+
+QString clipAnswerText(const QString& rawText, int maxChars, const QStringList& queryTokens)
+{
+    QString text = rawText.simplified();
+    if (text.size() <= maxChars) {
+        return text;
+    }
+
+    int hitPos = -1;
+    for (const QString& token : queryTokens) {
+        if (token.size() < 2) {
+            continue;
+        }
+        const int pos = text.indexOf(token, 0, Qt::CaseInsensitive);
+        if (pos >= 0 && (hitPos < 0 || pos < hitPos)) {
+            hitPos = pos;
+        }
+    }
+
+    int start = 0;
+    if (hitPos >= 0) {
+        start = std::max(0, hitPos - (maxChars / 3));
+    }
+    if (start + maxChars > text.size()) {
+        start = std::max(0, static_cast<int>(text.size()) - maxChars);
+    }
+
+    QString clipped = text.mid(start, maxChars).trimmed();
+    if (start > 0) {
+        clipped.prepend(QStringLiteral("..."));
+    }
+    if (start + maxChars < text.size()) {
+        clipped.append(QStringLiteral("..."));
+    }
+    return clipped;
+}
+
 bool isExpectedGapFailureMessage(const QString& errorMessage)
 {
     const QString lowered = errorMessage.toLower();
@@ -503,6 +560,8 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
     QJsonObject params = request.value(QStringLiteral("params")).toObject();
 
     if (method == QLatin1String("search"))          return handleSearch(id, params);
+    if (method == QLatin1String("getAnswerSnippet")
+        || method == QLatin1String("get_answer_snippet")) return handleGetAnswerSnippet(id, params);
     if (method == QLatin1String("getHealth"))        return handleGetHealth(id);
     if (method == QLatin1String("getHealthDetails")) return handleGetHealthDetails(id, params);
     if (method == QLatin1String("recordFeedback"))   return handleRecordFeedback(id, params);
@@ -2559,6 +2618,243 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         m_queryCache.put(cacheKey, result);
     }
 
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject& params)
+{
+    if (!ensureStoreOpen()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+
+    const QString query = params.value(QStringLiteral("query")).toString().trimmed();
+    if (query.isEmpty()) {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("Missing 'query' parameter"));
+    }
+
+    const int timeoutMs =
+        std::clamp(params.value(QStringLiteral("timeoutMs")).toInt(350), 50, 1500);
+    const int maxChars =
+        std::clamp(params.value(QStringLiteral("maxChars")).toInt(240), 80, 600);
+    const int maxChunks =
+        std::clamp(params.value(QStringLiteral("maxChunks")).toInt(24), 1, 80);
+
+    int64_t itemId = params.value(QStringLiteral("itemId")).toInteger(0);
+    QString path = params.value(QStringLiteral("path")).toString().trimmed();
+
+    std::optional<SQLiteStore::ItemRow> item;
+    if (itemId > 0) {
+        item = m_store->getItemById(itemId);
+    } else if (!path.isEmpty()) {
+        item = m_store->getItemByPath(path);
+        if (item.has_value()) {
+            itemId = item->id;
+        }
+    } else {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("Missing 'itemId' or 'path' parameter"));
+    }
+
+    if (!item.has_value()) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("reason")] = QStringLiteral("item_not_found");
+        result[QStringLiteral("answer")] = QString();
+        return IpcMessage::makeResponse(id, result);
+    }
+    if (path.isEmpty()) {
+        path = item->path;
+    }
+
+    QSet<QString> signalTokens;
+    const QStringList queryTokens = tokenizeWords(query);
+    const QSet<QString>& stopwords = queryStopwords();
+    for (const QString& token : queryTokens) {
+        if (token.size() >= 2 && !stopwords.contains(token)) {
+            signalTokens.insert(token);
+        }
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    const bool qaModelDeclared = m_modelRegistry && m_modelRegistry->hasModel("qa-extractive");
+
+    if (signalTokens.isEmpty()) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("query_too_short");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = false;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    sqlite3* db = m_store->rawDb();
+    if (!db) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database handle is unavailable"));
+    }
+
+    const char* sql =
+        "SELECT chunk_text FROM content WHERE item_id = ?1 ORDER BY chunk_index LIMIT ?2";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return IpcMessage::makeError(
+            id, IpcErrorCode::InternalError,
+            QStringLiteral("Failed to prepare snippet query: %1")
+                .arg(QString::fromUtf8(sqlite3_errmsg(db))));
+    }
+    sqlite3_bind_int64(stmt, 1, itemId);
+    sqlite3_bind_int(stmt, 2, maxChunks);
+
+    std::vector<QString> chunks;
+    chunks.reserve(static_cast<size_t>(maxChunks));
+    bool timedOut = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (timer.elapsed() > timeoutMs) {
+            timedOut = true;
+            break;
+        }
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (!text) {
+            continue;
+        }
+        const QString chunk = QString::fromUtf8(text).trimmed();
+        if (!chunk.isEmpty()) {
+            chunks.push_back(chunk);
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    if (timedOut) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("timeout");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = true;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    if (chunks.empty()) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("no_content");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = false;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    QString bestSentence;
+    int bestOverlap = 0;
+    int bestChunkIndex = 0;
+    double bestScore = -1.0;
+    const QString queryLower = query.toLower();
+
+    for (size_t chunkIdx = 0; chunkIdx < chunks.size(); ++chunkIdx) {
+        if (timer.elapsed() > timeoutMs) {
+            timedOut = true;
+            break;
+        }
+
+        const QString& chunk = chunks[chunkIdx];
+        QStringList candidates = splitAnswerSentences(chunk);
+        if (candidates.empty()) {
+            candidates.push_back(chunk.simplified());
+        }
+
+        for (const QString& sentenceRaw : candidates) {
+            const QString sentence = sentenceRaw.simplified();
+            if (sentence.size() < 18) {
+                continue;
+            }
+
+            const QString lower = sentence.toLower();
+            int overlap = 0;
+            for (const QString& token : signalTokens) {
+                if (lower.contains(token)) {
+                    ++overlap;
+                }
+            }
+            if (overlap == 0) {
+                continue;
+            }
+
+            const double overlapRatio =
+                static_cast<double>(overlap) / static_cast<double>(signalTokens.size());
+            const bool exactPhrase = queryLower.size() >= 4 && lower.contains(queryLower);
+            double score = (overlapRatio * 1.45) + (exactPhrase ? 0.35 : 0.0);
+            score += std::max(0.0, 0.14 - (static_cast<double>(chunkIdx) * 0.01));
+
+            if (sentence.size() > 340) {
+                score -= 0.12;
+            } else if (sentence.size() < 26) {
+                score -= 0.14;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestSentence = sentence;
+                bestOverlap = overlap;
+                bestChunkIndex = static_cast<int>(chunkIdx);
+            }
+        }
+    }
+
+    if (timedOut) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("timeout");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = true;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    if (bestSentence.isEmpty() || bestScore < 0.20) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("no_answer");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = false;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    const QString clipped = clipAnswerText(bestSentence, maxChars, queryTokens);
+    const double confidence = std::clamp(bestScore / 1.8, 0.0, 1.0);
+
+    QJsonObject result;
+    result[QStringLiteral("available")] = true;
+    result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+    result[QStringLiteral("path")] = path;
+    result[QStringLiteral("answer")] = clipped;
+    result[QStringLiteral("confidence")] = confidence;
+    result[QStringLiteral("reason")] = QStringLiteral("ok");
+    result[QStringLiteral("source")] = QStringLiteral("extractive_preview");
+    result[QStringLiteral("timedOut")] = false;
+    result[QStringLiteral("elapsedMs")] = timer.elapsed();
+    result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+    result[QStringLiteral("matchedTokens")] = bestOverlap;
+    result[QStringLiteral("chunkOrdinal")] = bestChunkIndex;
     return IpcMessage::makeResponse(id, result);
 }
 

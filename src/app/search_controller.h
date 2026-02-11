@@ -41,6 +41,7 @@ public:
     Q_INVOKABLE void openResult(int index);
     Q_INVOKABLE void revealInFinder(int index);
     Q_INVOKABLE void copyPath(int index);
+    Q_INVOKABLE QVariantMap requestAnswerSnippet(int index);
     Q_INVOKABLE void clearResults();
     Q_INVOKABLE void moveSelection(int delta);
 
