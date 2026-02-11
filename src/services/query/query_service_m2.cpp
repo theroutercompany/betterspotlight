@@ -29,8 +29,10 @@
 namespace bs {
 
 namespace {
-constexpr int kVectorRebuildProgressUpdateStride = 128;
+constexpr int kVectorRebuildProgressPersistStride = 32;
+constexpr qint64 kVectorRebuildProgressPersistIntervalMs = 1500;
 constexpr int kVectorRebuildChunksPerItem = 3;
+constexpr int kVectorRebuildMaxChunkChars = 8192;
 } // namespace
 
 QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject& params)
@@ -555,6 +557,32 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     }
     int64_t currentItemId = -1;
     QStringList currentChunks;
+    qint64 lastPersistedProgressMs = QDateTime::currentMSecsSinceEpoch();
+    int lastPersistedProgressProcessed = 0;
+
+    auto publishProgress = [&](bool forcePersist) {
+        updateVectorRebuildProgress(runId, totalCandidates, processed,
+                                    embeddedCount, skippedCount, failedCount);
+        const double progressPct = totalCandidates > 0
+            ? (100.0 * static_cast<double>(processed)
+               / static_cast<double>(totalCandidates))
+            : 100.0;
+        {
+            std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+            m_vectorMigrationProgressPct = progressPct;
+        }
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool shouldPersist = forcePersist
+            || (processed - lastPersistedProgressProcessed) >= kVectorRebuildProgressPersistStride
+            || (nowMs - lastPersistedProgressMs) >= kVectorRebuildProgressPersistIntervalMs;
+        if (shouldPersist) {
+            buildingState.progressPct = progressPct;
+            workerVectorStore.upsertGenerationState(buildingState);
+            lastPersistedProgressProcessed = processed;
+            lastPersistedProgressMs = nowMs;
+        }
+    };
 
     auto processCurrentItem = [&]() {
         if (currentItemId <= 0) {
@@ -568,7 +596,11 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         for (const QString& chunk : currentChunks) {
             const QString trimmed = chunk.trimmed();
             if (!trimmed.isEmpty()) {
-                texts.push_back(trimmed);
+                QString bounded = trimmed;
+                if (bounded.size() > kVectorRebuildMaxChunkChars) {
+                    bounded.truncate(kVectorRebuildMaxChunkChars);
+                }
+                texts.push_back(std::move(bounded));
             }
         }
         if (texts.empty()) {
@@ -692,20 +724,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         }
         if (itemId != currentItemId) {
             processCurrentItem();
-            if (processed % kVectorRebuildProgressUpdateStride == 0) {
-                updateVectorRebuildProgress(runId, totalCandidates, processed,
-                                            embeddedCount, skippedCount, failedCount);
-                const double progressPct = totalCandidates > 0
-                    ? (100.0 * static_cast<double>(processed)
-                       / static_cast<double>(totalCandidates))
-                    : 0.0;
-                {
-                    std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
-                    m_vectorMigrationProgressPct = progressPct;
-                }
-                buildingState.progressPct = progressPct;
-                workerVectorStore.upsertGenerationState(buildingState);
-            }
+            publishProgress(/*forcePersist=*/false);
             currentItemId = itemId;
             currentChunks.clear();
         }
@@ -721,18 +740,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
     sqlite3_finalize(stmt);
     stmt = nullptr;
-    updateVectorRebuildProgress(runId, totalCandidates, processed,
-                                embeddedCount, skippedCount, failedCount);
-    const double finalProgressPct = totalCandidates > 0
-        ? (100.0 * static_cast<double>(processed)
-           / static_cast<double>(totalCandidates))
-        : 100.0;
-    {
-        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
-        m_vectorMigrationProgressPct = finalProgressPct;
-    }
-    buildingState.progressPct = finalProgressPct;
-    workerVectorStore.upsertGenerationState(buildingState);
+    publishProgress(/*forcePersist=*/true);
 
     if (m_stopRebuildRequested.load()) {
         rollbackIfNeeded();

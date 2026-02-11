@@ -533,13 +533,22 @@ void QueryService::refreshVectorGenerationState()
         return;
     }
 
+    bool vectorRebuildRunning = false;
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        vectorRebuildRunning =
+            m_vectorRebuildState.status == VectorRebuildState::Status::Running;
+    }
+
     if (auto activeState = m_vectorStore->activeGenerationState(); activeState.has_value()) {
         m_activeVectorGeneration = QString::fromStdString(activeState->generationId);
         m_activeVectorModelId = QString::fromStdString(activeState->modelId);
         m_activeVectorProvider = QString::fromStdString(activeState->provider);
         m_activeVectorDimensions = std::max(activeState->dimensions, 1);
-        m_vectorMigrationState = QString::fromStdString(activeState->state);
-        m_vectorMigrationProgressPct = activeState->progressPct;
+        if (!vectorRebuildRunning) {
+            m_vectorMigrationState = QString::fromStdString(activeState->state);
+            m_vectorMigrationProgressPct = activeState->progressPct;
+        }
     }
     if (auto setting = m_store->getSetting(QStringLiteral("activeVectorGeneration"));
         setting.has_value() && !setting->trimmed().isEmpty()) {
@@ -550,16 +559,18 @@ void QueryService::refreshVectorGenerationState()
         setting.has_value() && !setting->trimmed().isEmpty()) {
         m_targetVectorGeneration = setting->trimmed();
     }
-    if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationState"));
-        setting.has_value() && !setting->trimmed().isEmpty()) {
-        m_vectorMigrationState = setting->trimmed();
-    }
-    if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationProgressPct"));
-        setting.has_value()) {
-        bool ok = false;
-        const double parsed = setting->toDouble(&ok);
-        if (ok) {
-            m_vectorMigrationProgressPct = parsed;
+    if (!vectorRebuildRunning) {
+        if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationState"));
+            setting.has_value() && !setting->trimmed().isEmpty()) {
+            m_vectorMigrationState = setting->trimmed();
+        }
+        if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationProgressPct"));
+            setting.has_value()) {
+            bool ok = false;
+            const double parsed = setting->toDouble(&ok);
+            if (ok) {
+                m_vectorMigrationProgressPct = parsed;
+            }
         }
     }
 }
