@@ -478,6 +478,86 @@ Window {
                                     Layout.fillWidth: true
 
                                     Label {
+                                        text: qsTr("Enable dedicated inference service")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.inferenceServiceEnabled : true
+                                        onToggled: { if (settingsController) settingsController.inferenceServiceEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Offload embeddings to inference service")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.inferenceEmbedOffloadEnabled : true
+                                        onToggled: { if (settingsController) settingsController.inferenceEmbedOffloadEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Offload rerankers to inference service")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.inferenceRerankOffloadEnabled : true
+                                        onToggled: { if (settingsController) settingsController.inferenceRerankOffloadEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Offload QA snippet model to inference service")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.inferenceQaOffloadEnabled : true
+                                        onToggled: { if (settingsController) settingsController.inferenceQaOffloadEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Inference shadow mode (compute-only)")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.inferenceShadowModeEnabled : false
+                                        onToggled: { if (settingsController) settingsController.inferenceShadowModeEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
                                         text: qsTr("Enable query router")
                                         font.pixelSize: 13
                                         color: "#1A1A1A"
@@ -1725,7 +1805,8 @@ Window {
                                     model: [
                                         { label: qsTr("Query"), key: "query" },
                                         { label: qsTr("Indexer"), key: "indexer" },
-                                        { label: qsTr("Extractor"), key: "extractor" }
+                                        { label: qsTr("Extractor"), key: "extractor" },
+                                        { label: qsTr("Inference"), key: "inference" }
                                     ]
 
                                     delegate: RowLayout {
@@ -1762,6 +1843,92 @@ Window {
                                             elide: Text.ElideRight
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Inference Service")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Label {
+                                    text: qsTr("Connected: %1")
+                                        .arg(healthTab.healthData["inferenceServiceConnected"] === true
+                                             ? qsTr("Yes")
+                                             : qsTr("No"))
+                                    font.pixelSize: 12
+                                    color: healthTab.healthData["inferenceServiceConnected"] === true
+                                           ? "#2E7D32"
+                                           : "#C62828"
+                                }
+
+                                Repeater {
+                                    model: {
+                                        var roles = []
+                                        var roleStatus = healthTab.healthData["inferenceRoleStatusByModel"] || {}
+                                        for (var key in roleStatus) {
+                                            if (roleStatus.hasOwnProperty(key)) roles.push(key)
+                                        }
+                                        roles.sort()
+                                        return roles
+                                    }
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 10
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: String(modelData)
+                                            font.pixelSize: 12
+                                            font.family: "Menlo"
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 180
+                                            elide: Text.ElideRight
+                                        }
+                                        Label {
+                                            property var roleStatus: (healthTab.healthData["inferenceRoleStatusByModel"] || {})
+                                            text: String(roleStatus[modelData] || "--")
+                                            font.pixelSize: 12
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 90
+                                        }
+                                        Label {
+                                            property var depthByRole: (healthTab.healthData["inferenceQueueDepthByRole"] || {})
+                                            property var roleDepth: (depthByRole[modelData] || {})
+                                            text: qsTr("Queue L:%1 R:%2")
+                                                .arg(Number(roleDepth["live"] || 0).toLocaleString())
+                                                .arg(Number(roleDepth["rebuild"] || 0).toLocaleString())
+                                            font.pixelSize: 12
+                                            color: "#666666"
+                                            Layout.preferredWidth: 150
+                                        }
+                                        Label {
+                                            property var timeoutByRole: (healthTab.healthData["inferenceTimeoutCountByRole"] || {})
+                                            property var fallbackByRole: (healthTab.healthData["inferenceFallbackCountByRole"] || {})
+                                            text: qsTr("Timeouts %1  Fallbacks %2")
+                                                .arg(Number(timeoutByRole[modelData] || 0).toLocaleString())
+                                                .arg(Number(fallbackByRole[modelData] || 0).toLocaleString())
+                                            font.pixelSize: 12
+                                            color: "#666666"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: {
+                                        var roleStatus = healthTab.healthData["inferenceRoleStatusByModel"] || {}
+                                        return Object.keys(roleStatus).length === 0
+                                    }
+                                    text: qsTr("No inference role status available.")
+                                    font.pixelSize: 11
+                                    color: "#999999"
                                 }
                             }
                         }
@@ -1841,6 +2008,11 @@ Window {
                                 Repeater {
                                     model: [
                                         { label: qsTr("Semantic Search Enabled"), key: "embeddingEnabled" },
+                                        { label: qsTr("Inference Service Enabled"), key: "inferenceServiceEnabled" },
+                                        { label: qsTr("Inference Embed Offload Enabled"), key: "inferenceEmbedOffloadEnabled" },
+                                        { label: qsTr("Inference Rerank Offload Enabled"), key: "inferenceRerankOffloadEnabled" },
+                                        { label: qsTr("Inference QA Offload Enabled"), key: "inferenceQaOffloadEnabled" },
+                                        { label: qsTr("Inference Shadow Mode Enabled"), key: "inferenceShadowModeEnabled" },
                                         { label: qsTr("Query Router Enabled"), key: "queryRouterEnabled" },
                                         { label: qsTr("Query Router Min Confidence"), key: "queryRouterMinConfidence" },
                                         { label: qsTr("Fast Embedding Enabled"), key: "fastEmbeddingEnabled" },
@@ -1956,6 +2128,7 @@ Window {
                                         { label: qsTr("Query Router Runtime Mode"), key: "queryRouterRuntimeMode" },
                                         { label: qsTr("Query Router Model Declared"), key: "queryRouterModelDeclared" },
                                         { label: qsTr("Query Router Model Active"), key: "queryRouterModelActive" },
+                                        { label: qsTr("Inference Service Connected"), key: "inferenceServiceConnected" },
                                         { label: qsTr("Strong Embedding Available"), key: "embeddingStrongAvailable" },
                                         { label: qsTr("Strong Embedding Model ID"), key: "embeddingStrongModelId" },
                                         { label: qsTr("Strong Embedding Provider"), key: "embeddingStrongProvider" },

@@ -160,6 +160,16 @@ void syncRuntimeSettingsToDb(const QJsonObject& settings)
 
     upsertSetting(db, QStringLiteral("embeddingEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("embeddingEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("inferenceServiceEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("inferenceEmbedOffloadEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("inferenceRerankOffloadEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("inferenceQaOffloadEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("inferenceShadowModeEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("inferenceShadowModeEnabled")).toBool(false)));
     upsertSetting(db, QStringLiteral("queryRouterEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("queryRouterEnabled")).toBool(true)));
     upsertSetting(db, QStringLiteral("queryRouterMinConfidence"),
@@ -264,6 +274,31 @@ bool SettingsController::enableOcr() const
 bool SettingsController::embeddingEnabled() const
 {
     return m_settings.value(QStringLiteral("embeddingEnabled")).toBool(false);
+}
+
+bool SettingsController::inferenceServiceEnabled() const
+{
+    return m_settings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true);
+}
+
+bool SettingsController::inferenceEmbedOffloadEnabled() const
+{
+    return m_settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true);
+}
+
+bool SettingsController::inferenceRerankOffloadEnabled() const
+{
+    return m_settings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true);
+}
+
+bool SettingsController::inferenceQaOffloadEnabled() const
+{
+    return m_settings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true);
+}
+
+bool SettingsController::inferenceShadowModeEnabled() const
+{
+    return m_settings.value(QStringLiteral("inferenceShadowModeEnabled")).toBool(false);
 }
 
 bool SettingsController::queryRouterEnabled() const
@@ -541,6 +576,61 @@ void SettingsController::setEmbeddingEnabled(bool enabled)
     saveSettings();
     emit embeddingEnabledChanged();
     emit settingsChanged(QStringLiteral("embeddingEnabled"));
+}
+
+void SettingsController::setInferenceServiceEnabled(bool enabled)
+{
+    if (inferenceServiceEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("inferenceServiceEnabled")] = enabled;
+    saveSettings();
+    emit inferenceServiceEnabledChanged();
+    emit settingsChanged(QStringLiteral("inferenceServiceEnabled"));
+}
+
+void SettingsController::setInferenceEmbedOffloadEnabled(bool enabled)
+{
+    if (inferenceEmbedOffloadEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("inferenceEmbedOffloadEnabled")] = enabled;
+    saveSettings();
+    emit inferenceEmbedOffloadEnabledChanged();
+    emit settingsChanged(QStringLiteral("inferenceEmbedOffloadEnabled"));
+}
+
+void SettingsController::setInferenceRerankOffloadEnabled(bool enabled)
+{
+    if (inferenceRerankOffloadEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("inferenceRerankOffloadEnabled")] = enabled;
+    saveSettings();
+    emit inferenceRerankOffloadEnabledChanged();
+    emit settingsChanged(QStringLiteral("inferenceRerankOffloadEnabled"));
+}
+
+void SettingsController::setInferenceQaOffloadEnabled(bool enabled)
+{
+    if (inferenceQaOffloadEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("inferenceQaOffloadEnabled")] = enabled;
+    saveSettings();
+    emit inferenceQaOffloadEnabledChanged();
+    emit settingsChanged(QStringLiteral("inferenceQaOffloadEnabled"));
+}
+
+void SettingsController::setInferenceShadowModeEnabled(bool enabled)
+{
+    if (inferenceShadowModeEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("inferenceShadowModeEnabled")] = enabled;
+    saveSettings();
+    emit inferenceShadowModeEnabledChanged();
+    emit settingsChanged(QStringLiteral("inferenceShadowModeEnabled"));
 }
 
 void SettingsController::setQueryRouterEnabled(bool enabled)
@@ -1048,6 +1138,11 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("enablePdf"), true);
     ensureDefault(m_settings, QStringLiteral("enableOcr"), false);
     ensureDefault(m_settings, QStringLiteral("embeddingEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("inferenceServiceEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("inferenceQaOffloadEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("inferenceShadowModeEnabled"), false);
     ensureDefault(m_settings, QStringLiteral("queryRouterEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("fastEmbeddingEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("dualEmbeddingFusionEnabled"), true);

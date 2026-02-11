@@ -23,6 +23,11 @@ class SettingsController : public QObject {
     Q_PROPERTY(bool enablePdf READ enablePdf WRITE setEnablePdf NOTIFY enablePdfChanged)
     Q_PROPERTY(bool enableOcr READ enableOcr WRITE setEnableOcr NOTIFY enableOcrChanged)
     Q_PROPERTY(bool embeddingEnabled READ embeddingEnabled WRITE setEmbeddingEnabled NOTIFY embeddingEnabledChanged)
+    Q_PROPERTY(bool inferenceServiceEnabled READ inferenceServiceEnabled WRITE setInferenceServiceEnabled NOTIFY inferenceServiceEnabledChanged)
+    Q_PROPERTY(bool inferenceEmbedOffloadEnabled READ inferenceEmbedOffloadEnabled WRITE setInferenceEmbedOffloadEnabled NOTIFY inferenceEmbedOffloadEnabledChanged)
+    Q_PROPERTY(bool inferenceRerankOffloadEnabled READ inferenceRerankOffloadEnabled WRITE setInferenceRerankOffloadEnabled NOTIFY inferenceRerankOffloadEnabledChanged)
+    Q_PROPERTY(bool inferenceQaOffloadEnabled READ inferenceQaOffloadEnabled WRITE setInferenceQaOffloadEnabled NOTIFY inferenceQaOffloadEnabledChanged)
+    Q_PROPERTY(bool inferenceShadowModeEnabled READ inferenceShadowModeEnabled WRITE setInferenceShadowModeEnabled NOTIFY inferenceShadowModeEnabledChanged)
     Q_PROPERTY(bool queryRouterEnabled READ queryRouterEnabled WRITE setQueryRouterEnabled NOTIFY queryRouterEnabledChanged)
     Q_PROPERTY(bool fastEmbeddingEnabled READ fastEmbeddingEnabled WRITE setFastEmbeddingEnabled NOTIFY fastEmbeddingEnabledChanged)
     Q_PROPERTY(bool dualEmbeddingFusionEnabled READ dualEmbeddingFusionEnabled WRITE setDualEmbeddingFusionEnabled NOTIFY dualEmbeddingFusionEnabledChanged)
@@ -67,6 +72,11 @@ public:
     bool enablePdf() const;
     bool enableOcr() const;
     bool embeddingEnabled() const;
+    bool inferenceServiceEnabled() const;
+    bool inferenceEmbedOffloadEnabled() const;
+    bool inferenceRerankOffloadEnabled() const;
+    bool inferenceQaOffloadEnabled() const;
+    bool inferenceShadowModeEnabled() const;
     bool queryRouterEnabled() const;
     bool fastEmbeddingEnabled() const;
     bool dualEmbeddingFusionEnabled() const;
@@ -108,6 +118,11 @@ public:
     void setEnablePdf(bool enabled);
     void setEnableOcr(bool enabled);
     void setEmbeddingEnabled(bool enabled);
+    void setInferenceServiceEnabled(bool enabled);
+    void setInferenceEmbedOffloadEnabled(bool enabled);
+    void setInferenceRerankOffloadEnabled(bool enabled);
+    void setInferenceQaOffloadEnabled(bool enabled);
+    void setInferenceShadowModeEnabled(bool enabled);
     void setQueryRouterEnabled(bool enabled);
     void setFastEmbeddingEnabled(bool enabled);
     void setDualEmbeddingFusionEnabled(bool enabled);
@@ -157,6 +172,11 @@ signals:
     void enablePdfChanged();
     void enableOcrChanged();
     void embeddingEnabledChanged();
+    void inferenceServiceEnabledChanged();
+    void inferenceEmbedOffloadEnabledChanged();
+    void inferenceRerankOffloadEnabledChanged();
+    void inferenceQaOffloadEnabledChanged();
+    void inferenceShadowModeEnabledChanged();
     void queryRouterEnabledChanged();
     void fastEmbeddingEnabledChanged();
     void dualEmbeddingFusionEnabledChanged();
