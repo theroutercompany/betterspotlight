@@ -1,5 +1,9 @@
 # BetterSpotlight M1/M2 Manual Inspection Guide
 
+> 2026-02-11 update: Manual inspection now includes semantic generation checks (`v1`/`v2`),
+> provider diagnostics (`CoreML` vs `CPU`), and migration health fields (`vectorMigration.*`,
+> `vectorGeneration.*`, `memory.aggregateRssMb`).
+
 Last validated against repo state: 2026-02-08 (post-fixes)
 
 This guide is based on:
@@ -122,14 +126,15 @@ Also verify schema version:
 sqlite3 "$DB" "SELECT value FROM settings WHERE key='schema_version';"
 ```
 
-Expected: `2`
+Expected: `3`
 
-If `interactions` is missing or schema version is `1`, run Troubleshooting T2.
+If `interactions` is missing or schema version is `< 3`, run Troubleshooting T2.
 
 ### Gate C: Semantic model assets
 
 Query service expects model assets near its executable:
 
+- `build/src/services/Resources/models/bge-large-en-v1.5-f32.onnx` (primary generation `v2`)
 - `build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx`
 - `build/src/services/Resources/models/vocab.txt`
 
@@ -146,6 +151,7 @@ cmake --build build -j8
 Re-check assets:
 
 ```bash
+ls -l build/src/services/Resources/models/bge-large-en-v1.5-f32.onnx
 ls -l build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx
 ls -l build/src/services/Resources/models/vocab.txt
 ```
@@ -593,7 +599,7 @@ Cause:
 
 Fix options:
 
-1. Restart services and let built-in migration run to schema version `2`.
+1. Restart services and let built-in migration run to schema version `3`.
 2. If migration still did not run, backup DB and recreate schema from clean DB files.
 
 ### T3. Semantic unavailable at runtime

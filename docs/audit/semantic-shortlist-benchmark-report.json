@@ -1,0 +1,16 @@
+{
+  "generatedAt": "2026-02-11T18:25:05Z",
+  "manifest": "/Users/rexliu/betterspotlight/data/models/manifest.json",
+  "primaryModelFile": "bge-large-en-v1.5-f32.onnx",
+  "primaryGeneration": "v2",
+  "primaryDimensions": 1024,
+  "highQualityModelPresent": 1,
+  "longRunGates": {
+    "memoryDrift24h": "deferred_runner_unavailable",
+    "stress48h": "deferred_runner_unavailable"
+  },
+  "cases": [
+    {"label":"relevance_fixture","regex":"test-query-service-relevance-fixture","status":"passed","elapsedSec":37},
+    {"label":"ui_sim_suite","regex":"test-ui-sim-query-suite$","status":"passed","elapsedSec":120}
+  ]
+}

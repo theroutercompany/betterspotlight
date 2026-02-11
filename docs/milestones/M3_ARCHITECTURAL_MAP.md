@@ -1,5 +1,9 @@
 # BetterSpotlight Milestone 3 - Complete Architectural Map
 
+> 2026-02-11 addendum: Semantic architecture evolved from fixed `384d int8` to a
+> generation-aware `1024d float32` target with CoreML-first model sessions and CPU fallback.
+> Retrieval now supports passage-level semantic evidence aggregation and dual-index migration state.
+
 **Prepared for:** Principal Engineering Team  
 **Project:** BetterSpotlight C++/Qt6 Rewrite  
 **Scope:** Comprehensive project structure, module boundaries, service isolation, data flows  
@@ -141,12 +145,12 @@ Src/core/
 ├── embedding/ (M2+)                  # ONNX semantic embeddings
 │   ├── embedding_manager.h           # Orchestrates embedding pipeline
 │   ├── embedding_manager.cpp         # Model loading, inference
-│   ├── embedding_pipeline.h          # Batching & quantization
+│   ├── embedding_pipeline.h          # Batching + generation-aware ingest
 │   ├── embedding_pipeline.cpp        # Async processing
 │   ├── tokenizer.h                   # WordPiece tokenization
-│   ├── tokenizer.cpp                 # BGE-small-en-v1.5 vocab
-│   ├── quantizer.h                   # int8 quantization
-│   ├── quantizer.cpp                 # Vector compression
+│   ├── tokenizer.cpp                 # Manifest-driven vocab loading
+│   ├── quantizer.h                   # Legacy compatibility utilities
+│   ├── quantizer.cpp                 # Legacy compatibility utilities
 │   └── CMakeLists.txt                # → betterspotlight-core-embedding static lib
 │
 ├── vector/ (M2+)                     # Vector search (hnswlib)
@@ -643,7 +647,7 @@ Tests/Unit/
 ├── test_docs_memo_location.cpp        — Documentation/memo file handling
 ├── test_tokenizer.cpp                 — WordPiece tokenization (M2)
 ├── test_embedding.cpp                 — ONNX inference (M2)
-├── test_quantizer.cpp                 — int8 quantization (M2)
+├── test_quantizer.cpp                 — legacy quantizer compatibility (M2)
 └── test_vector_index.cpp              — HNSW index (M2)
 ```
 
@@ -1034,12 +1038,16 @@ CREATE TABLE pinned_items (
     created_at REAL
 );
 
--- Vector embeddings (M2+)
-CREATE TABLE vector_embeddings (
-    id INTEGER PRIMARY KEY,
-    file_id INTEGER UNIQUE,
-    embedding BLOB,              -- int8 quantized vector
-    model_version TEXT
+-- Vector mapping (generation-aware M2+/M3)
+CREATE TABLE vector_map (
+    item_id INTEGER NOT NULL,
+    hnsw_label INTEGER NOT NULL,
+    generation_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    passage_ordinal INTEGER NOT NULL DEFAULT 0,
+    migration_state TEXT NOT NULL DEFAULT 'active'
 );
 
 -- Index health metadata
@@ -1227,10 +1235,10 @@ Src/services/indexer/main.cpp        [Work queue persistence]
 ┌─────────────────────────────────────────────────────────────────┐
 │ Stage 8 (M2+): Embedding Computation                           │
 │  • EmbeddingManager: ONNX Runtime inference                     │
-│  • Model: BGE-small-en-v1.5 (384-dim vectors)                   │
+│  • Model: Manifest-driven (v2 primary 1024-dim float32)         │
 │  • Tokenizer: WordPiece with vocab.txt                          │
-│  • Quantizer: int8 compression (1.5 bytes per dim)              │
-│  • Vector Store: persist to SQLite + .vec file                  │
+│  • CoreML-first provider policy with CPU fallback               │
+│  • Vector Store: generation-aware metadata + dual-index files   │
 │  • HNSW Index: incrementally add to approximate NN index        │
 └────────────────────┬────────────────────────────────────────────┘
                      │
@@ -1468,7 +1476,7 @@ Src/core/query/ (2 files)
 
 Src/core/embedding/ (4 files)
   embedding_manager.h/cpp, embedding_pipeline.h/cpp,
-  tokenizer.h/cpp, quantizer.h/cpp
+  tokenizer.h/cpp, quantizer.h/cpp (legacy compatibility)
 
 Src/core/vector/ (3 files)
   vector_index.h/cpp, vector_store.h/cpp, search_merger.h/cpp

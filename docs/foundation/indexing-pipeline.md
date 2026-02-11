@@ -1,5 +1,10 @@
 # BetterSpotlight: Indexing Pipeline Design
 
+> 2026-02-11 update: Semantic indexing moved to generation-aware dual-index operation.
+> `vector_map` now tracks `generation_id`, `model_id`, `dimensions`, provider, and migration state.
+> Active generation cutover is atomic (`v1` legacy, `v2` 1024d target), and health payloads expose
+> migration progress and aggregate per-service RSS telemetry.
+
 **Document ID:** indexing-pipeline
 **Status:** Final
 **Last Updated:** 2026-02-06
@@ -851,80 +856,95 @@ if (stages.validation == ValidationResult::Include && !fileIsInFts5) {
 ## Stage 8: Embedding Computation and Vector Persistence (M2)
 
 ### Responsibility
-Compute vector embeddings for semantic search (M2+ Macs only). Store embeddings in hnswlib index with int8 quantization for memory efficiency.
+Compute semantic vectors and persist generation-aware ANN metadata while keeping search available during model upgrades.
 
 ### Architecture Decisions
 
-**Strategy**: Embed FIRST CHUNK ONLY of each content-extractable file (text, code, markdown, PDF). Skip binaries, images, archives, and files under 100 bytes.
+**Strategy**: Embed top passage chunks per document (not only one primary chunk), then aggregate passage evidence at query time.
 
-**Quantization**: int8 quantized vectors to minimize memory footprint
+**Primary embedding posture**: `1024d float32` (`generation=v2`) for quality.
 
-**Dimensions**: 384 (sized for BGE-small-en-v1.5 or E5-small-v2 class models)
+**Legacy compatibility posture**: `384d int8` (`generation=v1`) remains readable during migration and rollback only.
 
 **Index**: hnswlib (header-only C++, Apache 2.0) with HNSW algorithm
 
-**Memory budget**: ~100-150 MB for vector index at 500K files
+**Provider policy**: CoreML-first on Apple Silicon with CPU fallback.
+
+**Memory/latency envelope**:
+- Active indexing + embedding target: around 2GB aggregate RSS.
+- Background idle target: 500MB-1GB aggregate RSS.
+- Interactive query target: p95 <= 250ms.
 
 ### Model Specification
 
 - **Runtime**: ONNX Runtime (MIT license)
-- **Model class**: 384-dimensional sentence transformer (BGE-small-en-v1.5, E5-small-v2, or equivalent)
-- **Model file**: ~130 MB, shipped in app bundle
-- **Inference**: CPU-only (Apple Silicon + Intel), no GPU required
-- **Latency target**: < 50ms per embedding on Apple Silicon, < 100ms on Intel
-- **Model selection**: Final model selection is an M2 research task, but the interface is fixed at 384 float32 inputs, quantized to int8 for storage
+- **Model class**: 1024-dimensional bi-encoder for primary runtime role.
+- **Model assets**: manifest-driven role mapping with fallback role support.
+- **Inference**: CoreML preferred by default (Apple Silicon), CPU fallback supported.
+- **Model selection**: benchmark shortlist + freeze policy for production default.
 
 ### Storage Layout
 
 ```
 ~/Library/Application Support/BetterSpotlight/
   index.db           (SQLite: metadata + FTS5 + vector_map)
-  vectors.hnsw       (hnswlib serialized index file)
-  vectors.meta       (JSON: model_name, dimensions, version_hash, created_at, vector_count)
+  vectors-v1.hnsw    (legacy generation index)
+  vectors-v1.meta
+  vectors-v2.hnsw    (target generation index)
+  vectors-v2.meta
 ```
 
-New SQLite table (in index.db):
+`vector_map` is generation-aware:
 ```sql
 CREATE TABLE vector_map (
-    item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-    hnsw_label INTEGER NOT NULL UNIQUE,
-    model_version TEXT NOT NULL,
-    embedded_at REAL NOT NULL
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    hnsw_label INTEGER NOT NULL,
+    generation_id TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    passage_ordinal INTEGER NOT NULL DEFAULT 0,
+    embedded_at REAL NOT NULL,
+    migration_state TEXT NOT NULL DEFAULT 'active',
+    PRIMARY KEY (item_id, generation_id, passage_ordinal),
+    UNIQUE (generation_id, hnsw_label)
 );
-CREATE INDEX idx_vector_map_label ON vector_map(hnsw_label);
+CREATE INDEX idx_vector_map_label ON vector_map(generation_id, hnsw_label);
 ```
 
 ### Lifecycle
 
-1. **Startup**: load vectors.hnsw into memory (~100-150MB), load vector_map from SQLite
-2. **During indexing** (AFTER FTS5 insertion, lower priority): if embedding enabled, extract first chunk text (up to 512 tokens), compute embedding via ONNX Runtime, quantize to int8, insert into hnswlib, record in vector_map
-3. **File delete**: mark hnswlib label as deleted, delete from vector_map (CASCADE from items)
-4. **File update**: delete old embedding, compute new one
-5. **Search**: embed query string → hnswlib KNN search (K=50) → resolve item_ids via vector_map → merge with lexical results using weighted scoring (semanticWeight * cosineSimilarity)
-6. **Maintenance**: if >20% of vectors marked deleted, rebuild hnswlib index (serialize non-deleted, save new vectors.hnsw)
-7. **Shutdown**: serialize hnswlib to disk
+1. **Startup**: load active generation pointer and open matching `vectors-<generation>` index.
+2. **Migration detection**: if target generation differs from active generation, start background rebuild.
+3. **Background dual-index build**: keep active generation serving while target generation vectors are built.
+4. **Atomic cutover**: switch active generation pointer only after rebuild health/completeness checks.
+5. **Rollback path**: previous generation artifacts remain available for fallback.
+6. **Search**: lexical + passage ANN candidate union, then rerank with latency-budget controls.
+7. **Shutdown**: persist active generation index metadata and migration state.
 
 ### Model Versioning
 
-- vectors.meta stores model identifier + version hash
-- If model changes between app versions: drop vector_map rows, delete vectors.hnsw, re-embed all files as background task
-- Re-embedding is full recomputation but only happens on model upgrades
+- Generation and model identifiers are stored per vector mapping.
+- Model upgrades use background migration; semantic search remains available on previous generation until cutover.
 
 ### Failure Modes
 
 - **ONNX Runtime fails to load**: disable semantic search, FTS5-only fallback, log warning in health dashboard
-- **Embedding timeout (>5s per file)**: skip, record in failures table, continue
-- **vectors.hnsw corrupted on startup**: delete vectors.hnsw + vector_map, trigger full re-embedding
-- **Memory pressure (RSS > 500MB)**: pause embedding computation, resume when memory drops
+- **CoreML provider attach fails**: auto-fallback to CPU provider (unless explicitly disabled).
+- **Embedding timeout/failure**: skip item, record failure, continue.
+- **Target generation index fault**: keep active generation serving and mark migration failed.
+- **Memory pressure**: apply indexing backpressure and reduce prep/rerank intensity.
 
 ### Configuration Parameters
 
 ```cpp
 struct EmbeddingSettings {
-    bool embedding_enabled;              // default false for M1, true for M2
-    std::string embedding_model_path;    // path to ONNX model in app bundle
+    bool embedding_enabled;               // default true for Apple Silicon builds
+    std::string active_generation = "v2";
+    std::string target_generation = "v2";
+    std::string embedding_model_path;     // resolved from manifest role
     uint32_t embedding_max_tokens = 512; // max tokens per chunk
-    size_t embedding_batch_size = 32;    // files per ONNX batch
+    size_t embedding_batch_size = 32;     // adaptive under memory pressure
     uint16_t hnsw_m = 16;                // HNSW connectivity parameter
     uint32_t hnsw_ef_construction = 200; // build-time search depth
     uint32_t hnsw_ef_search = 50;        // query-time search depth
@@ -998,11 +1018,11 @@ sequenceDiagram
 
     FTS5->>Embed: If embedding enabled, enqueue chunks
 
-    Embed->>Embed: Load ONNX model (e.g., BGE-small-en-v1.5)
-    Embed->>Embed: Embed chunk 0: [0.234, -0.105, ..., 0.891] (384 dims)
-    Embed->>Embed: Embed chunk 1: [0.112, 0.456, ..., -0.234] (384 dims)
-    Embed->>Embed: Embed chunk 2: [0.678, -0.345, ..., 0.123] (384 dims)
-    Embed->>DB: INSERT vector_map(item_id, hnsw_label, model_version)
+    Embed->>Embed: Load active generation model from manifest
+    Embed->>Embed: Embed passage 0 (1024 dims, float32 normalized)
+    Embed->>Embed: Embed passage 1 (1024 dims, float32 normalized)
+    Embed->>Embed: Embed passage 2 (1024 dims, float32 normalized)
+    Embed->>DB: INSERT vector_map(..., generation_id, model_id, dimensions, provider, passage_ordinal)
 
     DB->>DB: File is now fully indexed and searchable
 ```
@@ -1051,9 +1071,9 @@ sequenceDiagram
 - **Invariant test**: assert that a file passing Stage 3 and reaching Stage 6 is in FTS5 after indexing
 
 #### Stage 8 (Embedding)
-- Mock ONNX model, verify embedding computation
-- Verify timeout handling
-- Verify vectors are inserted into `vector_map` table
+- Mock ONNX model, verify embedding computation for active generation dimensions
+- Verify timeout handling and provider fallback behavior
+- Verify vectors are inserted into `vector_map` with generation/model/provider metadata
 
 ### Integration Tests
 
@@ -1163,8 +1183,9 @@ struct IndexingSettings {
     size_t ftsBatchSize = 100;           // Items per transaction
 
     // Stage 8: Embedding
-    bool enableEmbedding = false;        // Disable by default
-    std::string embeddingModel = "bge-small-en-v1.5";  // or e5-small-v2; final model TBD in M2 research
+    bool enableEmbedding = true;         // Apple Silicon default posture
+    std::string activeGeneration = "v2";
+    std::string embeddingModel = "bge-large-en-v1.5-f32";
 };
 ```
 
@@ -1272,7 +1293,7 @@ And 50+ more...
 | **FTS5** | SQLite virtual table implementing full-text search |
 | **Porter Stemmer** | Algorithm that reduces words to their root form (e.g., "running" → "run") |
 | **Unicode61** | FTS5 tokenizer supporting Unicode, case-folding, diacritic removal |
-| **Embedding** | Vector representation of text (e.g., 384-dimensional for MiniLM) |
+| **Embedding** | Vector representation of text (current primary runtime: 1024-dimensional `v2`, legacy `v1` retained for migration safety) |
 | **ONNX** | Open Neural Network Exchange format for portable ML models |
 | **Inaccessible file** | File with insufficient read permissions |
 | **Cloud artifact** | Temporary files created by sync services (e.g., `.dropbox.cache`) |
