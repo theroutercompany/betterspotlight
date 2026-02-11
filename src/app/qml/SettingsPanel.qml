@@ -1549,9 +1549,10 @@ Window {
                                     model: [
                                         { label: qsTr("Indexed Files"), key: "totalIndexedItems", format: "int" },
                                         { label: qsTr("Content Chunks"), key: "totalChunks", format: "int" },
-                                        { label: qsTr("Embedded Vectors"), key: "totalEmbeddedVectors", format: "int" },
+                                        { label: qsTr("Embedded Vectors (Active Gen)"), key: "totalEmbeddedVectors", format: "int" },
+                                        { label: qsTr("Embedded Vectors (Rebuild Staging)"), key: "vectorRebuildEmbedded", format: "int" },
                                         { label: qsTr("Content Coverage"), key: "contentCoveragePct", format: "percent" },
-                                        { label: qsTr("Semantic Coverage"), key: "semanticCoveragePct", format: "percent" },
+                                        { label: qsTr("Semantic Coverage (Active Gen)"), key: "semanticCoveragePct", format: "percent" },
                                         { label: qsTr("Database Size"), key: "ftsIndexSize", format: "bytes" },
                                         { label: qsTr("Vector Index Size"), key: "vectorIndexSize", format: "bytes" },
                                         { label: qsTr("Last Full Scan"), key: "lastScanTime", format: "timestamp" }
