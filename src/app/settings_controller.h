@@ -23,6 +23,13 @@ class SettingsController : public QObject {
     Q_PROPERTY(bool enablePdf READ enablePdf WRITE setEnablePdf NOTIFY enablePdfChanged)
     Q_PROPERTY(bool enableOcr READ enableOcr WRITE setEnableOcr NOTIFY enableOcrChanged)
     Q_PROPERTY(bool embeddingEnabled READ embeddingEnabled WRITE setEmbeddingEnabled NOTIFY embeddingEnabledChanged)
+    Q_PROPERTY(bool queryRouterEnabled READ queryRouterEnabled WRITE setQueryRouterEnabled NOTIFY queryRouterEnabledChanged)
+    Q_PROPERTY(bool fastEmbeddingEnabled READ fastEmbeddingEnabled WRITE setFastEmbeddingEnabled NOTIFY fastEmbeddingEnabledChanged)
+    Q_PROPERTY(bool dualEmbeddingFusionEnabled READ dualEmbeddingFusionEnabled WRITE setDualEmbeddingFusionEnabled NOTIFY dualEmbeddingFusionEnabledChanged)
+    Q_PROPERTY(bool rerankerCascadeEnabled READ rerankerCascadeEnabled WRITE setRerankerCascadeEnabled NOTIFY rerankerCascadeEnabledChanged)
+    Q_PROPERTY(bool personalizedLtrEnabled READ personalizedLtrEnabled WRITE setPersonalizedLtrEnabled NOTIFY personalizedLtrEnabledChanged)
+    Q_PROPERTY(int semanticBudgetMs READ semanticBudgetMs WRITE setSemanticBudgetMs NOTIFY semanticBudgetMsChanged)
+    Q_PROPERTY(int rerankBudgetMs READ rerankBudgetMs WRITE setRerankBudgetMs NOTIFY rerankBudgetMsChanged)
     Q_PROPERTY(int maxFileSizeMB READ maxFileSizeMB WRITE setMaxFileSizeMB NOTIFY maxFileSizeMBChanged)
     Q_PROPERTY(QStringList userPatterns READ userPatterns WRITE setUserPatterns NOTIFY userPatternsChanged)
     Q_PROPERTY(bool enableFeedbackLogging READ enableFeedbackLogging WRITE setEnableFeedbackLogging NOTIFY enableFeedbackLoggingChanged)
@@ -49,6 +56,13 @@ public:
     bool enablePdf() const;
     bool enableOcr() const;
     bool embeddingEnabled() const;
+    bool queryRouterEnabled() const;
+    bool fastEmbeddingEnabled() const;
+    bool dualEmbeddingFusionEnabled() const;
+    bool rerankerCascadeEnabled() const;
+    bool personalizedLtrEnabled() const;
+    int semanticBudgetMs() const;
+    int rerankBudgetMs() const;
     int maxFileSizeMB() const;
     QStringList userPatterns() const;
     bool enableFeedbackLogging() const;
@@ -72,6 +86,13 @@ public:
     void setEnablePdf(bool enabled);
     void setEnableOcr(bool enabled);
     void setEmbeddingEnabled(bool enabled);
+    void setQueryRouterEnabled(bool enabled);
+    void setFastEmbeddingEnabled(bool enabled);
+    void setDualEmbeddingFusionEnabled(bool enabled);
+    void setRerankerCascadeEnabled(bool enabled);
+    void setPersonalizedLtrEnabled(bool enabled);
+    void setSemanticBudgetMs(int ms);
+    void setRerankBudgetMs(int ms);
     void setMaxFileSizeMB(int mb);
     void setUserPatterns(const QStringList& patterns);
     void setEnableFeedbackLogging(bool enabled);
@@ -101,6 +122,13 @@ signals:
     void enablePdfChanged();
     void enableOcrChanged();
     void embeddingEnabledChanged();
+    void queryRouterEnabledChanged();
+    void fastEmbeddingEnabledChanged();
+    void dualEmbeddingFusionEnabledChanged();
+    void rerankerCascadeEnabledChanged();
+    void personalizedLtrEnabledChanged();
+    void semanticBudgetMsChanged();
+    void rerankBudgetMsChanged();
     void maxFileSizeMBChanged();
     void userPatternsChanged();
     void enableFeedbackLoggingChanged();
