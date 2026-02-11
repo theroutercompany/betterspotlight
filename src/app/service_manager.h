@@ -20,6 +20,7 @@ class ServiceManager : public QObject {
     Q_PROPERTY(QString indexerStatus READ indexerStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString extractorStatus READ extractorStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString queryStatus READ queryStatus NOTIFY serviceStatusChanged)
+    Q_PROPERTY(QString inferenceStatus READ inferenceStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString trayState READ trayState NOTIFY trayStateChanged)
     Q_PROPERTY(bool modelDownloadRunning READ modelDownloadRunning NOTIFY modelDownloadStateChanged)
     Q_PROPERTY(QString modelDownloadStatus READ modelDownloadStatus NOTIFY modelDownloadStateChanged)
@@ -40,6 +41,7 @@ public:
     QString indexerStatus() const;
     QString extractorStatus() const;
     QString queryStatus() const;
+    QString inferenceStatus() const;
     QString trayState() const;
     bool modelDownloadRunning() const;
     QString modelDownloadStatus() const;
@@ -98,6 +100,7 @@ private:
     QString m_indexerStatus;
     QString m_extractorStatus;
     QString m_queryStatus;
+    QString m_inferenceStatus;
     bool m_allReady = false;
     bool m_initialIndexingStarted = false;
     bool m_indexingActive = false;

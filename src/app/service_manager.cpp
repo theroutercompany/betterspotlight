@@ -281,6 +281,7 @@ ServiceManager::ServiceManager(QObject* parent)
     , m_indexerStatus(QStringLiteral("stopped"))
     , m_extractorStatus(QStringLiteral("stopped"))
     , m_queryStatus(QStringLiteral("stopped"))
+    , m_inferenceStatus(QStringLiteral("stopped"))
 {
     connect(m_supervisor.get(), &Supervisor::serviceStarted,
             this, &ServiceManager::onServiceStarted);
@@ -319,6 +320,11 @@ QString ServiceManager::extractorStatus() const
 QString ServiceManager::queryStatus() const
 {
     return m_queryStatus;
+}
+
+QString ServiceManager::inferenceStatus() const
+{
+    return m_inferenceStatus;
 }
 
 QString ServiceManager::trayState() const
@@ -365,6 +371,7 @@ void ServiceManager::start()
         QStringLiteral("indexer"),
         QStringLiteral("extractor"),
         QStringLiteral("query"),
+        QStringLiteral("inference"),
     };
 
     for (const auto& name : serviceNames) {
@@ -407,6 +414,7 @@ void ServiceManager::stop()
     m_indexerStatus = QStringLiteral("stopped");
     m_extractorStatus = QStringLiteral("stopped");
     m_queryStatus = QStringLiteral("stopped");
+    m_inferenceStatus = QStringLiteral("stopped");
     emit serviceStatusChanged();
     updateTrayState();
 }
@@ -915,6 +923,8 @@ void ServiceManager::updateServiceStatus(const QString& name, const QString& sta
         m_extractorStatus = status;
     } else if (name == QLatin1String("query")) {
         m_queryStatus = status;
+    } else if (name == QLatin1String("inference")) {
+        m_inferenceStatus = status;
     }
     emit serviceStatusChanged();
     updateTrayState();
@@ -938,13 +948,15 @@ void ServiceManager::updateTrayState()
     TrayState nextState = TrayState::Idle;
     if (isErrorStatus(m_indexerStatus)
         || isErrorStatus(m_extractorStatus)
-        || isErrorStatus(m_queryStatus)) {
+        || isErrorStatus(m_queryStatus)
+        || isErrorStatus(m_inferenceStatus)) {
         nextState = TrayState::Error;
     } else if (!m_allReady
                || m_indexingActive
                || m_indexerStatus == QLatin1String("starting")
                || m_extractorStatus == QLatin1String("starting")
-               || m_queryStatus == QLatin1String("starting")) {
+               || m_queryStatus == QLatin1String("starting")
+               || m_inferenceStatus == QLatin1String("starting")) {
         nextState = TrayState::Indexing;
     }
 

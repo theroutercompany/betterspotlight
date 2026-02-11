@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <QFileSystemWatcher>
+#include <QHash>
 #include <QStringList>
 #include <shared_mutex>
 #include <thread>
@@ -21,6 +22,7 @@ namespace bs {
 class CrossEncoderReranker;
 class EmbeddingManager;
 class EmbeddingPipeline;
+class SocketClient;
 class ModelRegistry;
 class InteractionTracker;
 class FeedbackAggregator;
@@ -142,6 +144,17 @@ private:
     bool ensureStoreOpen();
     bool ensureM2ModulesInitialized();
     bool ensureTypoLexiconReady();
+    bool ensureInferenceClientConnected();
+    std::optional<QJsonObject> sendInferenceRequest(const QString& method,
+                                                    const QJsonObject& params,
+                                                    int timeoutMs,
+                                                    const QString& roleForMetrics,
+                                                    const QString& fallbackReasonKey,
+                                                    const QString& cancelToken = QString());
+    void recordInferenceTimeout(const QString& role);
+    void recordInferenceFallback(const QString& role);
+    void recordInferenceConnected(bool connected);
+    QJsonObject inferenceHealthSnapshot();
 
     // Initialize M2 modules after store is opened.
     void initM2Modules();
@@ -166,6 +179,13 @@ private:
     std::atomic<uint64_t> m_rewriteAppliedCount{0};
     std::atomic<uint64_t> m_semanticOnlyAdmittedCount{0};
     std::atomic<uint64_t> m_semanticOnlySuppressedCount{0};
+
+    std::unique_ptr<SocketClient> m_inferenceClient;
+    mutable std::mutex m_inferenceRpcMutex;
+    mutable std::mutex m_inferenceStatsMutex;
+    bool m_inferenceServiceConnected = false;
+    QHash<QString, qint64> m_inferenceTimeoutCountByRole;
+    QHash<QString, qint64> m_inferenceFallbackCountByRole;
 
     QueryCache m_queryCache;
 };

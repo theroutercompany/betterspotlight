@@ -116,6 +116,7 @@ add_subdirectory(src/core)
 add_subdirectory(src/services/indexer)
 add_subdirectory(src/services/extractor)
 add_subdirectory(src/services/query)
+add_subdirectory(src/services/inference)
 add_subdirectory(src/app)
 
 enable_testing()
