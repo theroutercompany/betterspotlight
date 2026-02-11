@@ -330,7 +330,7 @@ std::vector<std::pair<int64_t, uint64_t>> VectorStore::getAllMappings(const std:
 
 bool VectorStore::upsertGenerationState(const GenerationState& state)
 {
-    if (!m_ready || state.generationId.empty()) {
+    if (!m_db || state.generationId.empty()) {
         return false;
     }
 
@@ -421,7 +421,7 @@ std::optional<VectorStore::GenerationState> VectorStore::activeGenerationState()
 
 bool VectorStore::setActiveGeneration(const std::string& generationId)
 {
-    if (!m_ready || generationId.empty()) {
+    if (!m_db || generationId.empty()) {
         return false;
     }
 
