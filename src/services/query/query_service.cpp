@@ -489,8 +489,39 @@ bool QueryService::ensureStoreOpen()
     m_store.emplace(std::move(store.value()));
     LOG_INFO(bsIpc, "Database opened at: %s", qPrintable(m_dbPath));
 
-    initM2Modules();
     initBsignoreWatch();
+    return true;
+}
+
+bool QueryService::ensureM2ModulesInitialized()
+{
+    if (!ensureStoreOpen()) {
+        return false;
+    }
+
+    if (!m_m2Initialized) {
+        initM2Modules();
+    }
+    return true;
+}
+
+bool QueryService::ensureTypoLexiconReady()
+{
+    if (m_typoLexiconReady) {
+        return true;
+    }
+    if (m_typoLexiconBuildAttempted || !m_store.has_value()) {
+        return false;
+    }
+
+    m_typoLexiconBuildAttempted = true;
+    if (!m_typoLexicon.build(m_store->rawDb())) {
+        LOG_WARN(bsIpc, "TypoLexicon build failed; typo correction lexicon unavailable");
+        return false;
+    }
+
+    m_typoLexiconReady = true;
+    LOG_INFO(bsIpc, "TypoLexicon built with %d terms", m_typoLexicon.termCount());
     return true;
 }
 
@@ -502,12 +533,6 @@ void QueryService::initM2Modules()
     m_m2Initialized = true;
 
     ::sqlite3* db = m_store->rawDb();
-
-    if (!m_typoLexicon.build(db)) {
-        LOG_WARN(bsIpc, "TypoLexicon build failed; typo correction lexicon unavailable");
-    } else {
-        LOG_INFO(bsIpc, "TypoLexicon built with %d terms", m_typoLexicon.termCount());
-    }
 
     m_interactionTracker = std::make_unique<InteractionTracker>(db);
     m_feedbackAggregator = std::make_unique<FeedbackAggregator>(db);
@@ -695,7 +720,7 @@ QJsonObject QueryService::queryStatsSnapshot() const
 
 QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -1021,6 +1046,11 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             decision.reason = QStringLiteral("empty_query_tokens");
             return decision;
         }
+        if (!ensureTypoLexiconReady()) {
+            decision.reason = QStringLiteral("typo_lexicon_unavailable");
+            decision.rewrittenQuery = query;
+            return decision;
+        }
 
         const QSet<QString>& stopwords = queryStopwords();
         QVector<double> appliedCandidateConfidences;
@@ -1137,12 +1167,17 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         hits = strictHits;
         markOrigins(strictHits, CandidateOriginStrict);
 
-        const bool strictWeakOrEmpty = strictHits.empty() || bestLexicalStrength(strictHits) < 2.0;
+        const bool strictWeakOrEmpty = strictHits.empty();
         const int signalTokenCount = static_cast<int>(querySignalTokens.size());
         const int rewriteBudget = strictWeakOrEmpty
             ? std::clamp(signalTokenCount / 2, 2, 3)
             : std::clamp(signalTokenCount / 3, 1, 2);
-        rewriteDecision = buildTypoRewriteDecision(rewriteBudget, strictWeakOrEmpty);
+        if (strictWeakOrEmpty) {
+            rewriteDecision = buildTypoRewriteDecision(rewriteBudget, true);
+        } else {
+            rewriteDecision.reason = QStringLiteral("strict_hits_present");
+            rewriteDecision.rewrittenQuery = query;
+        }
 
         if (strictWeakOrEmpty) {
             const auto relaxedOriginalHits = runFtsSearch(query, relaxedSearchLimit, true);
@@ -2145,35 +2180,29 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     QString queueSource = QStringLiteral("unavailable");
     QJsonArray queueRoots;
 
-    if (!m_indexerClient) {
-        m_indexerClient = std::make_unique<SocketClient>(this);
-    }
-
-    if (!m_indexerClient->isConnected()) {
+    {
+        // Use a short-lived client per request to avoid reentrant contention with other
+        // synchronous IPC paths and to keep health RPC bounded under load.
+        SocketClient indexerClient;
         const QString indexerSocketPath = ServiceBase::socketPath(QStringLiteral("indexer"));
-        m_indexerClient->connectToServer(indexerSocketPath, 150);
-    }
-
-    if (m_indexerClient->isConnected()) {
-        auto queueResponse = m_indexerClient->sendRequest(
-            QStringLiteral("getQueueStatus"), {}, 500);
-        if (queueResponse.has_value()
-            && queueResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
-            const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
-            queuePending = queueResult.value(QStringLiteral("pending")).toInt();
-            queueInProgress = queueResult.value(QStringLiteral("processing")).toInt();
-            queueDropped = queueResult.value(QStringLiteral("dropped")).toInt();
-            queuePreparing = queueResult.value(QStringLiteral("preparing")).toInt();
-            queueWriting = queueResult.value(QStringLiteral("writing")).toInt();
-            queueCoalesced = queueResult.value(QStringLiteral("coalesced")).toInt();
-            queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
-            queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
-            queueWriterBatchDepth = queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
-            queueRoots = queueResult.value(QStringLiteral("roots")).toArray();
-            queueSource = QStringLiteral("indexer_rpc");
-        } else {
-            queueSource = QStringLiteral("unavailable");
-            m_indexerClient->disconnect();
+        if (indexerClient.connectToServer(indexerSocketPath, 75)) {
+            auto queueResponse = indexerClient.sendRequest(
+                QStringLiteral("getQueueStatus"), {}, 150);
+            if (queueResponse.has_value()
+                && queueResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
+                const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
+                queuePending = queueResult.value(QStringLiteral("pending")).toInt();
+                queueInProgress = queueResult.value(QStringLiteral("processing")).toInt();
+                queueDropped = queueResult.value(QStringLiteral("dropped")).toInt();
+                queuePreparing = queueResult.value(QStringLiteral("preparing")).toInt();
+                queueWriting = queueResult.value(QStringLiteral("writing")).toInt();
+                queueCoalesced = queueResult.value(QStringLiteral("coalesced")).toInt();
+                queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
+                queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
+                queueWriterBatchDepth = queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
+                queueRoots = queueResult.value(QStringLiteral("roots")).toArray();
+                queueSource = QStringLiteral("indexer_rpc");
+            }
         }
     }
 
@@ -2222,6 +2251,7 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
     indexHealth[QStringLiteral("queryRewriteEnabled")] = true;
+    indexHealth[QStringLiteral("m2ModulesInitialized")] = m_m2Initialized;
     indexHealth[QStringLiteral("recentErrors")] = recentErrors;
     indexHealth[QStringLiteral("indexRoots")] = queueRoots;
     indexHealth[QStringLiteral("vectorRebuildStatus")] =

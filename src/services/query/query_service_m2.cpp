@@ -35,7 +35,7 @@ constexpr int kVectorRebuildChunksPerItem = 3;
 
 QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject& params)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -82,7 +82,7 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
 
 QJsonObject QueryService::handleGetPathPreferences(uint64_t id, const QJsonObject& params)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -117,7 +117,7 @@ QJsonObject QueryService::handleGetPathPreferences(uint64_t id, const QJsonObjec
 
 QJsonObject QueryService::handleGetFileTypeAffinity(uint64_t id)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -140,7 +140,7 @@ QJsonObject QueryService::handleGetFileTypeAffinity(uint64_t id)
 
 QJsonObject QueryService::handleRunAggregation(uint64_t id)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -172,7 +172,7 @@ QJsonObject QueryService::handleExportInteractionData(uint64_t id, const QJsonOb
 {
     Q_UNUSED(params);
 
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
@@ -193,7 +193,7 @@ QJsonObject QueryService::handleExportInteractionData(uint64_t id, const QJsonOb
 QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
                                                    const QJsonObject& params)
 {
-    if (!ensureStoreOpen()) {
+    if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }

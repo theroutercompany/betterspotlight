@@ -127,7 +127,13 @@ bool SQLiteStore::init(const QString& dbPath)
         return false;
     }
 
-    if (!applyBm25Weights()) {
+    // Applying BM25 rank controls is best-effort and can contend with the indexer's
+    // write lock during startup. Bound this step tightly so query-service cold starts
+    // cannot stall for the full 30s connection busy timeout.
+    sqlite3_busy_timeout(m_db, 150);
+    const bool bm25Applied = applyBm25Weights();
+    sqlite3_busy_timeout(m_db, 30000);
+    if (!bm25Applied) {
         LOG_WARN(bsIndex, "Failed to apply BM25 weights from settings");
     }
 

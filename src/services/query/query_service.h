@@ -29,7 +29,6 @@ class TypeAffinity;
 class VectorIndex;
 class VectorStore;
 class SearchMerger;
-class SocketClient;
 
 class QueryService : public ServiceBase {
     Q_OBJECT
@@ -75,7 +74,6 @@ private:
     std::unique_ptr<VectorIndex> m_vectorIndex;
     std::unique_ptr<VectorStore> m_vectorStore;
     std::unique_ptr<CrossEncoderReranker> m_crossEncoderReranker;
-    std::unique_ptr<SocketClient> m_indexerClient;
 
     struct VectorRebuildState {
         enum class Status {
@@ -118,6 +116,8 @@ private:
 
     // Opens the store if not already open. Returns true on success.
     bool ensureStoreOpen();
+    bool ensureM2ModulesInitialized();
+    bool ensureTypoLexiconReady();
 
     // Initialize M2 modules after store is opened.
     void initM2Modules();
@@ -128,6 +128,8 @@ private:
     QJsonObject processStatsForService(const QString& serviceName) const;
     QJsonObject queryStatsSnapshot() const;
     bool m_m2Initialized = false;
+    bool m_typoLexiconBuildAttempted = false;
+    bool m_typoLexiconReady = false;
 
     std::unique_ptr<QFileSystemWatcher> m_bsignoreWatcher;
     BsignoreParser m_bsignoreParser;
