@@ -26,6 +26,7 @@ add_library(betterspotlight-core STATIC
     index/typo_lexicon.cpp
     query/query_normalizer.cpp
     query/query_parser.cpp
+    query/query_router.cpp
     query/temporal_parser.cpp
     query/entity_extractor.cpp
     query/doctype_classifier.cpp

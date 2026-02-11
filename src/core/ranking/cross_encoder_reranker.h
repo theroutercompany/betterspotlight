@@ -5,6 +5,7 @@
 #include <QString>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace bs {
@@ -19,7 +20,8 @@ struct RerankerConfig {
 
 class CrossEncoderReranker {
 public:
-    explicit CrossEncoderReranker(ModelRegistry* registry);
+    explicit CrossEncoderReranker(ModelRegistry* registry,
+                                  std::string role = "cross-encoder");
     ~CrossEncoderReranker();
 
     CrossEncoderReranker(const CrossEncoderReranker&) = delete;
@@ -36,6 +38,7 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
+    std::string m_role;
 };
 
 } // namespace bs

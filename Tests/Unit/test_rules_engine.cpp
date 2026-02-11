@@ -38,16 +38,20 @@ void TestRulesEngine::testSimpleQuery()
     QVERIFY(!sq.cleanedQuery.isEmpty());
     QVERIFY(sq.entities.empty());
     QVERIFY(!sq.temporal.has_value());
-    QCOMPARE(sq.nluConfidence, 0.0f);
+    QVERIFY(sq.queryClass != bs::QueryClass::Unknown);
+    QVERIFY(sq.nluConfidence > 0.0f);
+    QVERIFY(sq.nluConfidence <= 1.0f);
 }
 
 void TestRulesEngine::testNluConfidenceZero()
 {
     auto sq1 = bs::RulesEngine::analyze(QStringLiteral("complex query with entities"));
-    QCOMPARE(sq1.nluConfidence, 0.0f);
+    QVERIFY(sq1.nluConfidence > 0.0f);
+    QVERIFY(sq1.nluConfidence <= 1.0f);
 
     auto sq2 = bs::RulesEngine::analyze(QStringLiteral("january 2023 report"));
-    QCOMPARE(sq2.nluConfidence, 0.0f);
+    QVERIFY(sq2.nluConfidence > 0.0f);
+    QVERIFY(sq2.nluConfidence <= 1.0f);
 
     auto sq3 = bs::RulesEngine::analyze(QString());
     QCOMPARE(sq3.nluConfidence, 0.0f);

@@ -375,12 +375,14 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     sqlite3_busy_timeout(db, 5000);
 
     ModelRegistry workerRegistry(modelsDir);
-    EmbeddingManager workerEmbeddingManager(&workerRegistry);
+    EmbeddingManager workerEmbeddingManager(&workerRegistry, "bi-encoder");
+    EmbeddingManager workerFastEmbeddingManager(&workerRegistry, "bi-encoder-fast");
     if (!workerEmbeddingManager.initialize()) {
         updateFailedState(QStringLiteral("Embedding model is unavailable"));
         closeResources();
         return;
     }
+    const bool fastEmbeddingAvailable = workerFastEmbeddingManager.initialize();
 
     const int embeddingDimensions = std::max(workerEmbeddingManager.embeddingDimensions(), 1);
     VectorIndex::IndexMetadata rebuiltMeta;
@@ -396,6 +398,25 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         return;
     }
 
+    const QString fastGeneration = workerFastEmbeddingManager.activeGenerationId().isEmpty()
+        ? QStringLiteral("v3_fast")
+        : workerFastEmbeddingManager.activeGenerationId();
+    const int fastEmbeddingDimensions =
+        std::max(workerFastEmbeddingManager.embeddingDimensions(), 1);
+    VectorIndex::IndexMetadata rebuiltFastMeta;
+    rebuiltFastMeta.dimensions = fastEmbeddingDimensions;
+    rebuiltFastMeta.modelId = workerFastEmbeddingManager.activeModelId().toStdString();
+    rebuiltFastMeta.generationId = fastGeneration.toStdString();
+    rebuiltFastMeta.provider = workerFastEmbeddingManager.providerName().toStdString();
+
+    auto rebuiltFastIndex = std::unique_ptr<VectorIndex>{};
+    if (fastEmbeddingAvailable) {
+        rebuiltFastIndex = std::make_unique<VectorIndex>(rebuiltFastMeta);
+        if (!rebuiltFastIndex->create()) {
+            rebuiltFastIndex.reset();
+        }
+    }
+
     VectorStore workerVectorStore(db);
     VectorStore::GenerationState buildingState;
     buildingState.generationId = targetGeneration.toStdString();
@@ -406,6 +427,17 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     buildingState.progressPct = 0.0;
     buildingState.active = false;
     workerVectorStore.upsertGenerationState(buildingState);
+    if (fastEmbeddingAvailable && rebuiltFastIndex) {
+        VectorStore::GenerationState fastBuildingState;
+        fastBuildingState.generationId = fastGeneration.toStdString();
+        fastBuildingState.modelId = rebuiltFastMeta.modelId;
+        fastBuildingState.dimensions = fastEmbeddingDimensions;
+        fastBuildingState.provider = rebuiltFastMeta.provider;
+        fastBuildingState.state = "building";
+        fastBuildingState.progressPct = 0.0;
+        fastBuildingState.active = false;
+        workerVectorStore.upsertGenerationState(fastBuildingState);
+    }
 
     QString whereClause = QStringLiteral("length(trim(c.chunk_text)) > 0");
     if (!includePaths.isEmpty()) {
@@ -517,6 +549,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     if (totalCandidates > 0) {
         pendingMappings.reserve(static_cast<size_t>(totalCandidates));
     }
+    std::vector<PendingMapping> pendingFastMappings;
+    if (totalCandidates > 0) {
+        pendingFastMappings.reserve(static_cast<size_t>(totalCandidates));
+    }
     int64_t currentItemId = -1;
     QStringList currentChunks;
 
@@ -555,12 +591,8 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             }
         }
 
-        int usableEmbeddings = 0;
-        for (const auto& embedding : embeddings) {
-            if (embedding.size() != static_cast<size_t>(embeddingDimensions)) {
-                continue;
-            }
-            std::vector<float> normalized = embedding;
+        auto normalizeVector = [](const std::vector<float>& source) {
+            std::vector<float> normalized = source;
             double normSquared = 0.0;
             for (float value : normalized) {
                 normSquared += static_cast<double>(value) * static_cast<double>(value);
@@ -571,7 +603,15 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
                     value = static_cast<float>(static_cast<double>(value) / norm);
                 }
             }
+            return normalized;
+        };
 
+        int usableEmbeddings = 0;
+        for (const auto& embedding : embeddings) {
+            if (embedding.size() != static_cast<size_t>(embeddingDimensions)) {
+                continue;
+            }
+            std::vector<float> normalized = normalizeVector(embedding);
             const uint64_t label = rebuiltIndex->addVector(normalized.data());
             if (label == std::numeric_limits<uint64_t>::max()) {
                 continue;
@@ -584,11 +624,42 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             ++usableEmbeddings;
         }
 
-        if (usableEmbeddings == 0) {
+        int usableFastEmbeddings = 0;
+        if (fastEmbeddingAvailable && rebuiltFastIndex) {
+            std::vector<std::vector<float>> fastEmbeddings =
+                workerFastEmbeddingManager.embedBatch(texts);
+            if (fastEmbeddings.size() != texts.size()) {
+                fastEmbeddings.clear();
+                fastEmbeddings.reserve(texts.size());
+                for (const QString& text : texts) {
+                    if (m_stopRebuildRequested.load()) return;
+                    fastEmbeddings.push_back(workerFastEmbeddingManager.embed(text));
+                }
+            }
+
+            for (const auto& embedding : fastEmbeddings) {
+                if (embedding.size() != static_cast<size_t>(fastEmbeddingDimensions)) {
+                    continue;
+                }
+                std::vector<float> normalized = normalizeVector(embedding);
+                const uint64_t label = rebuiltFastIndex->addVector(normalized.data());
+                if (label == std::numeric_limits<uint64_t>::max()) {
+                    continue;
+                }
+                pendingFastMappings.push_back(PendingMapping{
+                    currentItemId,
+                    label,
+                    usableFastEmbeddings,
+                });
+                ++usableFastEmbeddings;
+            }
+        }
+
+        if (usableEmbeddings == 0 && usableFastEmbeddings == 0) {
             ++failedCount;
             return;
         }
-        embeddedCount += usableEmbeddings;
+        embeddedCount += usableEmbeddings + usableFastEmbeddings;
     };
 
     while (true) {
@@ -675,12 +746,31 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     const QString tmpMetaPath = metaPath + QStringLiteral(".tmp");
     QFile::remove(tmpIndexPath);
     QFile::remove(tmpMetaPath);
+    const QString fastIndexPath = dataDir + QStringLiteral("/vectors-") + fastGeneration
+        + QStringLiteral(".hnsw");
+    const QString fastMetaPath = dataDir + QStringLiteral("/vectors-") + fastGeneration
+        + QStringLiteral(".meta");
+    const QString tmpFastIndexPath = fastIndexPath + QStringLiteral(".tmp");
+    const QString tmpFastMetaPath = fastMetaPath + QStringLiteral(".tmp");
+    if (fastEmbeddingAvailable && rebuiltFastIndex) {
+        QFile::remove(tmpFastIndexPath);
+        QFile::remove(tmpFastMetaPath);
+    }
 
     if (!rebuiltIndex->save(tmpIndexPath.toStdString(), tmpMetaPath.toStdString())) {
         rollbackIfNeeded();
         updateFailedState(QStringLiteral("Failed to save rebuilt vector index"));
         closeResources();
         return;
+    }
+    if (fastEmbeddingAvailable && rebuiltFastIndex) {
+        if (!rebuiltFastIndex->save(tmpFastIndexPath.toStdString(),
+                                    tmpFastMetaPath.toStdString())) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to save fast vector index"));
+            closeResources();
+            return;
+        }
     }
 
     // Keep lock scope short: expensive embedding work happens before this transaction.
@@ -710,6 +800,28 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             updateFailedState(QStringLiteral("Failed to persist vector mappings"));
             closeResources();
             return;
+        }
+    }
+    if (fastEmbeddingAvailable && rebuiltFastIndex) {
+        if (!workerVectorStore.removeGeneration(fastGeneration.toStdString())) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to clear fast generation mappings"));
+            closeResources();
+            return;
+        }
+        for (const auto& mapping : pendingFastMappings) {
+            if (!workerVectorStore.addMapping(mapping.itemId, mapping.label,
+                                              rebuiltFastMeta.modelId,
+                                              fastGeneration.toStdString(),
+                                              fastEmbeddingDimensions,
+                                              rebuiltFastMeta.provider,
+                                              mapping.passageOrdinal,
+                                              std::string("active"))) {
+                rollbackIfNeeded();
+                updateFailedState(QStringLiteral("Failed to persist fast vector mappings"));
+                closeResources();
+                return;
+            }
         }
     }
 
@@ -758,6 +870,22 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         closeResources();
         return;
     }
+    if (fastEmbeddingAvailable && rebuiltFastIndex) {
+        VectorStore::GenerationState fastState;
+        fastState.generationId = fastGeneration.toStdString();
+        fastState.modelId = rebuiltFastMeta.modelId;
+        fastState.dimensions = fastEmbeddingDimensions;
+        fastState.provider = rebuiltFastMeta.provider;
+        fastState.state = "active";
+        fastState.progressPct = 100.0;
+        fastState.active = false;
+        if (!workerVectorStore.upsertGenerationState(fastState)) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to commit fast generation state"));
+            closeResources();
+            return;
+        }
+    }
 
     {
         std::unique_lock<std::shared_mutex> lock(m_vectorIndexMutex);
@@ -780,6 +908,12 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         m_vectorIndexPath = indexPath;
         m_vectorMetaPath = metaPath;
         m_vectorIndex = std::move(rebuiltIndex);
+        if (fastEmbeddingAvailable && rebuiltFastIndex) {
+            m_fastVectorGeneration = fastGeneration;
+            m_fastVectorIndexPath = fastIndexPath;
+            m_fastVectorMetaPath = fastMetaPath;
+            m_fastVectorIndex = std::move(rebuiltFastIndex);
+        }
     }
 
     QString persistError;
@@ -797,14 +931,32 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         }
     }
 
+    if (persistError.isEmpty() && fastEmbeddingAvailable && QFile::exists(tmpFastIndexPath)
+               && QFile::exists(tmpFastMetaPath)) {
+        if (QFile::exists(fastIndexPath) && !QFile::remove(fastIndexPath)) {
+            persistError = QStringLiteral("Failed to replace %1").arg(fastIndexPath);
+        } else if (!QFile::rename(tmpFastIndexPath, fastIndexPath)) {
+            persistError = QStringLiteral("Failed to persist %1").arg(fastIndexPath);
+        }
+
+        if (persistError.isEmpty()) {
+            if (QFile::exists(fastMetaPath) && !QFile::remove(fastMetaPath)) {
+                persistError = QStringLiteral("Failed to replace %1").arg(fastMetaPath);
+            } else if (!QFile::rename(tmpFastMetaPath, fastMetaPath)) {
+                persistError = QStringLiteral("Failed to persist %1").arg(fastMetaPath);
+            }
+        }
+    }
+
     if (!persistError.isEmpty()) {
         LOG_ERROR(bsIpc, "Vector rebuild run %llu completed but failed to persist index files: %s",
                   static_cast<unsigned long long>(runId), qUtf8Printable(persistError));
     } else {
         LOG_INFO(bsIpc,
-                 "Vector index rebuild complete (runId=%llu, total=%d, embedded=%d, skipped=%d, failed=%d)",
+                 "Vector index rebuild complete (runId=%llu, total=%d, embedded=%d, skipped=%d, failed=%d, dual=%s)",
                  static_cast<unsigned long long>(runId),
-                 totalCandidates, embeddedCount, skippedCount, failedCount);
+                 totalCandidates, embeddedCount, skippedCount, failedCount,
+                 fastEmbeddingAvailable ? "true" : "false");
     }
 
     updateSucceededState(totalCandidates, processed, embeddedCount, skippedCount,

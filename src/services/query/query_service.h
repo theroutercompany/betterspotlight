@@ -26,6 +26,7 @@ class InteractionTracker;
 class FeedbackAggregator;
 class PathPreferences;
 class TypeAffinity;
+class PersonalizedLtr;
 class VectorIndex;
 class VectorStore;
 class SearchMerger;
@@ -72,9 +73,13 @@ private:
     std::unique_ptr<TypeAffinity> m_typeAffinity;
     std::unique_ptr<ModelRegistry> m_modelRegistry;
     std::unique_ptr<EmbeddingManager> m_embeddingManager;
+    std::unique_ptr<EmbeddingManager> m_fastEmbeddingManager;
     std::unique_ptr<VectorIndex> m_vectorIndex;
+    std::unique_ptr<VectorIndex> m_fastVectorIndex;
     std::unique_ptr<VectorStore> m_vectorStore;
     std::unique_ptr<CrossEncoderReranker> m_crossEncoderReranker;
+    std::unique_ptr<CrossEncoderReranker> m_fastCrossEncoderReranker;
+    std::unique_ptr<PersonalizedLtr> m_personalizedLtr;
 
     struct VectorRebuildState {
         enum class Status {
@@ -114,8 +119,11 @@ private:
     QString m_dbPath;
     QString m_vectorIndexPath;
     QString m_vectorMetaPath;
+    QString m_fastVectorIndexPath;
+    QString m_fastVectorMetaPath;
     QString m_activeVectorGeneration = QStringLiteral("v1");
     QString m_targetVectorGeneration = QStringLiteral("v2");
+    QString m_fastVectorGeneration = QStringLiteral("v3_fast");
     QString m_vectorMigrationState = QStringLiteral("idle");
     double m_vectorMigrationProgressPct = 0.0;
     QString m_activeVectorModelId = QStringLiteral("legacy");

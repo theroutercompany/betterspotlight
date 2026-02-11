@@ -32,6 +32,9 @@ static std::optional<ModelManifestEntry> parseEntry(const QJsonObject& obj)
     entry.semanticAggregationMode = obj.value(QStringLiteral("semanticAggregationMode"))
                                         .toString(QStringLiteral("max_softmax_cap"));
     entry.outputTransform = obj.value(QStringLiteral("outputTransform")).toString();
+    entry.latencyTier = obj.value(QStringLiteral("latencyTier"))
+                            .toString(QStringLiteral("balanced"));
+    entry.task = obj.value(QStringLiteral("task")).toString();
 
     if (obj.contains(QStringLiteral("providerPolicy"))
         && obj.value(QStringLiteral("providerPolicy")).isObject()) {

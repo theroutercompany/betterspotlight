@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 #if defined(ONNXRUNTIME_FOUND) && __has_include(<onnxruntime_cxx_api.h>)
 #define BS_WITH_ONNX 1
@@ -58,9 +59,10 @@ public:
 #endif
 };
 
-EmbeddingManager::EmbeddingManager(ModelRegistry* registry)
+EmbeddingManager::EmbeddingManager(ModelRegistry* registry, std::string role)
     : m_impl(std::make_unique<Impl>())
     , m_registry(registry)
+    , m_role(std::move(role))
 {
 }
 
@@ -75,9 +77,14 @@ bool EmbeddingManager::initialize()
         return false;
     }
 
-    ModelSession* modelSession = m_registry->getSession("bi-encoder");
+    if (m_role.empty()) {
+        m_role = "bi-encoder";
+    }
+
+    ModelSession* modelSession = m_registry->getSession(m_role);
     if (!modelSession || !modelSession->isAvailable()) {
-        qWarning() << "EmbeddingManager initialize failed: bi-encoder session unavailable";
+        qWarning() << "EmbeddingManager initialize failed:" << QString::fromStdString(m_role)
+                   << "session unavailable";
         m_available = false;
         return false;
     }

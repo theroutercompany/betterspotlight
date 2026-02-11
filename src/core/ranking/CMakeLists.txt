@@ -3,6 +3,8 @@ add_library(betterspotlight-core-ranking STATIC
     context_signals.cpp
     scorer.cpp
     cross_encoder_reranker.cpp
+    reranker_cascade.cpp
+    personalized_ltr.cpp
 )
 
 target_include_directories(betterspotlight-core-ranking PUBLIC

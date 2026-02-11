@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace bs {
@@ -25,7 +26,8 @@ struct EmbeddingCircuitBreaker {
 
 class EmbeddingManager {
 public:
-    explicit EmbeddingManager(ModelRegistry* registry);
+    explicit EmbeddingManager(ModelRegistry* registry,
+                              std::string role = "bi-encoder");
     ~EmbeddingManager();
 
     EmbeddingManager(const EmbeddingManager&) = delete;
@@ -55,6 +57,7 @@ private:
     std::unique_ptr<Impl> m_impl;
 
     ModelRegistry* m_registry = nullptr;
+    std::string m_role;
     std::unique_ptr<WordPieceTokenizer> m_tokenizer;
     int m_embeddingSize = 0;
     QString m_queryPrefix;

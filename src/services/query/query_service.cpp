@@ -4,6 +4,7 @@
 #include "core/query/doctype_classifier.h"
 #include "core/query/query_normalizer.h"
 #include "core/query/query_parser.h"
+#include "core/query/query_router.h"
 #include "core/query/rules_engine.h"
 #include "core/query/stopwords.h"
 #include "core/query/structured_query.h"
@@ -12,6 +13,8 @@
 #include "core/shared/logging.h"
 #include "core/ranking/match_classifier.h"
 #include "core/ranking/cross_encoder_reranker.h"
+#include "core/ranking/personalized_ltr.h"
+#include "core/ranking/reranker_cascade.h"
 
 #include <sqlite3.h>
 
@@ -90,12 +93,6 @@ enum class SearchQueryMode {
     Auto,
     Strict,
     Relaxed,
-};
-
-enum class QueryClass {
-    NaturalLanguage,
-    PathOrCode,
-    ShortAmbiguous,
 };
 
 enum CandidateOrigin : uint8_t {
@@ -253,19 +250,6 @@ QueryClass classifyQueryShape(const QString& queryLower,
         return QueryClass::ShortAmbiguous;
     }
     return QueryClass::NaturalLanguage;
-}
-
-QString queryClassToString(QueryClass queryClass)
-{
-    switch (queryClass) {
-    case QueryClass::NaturalLanguage:
-        return QStringLiteral("natural_language");
-    case QueryClass::PathOrCode:
-        return QStringLiteral("path_or_code");
-    case QueryClass::ShortAmbiguous:
-        return QStringLiteral("short_ambiguous");
-    }
-    return QStringLiteral("unknown");
 }
 
 QString normalizeFileTypeToken(const QString& token)
@@ -620,8 +604,10 @@ void QueryService::initM2Modules()
     const QString modelsDir = ModelRegistry::resolveModelsDir();
     m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
 
-    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get());
+    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder");
+    m_fastEmbeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder-fast");
     bool embeddingAvailable = false;
+    bool fastEmbeddingAvailable = false;
     if (!m_embeddingManager->initialize()) {
         LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
     } else {
@@ -633,6 +619,16 @@ void QueryService::initM2Modules()
         m_activeVectorProvider = m_embeddingManager->providerName();
         m_activeVectorDimensions = std::max(m_embeddingManager->embeddingDimensions(), 1);
         LOG_INFO(bsIpc, "EmbeddingManager initialized");
+    }
+    if (!m_fastEmbeddingManager->initialize()) {
+        LOG_WARN(bsIpc, "Fast EmbeddingManager unavailable, dual-index retrieval disabled");
+    } else {
+        fastEmbeddingAvailable = true;
+        if (!m_fastEmbeddingManager->activeGenerationId().isEmpty()) {
+            m_fastVectorGeneration = m_fastEmbeddingManager->activeGenerationId();
+        }
+        LOG_INFO(bsIpc, "Fast EmbeddingManager initialized (generation=%s)",
+                 qUtf8Printable(m_fastVectorGeneration));
     }
 
     if (embeddingAvailable) {
@@ -660,10 +656,23 @@ void QueryService::initM2Modules()
             m_store->setSetting(QStringLiteral("activeVectorGeneration"), m_targetVectorGeneration);
         }
     }
+    if (fastEmbeddingAvailable) {
+        VectorStore::GenerationState fastState;
+        fastState.generationId = m_fastVectorGeneration.toStdString();
+        fastState.modelId = m_fastEmbeddingManager->activeModelId().toStdString();
+        fastState.dimensions = std::max(m_fastEmbeddingManager->embeddingDimensions(), 1);
+        fastState.provider = m_fastEmbeddingManager->providerName().toStdString();
+        fastState.state = "building";
+        fastState.progressPct = 0.0;
+        fastState.active = false;
+        m_vectorStore->upsertGenerationState(fastState);
+    }
 
     refreshVectorGenerationState();
     m_vectorIndexPath = vectorIndexPathForGeneration(m_activeVectorGeneration);
     m_vectorMetaPath = vectorMetaPathForGeneration(m_activeVectorGeneration);
+    m_fastVectorIndexPath = vectorIndexPathForGeneration(m_fastVectorGeneration);
+    m_fastVectorMetaPath = vectorMetaPathForGeneration(m_fastVectorGeneration);
 
     VectorIndex::IndexMetadata indexMeta;
     indexMeta.dimensions = std::max(m_activeVectorDimensions, 1);
@@ -691,16 +700,63 @@ void QueryService::initM2Modules()
         }
     }
 
+    auto loadedFastVectorIndex = std::unique_ptr<VectorIndex>{};
+    if (fastEmbeddingAvailable) {
+        VectorIndex::IndexMetadata fastMeta;
+        fastMeta.dimensions = std::max(m_fastEmbeddingManager->embeddingDimensions(), 1);
+        fastMeta.modelId = m_fastEmbeddingManager->activeModelId().toStdString();
+        fastMeta.generationId = m_fastVectorGeneration.toStdString();
+        fastMeta.provider = m_fastEmbeddingManager->providerName().toStdString();
+
+        loadedFastVectorIndex = std::make_unique<VectorIndex>(fastMeta);
+        if (QFile::exists(m_fastVectorIndexPath) && QFile::exists(m_fastVectorMetaPath)) {
+            if (!loadedFastVectorIndex->load(m_fastVectorIndexPath.toStdString(),
+                                             m_fastVectorMetaPath.toStdString())) {
+                LOG_WARN(bsIpc, "Failed to load fast vector index generation '%s' from %s",
+                         qUtf8Printable(m_fastVectorGeneration),
+                         qUtf8Printable(m_fastVectorIndexPath));
+                loadedFastVectorIndex.reset();
+            } else {
+                LOG_INFO(bsIpc, "Fast vector index loaded: generation=%s vectors=%d",
+                         qUtf8Printable(m_fastVectorGeneration),
+                         loadedFastVectorIndex->totalElements());
+            }
+        } else if (!loadedFastVectorIndex->create()) {
+            LOG_WARN(bsIpc, "Failed to create fast vector index generation '%s' with dimensions=%d",
+                     qUtf8Printable(m_fastVectorGeneration), fastMeta.dimensions);
+            loadedFastVectorIndex.reset();
+        }
+    }
+
     {
         std::unique_lock<std::shared_mutex> lock(m_vectorIndexMutex);
         m_vectorIndex = std::move(loadedVectorIndex);
+        m_fastVectorIndex = std::move(loadedFastVectorIndex);
     }
 
-    m_crossEncoderReranker = std::make_unique<CrossEncoderReranker>(m_modelRegistry.get());
+    m_fastCrossEncoderReranker =
+        std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder-fast");
+    if (m_fastCrossEncoderReranker->initialize()) {
+        LOG_INFO(bsIpc, "Fast cross-encoder reranker initialized");
+    } else {
+        LOG_WARN(bsIpc, "Fast cross-encoder reranker unavailable");
+    }
+
+    m_crossEncoderReranker =
+        std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder");
     if (m_crossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Cross-encoder reranker initialized");
     } else {
         LOG_WARN(bsIpc, "Cross-encoder reranker not available — skipping reranking");
+    }
+
+    m_personalizedLtr = std::make_unique<PersonalizedLtr>(
+        m_dataDir + QStringLiteral("/ltr_model.json"));
+    if (m_personalizedLtr->initialize(db)) {
+        LOG_INFO(bsIpc, "Personalized LTR initialized: %s",
+                 qUtf8Printable(m_personalizedLtr->modelVersion()));
+    } else {
+        LOG_WARN(bsIpc, "Personalized LTR unavailable (cold start)");
     }
 
     maybeStartBackgroundVectorMigration();
@@ -1050,6 +1106,63 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             }
         }
     }
+
+    const auto readBoolSetting = [&](const QString& key, bool defaultValue) {
+        if (!m_store.has_value()) {
+            return defaultValue;
+        }
+        const auto raw = m_store->getSetting(key);
+        if (!raw.has_value()) {
+            return defaultValue;
+        }
+        const QString normalized = raw->trimmed().toLower();
+        if (normalized.isEmpty()) {
+            return defaultValue;
+        }
+        return normalized == QLatin1String("1")
+            || normalized == QLatin1String("true")
+            || normalized == QLatin1String("yes")
+            || normalized == QLatin1String("on");
+    };
+    const auto readIntSetting = [&](const QString& key, int defaultValue) {
+        if (!m_store.has_value()) {
+            return defaultValue;
+        }
+        const auto raw = m_store->getSetting(key);
+        if (!raw.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const int parsed = raw->toInt(&ok);
+        return ok ? parsed : defaultValue;
+    };
+    const auto readDoubleSetting = [&](const QString& key, double defaultValue) {
+        if (!m_store.has_value()) {
+            return defaultValue;
+        }
+        const auto raw = m_store->getSetting(key);
+        if (!raw.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const double parsed = raw->toDouble(&ok);
+        return ok ? parsed : defaultValue;
+    };
+
+    const bool queryRouterEnabled = readBoolSetting(QStringLiteral("queryRouterEnabled"), true);
+    const double queryRouterMinConfidence =
+        std::clamp(readDoubleSetting(QStringLiteral("queryRouterMinConfidence"), 0.45), 0.0, 1.0);
+    const bool fastEmbeddingEnabled = readBoolSetting(QStringLiteral("fastEmbeddingEnabled"), true);
+    const bool dualEmbeddingFusionEnabled =
+        readBoolSetting(QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    const int strongEmbeddingTopK = std::max(1, readIntSetting(QStringLiteral("strongEmbeddingTopK"), 40));
+    const int fastEmbeddingTopK = std::max(1, readIntSetting(QStringLiteral("fastEmbeddingTopK"), 60));
+    const int semanticBudgetMs = std::max(20, readIntSetting(QStringLiteral("semanticBudgetMs"), 70));
+    const bool rerankerCascadeEnabled = readBoolSetting(QStringLiteral("rerankerCascadeEnabled"), true);
+    const int rerankBudgetMs = std::max(40, readIntSetting(QStringLiteral("rerankBudgetMs"), 120));
+    const int rerankerStage1Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage1Max"), 40));
+    const int rerankerStage2Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage2Max"), 12));
+    const bool personalizedLtrEnabled = readBoolSetting(QStringLiteral("personalizedLtrEnabled"), true);
 
     const QString queryLower = query.toLower();
     const QueryHints queryHints = parseQueryHints(queryLower);
@@ -1613,11 +1726,28 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return true;
     };
 
-    const QueryClass queryClass = classifyQueryShape(queryLower, querySignalTokens, queryTokensRaw);
+    QueryClass queryClass = classifyQueryShape(queryLower, querySignalTokens, queryTokensRaw);
+    bool routerApplied = false;
+    float routerConfidence = 0.0f;
+    QueryDomain queryDomain = QueryDomain::Unknown;
+    if (queryRouterEnabled
+        && structured.queryClass != QueryClass::Unknown
+        && structured.queryClassConfidence >= queryRouterMinConfidence) {
+        queryClass = structured.queryClass;
+        queryDomain = structured.queryDomain;
+        routerConfidence = structured.queryClassConfidence;
+        routerApplied = true;
+    }
+
     const bool naturalLanguageQuery = queryClass == QueryClass::NaturalLanguage;
     const bool shortAmbiguousQuery = queryClass == QueryClass::ShortAmbiguous;
-    const float semanticThreshold = naturalLanguageQuery ? 0.62f
+    const float routerSemanticNeed = std::clamp(structured.semanticNeedScore, 0.0f, 1.0f);
+    const float semanticThresholdBase = naturalLanguageQuery ? 0.62f
         : (shortAmbiguousQuery ? 0.66f : 0.70f);
+    const float semanticThreshold = std::clamp(
+        semanticThresholdBase - ((routerApplied ? routerSemanticNeed : 0.0f) * 0.06f),
+        0.55f,
+        0.80f);
     const float semanticOnlyFloor = naturalLanguageQuery ? 0.08f
         : (shortAmbiguousQuery ? 0.10f : 0.15f);
     const bool strictLexicalWeakOrEmpty =
@@ -1656,52 +1786,115 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     int semanticOnlySuppressedCount = 0;
     int semanticOnlyAdmittedCount = 0;
     QHash<QString, int> semanticOnlyAdmitReasons;
-    if (m_embeddingManager && m_embeddingManager->isAvailable()) {
-        std::vector<float> queryVec = m_embeddingManager->embedQuery(query);
-        if (!queryVec.empty()) {
-            std::shared_lock<std::shared_mutex> lock(m_vectorIndexMutex);
-            if (m_vectorIndex && m_vectorIndex->isAvailable() && m_vectorStore) {
-                auto knnHits = m_vectorIndex->search(queryVec.data());
-                semanticResults.reserve(knnHits.size());
-                const std::string activeGeneration =
-                    m_activeVectorGeneration.isEmpty()
-                        ? m_vectorStore->activeGenerationId()
-                        : m_activeVectorGeneration.toStdString();
+    int strongSemanticCandidates = 0;
+    int fastSemanticCandidates = 0;
+    bool dualIndexUsed = false;
+    if (m_embeddingManager && m_embeddingManager->isAvailable() && m_vectorStore) {
+        QElapsedTimer semanticTimer;
+        semanticTimer.start();
+        std::unordered_map<int64_t, double> combinedSemanticByItemId;
+        combinedSemanticByItemId.reserve(128);
 
-                for (const auto& hit : knnHits) {
-                    float cosineSim = 1.0f - hit.distance;
-                    if (cosineSim < semanticThreshold) {
-                        continue;
-                    }
-                    const float normalizedSemantic = SearchMerger::normalizeSemanticScore(
-                        cosineSim, semanticThreshold);
-                    if (normalizedSemantic <= semanticOnlyFloor) {
-                        continue;
-                    }
-                    auto itemIdOpt = m_vectorStore->getItemId(hit.label, activeGeneration);
-                    if (!itemIdOpt.has_value()) {
-                        continue;
-                    }
+        auto accumulateSemantic = [&](EmbeddingManager* manager,
+                                      VectorIndex* index,
+                                      const QString& generation,
+                                      int topK,
+                                      double generationWeight,
+                                      int& candidateCounter) {
+            if (!manager || !manager->isAvailable()
+                || !index || !index->isAvailable()
+                || generationWeight <= 0.0) {
+                return;
+            }
+            std::vector<float> queryVec = manager->embedQuery(query);
+            if (queryVec.empty()) {
+                return;
+            }
 
-                    auto semanticItemOpt = m_store->getItemById(itemIdOpt.value());
-                    if (!semanticItemOpt.has_value()) {
-                        continue;
-                    }
-                    if (isExcludedByBsignore(semanticItemOpt->path)) {
-                        continue;
-                    }
-                    if (hasSearchFilters && !itemPassesSearchOptions(semanticItemOpt.value())) {
-                        continue;
-                    }
+            const auto knnHits = index->search(queryVec.data(), std::max(1, topK));
+            const std::string generationId = generation.toStdString();
+            for (const auto& hit : knnHits) {
+                if (semanticTimer.elapsed() > semanticBudgetMs) {
+                    break;
+                }
+                const float cosineSim = 1.0f - hit.distance;
+                if (cosineSim < semanticThreshold) {
+                    continue;
+                }
+                const float normalizedSemantic =
+                    SearchMerger::normalizeSemanticScore(cosineSim, semanticThreshold);
+                if (normalizedSemantic <= semanticOnlyFloor) {
+                    continue;
+                }
+                auto itemIdOpt = m_vectorStore->getItemId(hit.label, generationId);
+                if (!itemIdOpt.has_value()) {
+                    continue;
+                }
+                auto semanticItemOpt = m_store->getItemById(itemIdOpt.value());
+                if (!semanticItemOpt.has_value()) {
+                    continue;
+                }
+                if (isExcludedByBsignore(semanticItemOpt->path)) {
+                    continue;
+                }
+                if (hasSearchFilters && !itemPassesSearchOptions(semanticItemOpt.value())) {
+                    continue;
+                }
 
-                    SemanticResult sr;
-                    sr.itemId = itemIdOpt.value();
-                    sr.cosineSimilarity = cosineSim;
-                    semanticResults.push_back(sr);
-                    semanticSimilarityByItemId[sr.itemId] = cosineSim;
-                    semanticNormalizedByItemId[sr.itemId] = normalizedSemantic;
+                ++candidateCounter;
+                const double weightedNorm = static_cast<double>(normalizedSemantic) * generationWeight;
+                combinedSemanticByItemId[itemIdOpt.value()] = std::min(
+                    1.0,
+                    combinedSemanticByItemId[itemIdOpt.value()] + weightedNorm);
+
+                auto existingSimilarity = semanticSimilarityByItemId.find(itemIdOpt.value());
+                if (existingSimilarity == semanticSimilarityByItemId.end()) {
+                    semanticSimilarityByItemId[itemIdOpt.value()] = cosineSim;
+                } else {
+                    existingSimilarity->second =
+                        std::max(existingSimilarity->second, cosineSim);
                 }
             }
+        };
+
+        std::shared_lock<std::shared_mutex> lock(m_vectorIndexMutex);
+        if (m_vectorIndex && m_vectorIndex->isAvailable()) {
+            const double strongWeight = dualEmbeddingFusionEnabled ? 0.60 : 1.0;
+            accumulateSemantic(m_embeddingManager.get(),
+                               m_vectorIndex.get(),
+                               m_activeVectorGeneration,
+                               strongEmbeddingTopK,
+                               strongWeight,
+                               strongSemanticCandidates);
+        }
+        if (dualEmbeddingFusionEnabled
+            && fastEmbeddingEnabled
+            && m_fastEmbeddingManager
+            && m_fastEmbeddingManager->isAvailable()
+            && m_fastVectorIndex
+            && m_fastVectorIndex->isAvailable()
+            && semanticTimer.elapsed() <= semanticBudgetMs) {
+            dualIndexUsed = true;
+            accumulateSemantic(m_fastEmbeddingManager.get(),
+                               m_fastVectorIndex.get(),
+                               m_fastVectorGeneration,
+                               fastEmbeddingTopK,
+                               0.40,
+                               fastSemanticCandidates);
+        }
+
+        semanticResults.reserve(combinedSemanticByItemId.size());
+        for (const auto& [itemId, combinedNorm] : combinedSemanticByItemId) {
+            if (combinedNorm <= static_cast<double>(semanticOnlyFloor)) {
+                continue;
+            }
+            const double cosine = static_cast<double>(semanticThreshold)
+                + ((1.0 - static_cast<double>(semanticThreshold)) * combinedNorm);
+            SemanticResult sr;
+            sr.itemId = itemId;
+            sr.cosineSimilarity = static_cast<float>(std::clamp(cosine, 0.0, 1.0));
+            semanticResults.push_back(sr);
+            semanticNormalizedByItemId[itemId] = static_cast<float>(combinedNorm);
         }
     }
 
@@ -1808,15 +2001,45 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     }
 
     int rerankDepthApplied = 0;
-    const bool coremlProviderUsed = m_embeddingManager
-        && m_embeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0;
+    int rerankerStage1Depth = 0;
+    int rerankerStage2Depth = 0;
+    bool rerankerStage1Applied = false;
+    bool rerankerStage2Applied = false;
+    bool rerankerAmbiguous = false;
+    const bool coremlProviderUsed = (m_embeddingManager
+            && m_embeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0)
+        || (m_fastEmbeddingManager
+            && m_fastEmbeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0);
 
     // Cross-encoder reranking (soft boost, before M2 boosts)
-    if (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
+    const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
+    if (rerankerCascadeEnabled
+        && ((m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable())
+            || (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()))) {
+        RerankerCascadeConfig cascadeConfig;
+        cascadeConfig.enabled = true;
+        cascadeConfig.stage1MaxCandidates = rerankerStage1Max;
+        cascadeConfig.stage2MaxCandidates = rerankerStage2Max;
+        cascadeConfig.rerankBudgetMs = rerankBudgetMs;
+        cascadeConfig.stage1Weight = std::max(8.0f, m_scorer.weights().crossEncoderWeight * 0.55f);
+        cascadeConfig.stage2Weight = m_scorer.weights().crossEncoderWeight;
+        cascadeConfig.ambiguityMarginThreshold = 0.08f;
+        const RerankerCascadeStats cascadeStats = RerankerCascade::run(
+            originalRawQuery,
+            results,
+            m_fastCrossEncoderReranker.get(),
+            m_crossEncoderReranker.get(),
+            cascadeConfig,
+            elapsedBeforeRerankMs);
+        rerankerStage1Applied = cascadeStats.stage1Applied;
+        rerankerStage2Applied = cascadeStats.stage2Applied;
+        rerankerStage1Depth = cascadeStats.stage1Depth;
+        rerankerStage2Depth = cascadeStats.stage2Depth;
+        rerankerAmbiguous = cascadeStats.ambiguous;
+        rerankDepthApplied = std::max(rerankerStage1Depth, rerankerStage2Depth);
+    } else if (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
         RerankerConfig rerankerConfig;
         rerankerConfig.weight = m_scorer.weights().crossEncoderWeight;
-        const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
-        const int latencyBudgetMs = 250;
         int rerankCap = 40;
         if (elapsedBeforeRerankMs >= 180) {
             rerankCap = 12;
@@ -1827,7 +2050,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), rerankCap);
         rerankDepthApplied = rerankerConfig.maxCandidates;
-        if (elapsedBeforeRerankMs >= latencyBudgetMs) {
+        if (elapsedBeforeRerankMs >= rerankBudgetMs) {
             rerankDepthApplied = std::min(rerankDepthApplied, 8);
             rerankerConfig.maxCandidates = rerankDepthApplied;
         }
@@ -1900,6 +2123,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             || ext == QLatin1String("log");
     };
     int clipboardSignalBoostedResults = 0;
+    bool ltrApplied = false;
+    double ltrDeltaTop10 = 0.0;
+    QString ltrModelVersion = QStringLiteral("unavailable");
 
     for (auto& sr : results) {
         double feedbackBoost = 0.0;
@@ -2045,6 +2271,16 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         sr.score = std::max(0.0, sr.score + feedbackBoost + m2SignalBoost);
     }
 
+    if (personalizedLtrEnabled && m_personalizedLtr && m_personalizedLtr->isAvailable()) {
+        LtrContext ltrContext;
+        ltrContext.queryClass = queryClass;
+        ltrContext.routerConfidence = routerConfidence;
+        ltrContext.semanticNeedScore = std::clamp(structured.semanticNeedScore, 0.0f, 1.0f);
+        ltrDeltaTop10 = m_personalizedLtr->apply(results, ltrContext, 100);
+        ltrModelVersion = m_personalizedLtr->modelVersion();
+        ltrApplied = true;
+    }
+
     // Re-sort after M2 boosts
     std::sort(results.begin(), results.end(), [](const SearchResult& a, const SearchResult& b) {
         if (a.score != b.score) return a.score > b.score;
@@ -2137,24 +2373,45 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("lexicalRelaxedHits")] = relaxedHitsCount;
         debugInfo[QStringLiteral("semanticCandidates")] =
             static_cast<int>(semanticResults.size());
+        debugInfo[QStringLiteral("strongSemanticCandidates")] = strongSemanticCandidates;
+        debugInfo[QStringLiteral("fastSemanticCandidates")] = fastSemanticCandidates;
+        debugInfo[QStringLiteral("dualIndexUsed")] = dualIndexUsed;
         QJsonObject candidateCountsBySource;
         candidateCountsBySource[QStringLiteral("lexical")] = totalMatches;
         candidateCountsBySource[QStringLiteral("passageAnn")] = static_cast<int>(semanticResults.size());
+        candidateCountsBySource[QStringLiteral("passageAnnStrong")] = strongSemanticCandidates;
+        candidateCountsBySource[QStringLiteral("passageAnnFast")] = fastSemanticCandidates;
         candidateCountsBySource[QStringLiteral("rerankInput")] = rerankDepthApplied;
         debugInfo[QStringLiteral("candidateCountsBySource")] = candidateCountsBySource;
         debugInfo[QStringLiteral("activeVectorGeneration")] = m_activeVectorGeneration;
+        debugInfo[QStringLiteral("fastVectorGeneration")] = m_fastVectorGeneration;
         debugInfo[QStringLiteral("coremlProviderUsed")] = coremlProviderUsed;
         debugInfo[QStringLiteral("rerankDepthApplied")] = rerankDepthApplied;
+        QJsonObject rerankerStages;
+        rerankerStages[QStringLiteral("stage1Applied")] = rerankerStage1Applied;
+        rerankerStages[QStringLiteral("stage2Applied")] = rerankerStage2Applied;
+        rerankerStages[QStringLiteral("stage1Depth")] = rerankerStage1Depth;
+        rerankerStages[QStringLiteral("stage2Depth")] = rerankerStage2Depth;
+        rerankerStages[QStringLiteral("ambiguous")] = rerankerAmbiguous;
+        debugInfo[QStringLiteral("rerankerStagesApplied")] = rerankerStages;
         debugInfo[QStringLiteral("semanticAggregationMode")] =
             (m_embeddingManager ? m_embeddingManager->semanticAggregationMode()
                                 : QStringLiteral("max_softmax_cap"));
         debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
         debugInfo[QStringLiteral("queryClass")] = queryClassToString(queryClass);
+        debugInfo[QStringLiteral("routerApplied")] = routerApplied;
+        debugInfo[QStringLiteral("routerConfidence")] = static_cast<double>(routerConfidence);
+        debugInfo[QStringLiteral("routerClass")] = queryClassToString(structured.queryClass);
+        debugInfo[QStringLiteral("routerDomain")] = queryDomainToString(queryDomain);
+        debugInfo[QStringLiteral("semanticNeedScore")] =
+            static_cast<double>(structured.semanticNeedScore);
         debugInfo[QStringLiteral("semanticThresholdApplied")] = semanticThreshold;
         debugInfo[QStringLiteral("semanticOnlyFloorApplied")] = semanticOnlyFloor;
         debugInfo[QStringLiteral("semanticOnlyCapApplied")] = semanticOnlyCap;
         debugInfo[QStringLiteral("mergeLexicalWeightApplied")] = mergeLexicalWeight;
         debugInfo[QStringLiteral("mergeSemanticWeightApplied")] = mergeSemanticWeight;
+        debugInfo[QStringLiteral("semanticBudgetMs")] = semanticBudgetMs;
+        debugInfo[QStringLiteral("rerankBudgetMs")] = rerankBudgetMs;
         debugInfo[QStringLiteral("semanticOnlySuppressedCount")] = semanticOnlySuppressedCount;
         debugInfo[QStringLiteral("semanticOnlyAdmittedCount")] = semanticOnlyAdmittedCount;
         QJsonObject semanticReasonSummary;
@@ -2191,6 +2448,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             (naturalLanguageQuery && strictLexicalWeakOrEmpty);
         debugInfo[QStringLiteral("effectiveSemanticOnlySafetySimilarity")] =
             static_cast<double>(kSemanticOnlySafetySimilarity);
+        debugInfo[QStringLiteral("ltrApplied")] = ltrApplied;
+        debugInfo[QStringLiteral("ltrModelVersion")] = ltrModelVersion;
+        debugInfo[QStringLiteral("ltrDeltaTop10")] = ltrDeltaTop10;
         debugInfo[QStringLiteral("queryAfterParse")] = query;
         debugInfo[QStringLiteral("clipboardSignalsProvided")] =
             (context.clipboardBasename.has_value()
@@ -2250,6 +2510,14 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         QJsonObject sqDebug;
         sqDebug[QStringLiteral("cleanedQuery")] = structured.cleanedQuery;
         sqDebug[QStringLiteral("nluConfidence")] = static_cast<double>(structured.nluConfidence);
+        sqDebug[QStringLiteral("queryClass")] = queryClassToString(structured.queryClass);
+        sqDebug[QStringLiteral("queryClassConfidence")] =
+            static_cast<double>(structured.queryClassConfidence);
+        sqDebug[QStringLiteral("queryDomain")] = queryDomainToString(structured.queryDomain);
+        sqDebug[QStringLiteral("queryDomainConfidence")] =
+            static_cast<double>(structured.queryDomainConfidence);
+        sqDebug[QStringLiteral("semanticNeedScore")] =
+            static_cast<double>(structured.semanticNeedScore);
         if (structured.temporal) {
             QJsonObject temporal;
             temporal[QStringLiteral("startEpoch")] = structured.temporal->startEpoch;

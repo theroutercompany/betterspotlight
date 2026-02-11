@@ -34,6 +34,8 @@ struct ModelManifestEntry {
     QString poolingStrategy;
     QString semanticAggregationMode = QStringLiteral("max_softmax_cap");
     QString outputTransform;
+    QString latencyTier = QStringLiteral("balanced");
+    QString task;
     ModelProviderPolicy providerPolicy;
 };
 
