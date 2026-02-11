@@ -329,6 +329,7 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
     joinRebuildThreadIfNeeded();
 
     m_rebuildRunning.store(true);
+    m_rebuildAwaitingDrain.store(true);
     m_rebuildStartedAtMs.store(QDateTime::currentMSecsSinceEpoch());
     m_rebuildFinishedAtMs.store(0);
 
@@ -337,16 +338,6 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
         if (m_pipeline) {
             m_pipeline->rebuildAll(rebuildRoots);
         }
-        m_rebuildFinishedAtMs.store(QDateTime::currentMSecsSinceEpoch());
-        m_rebuildRunning.store(false);
-
-        QJsonObject params;
-        params[QStringLiteral("startedAtMs")] = m_rebuildStartedAtMs.load();
-        params[QStringLiteral("finishedAtMs")] = m_rebuildFinishedAtMs.load();
-        params[QStringLiteral("status")] = QStringLiteral("succeeded");
-        QMetaObject::invokeMethod(this, [this, params]() {
-            sendNotification(QStringLiteral("rebuildAllComplete"), params);
-        }, Qt::QueuedConnection);
     });
 
     LOG_INFO(bsIpc, "Rebuild all initiated");
@@ -405,6 +396,31 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
 
     QueueStats stats = m_pipeline->queueStatus();
     int processed = m_pipeline->processedCount();
+    const bool active = stats.depth > 0
+        || stats.activeItems > 0
+        || stats.preparing > 0
+        || stats.writing > 0;
+
+    if (m_lastQueueActive && !active) {
+        m_store->setSetting(QStringLiteral("last_full_index_at"),
+                            QString::number(QDateTime::currentSecsSinceEpoch()));
+    }
+    m_lastQueueActive = active;
+
+    if (m_rebuildRunning.load() && m_rebuildAwaitingDrain.load() && !active) {
+        bool expected = true;
+        if (m_rebuildAwaitingDrain.compare_exchange_strong(expected, false)) {
+            const qint64 finishedAtMs = QDateTime::currentMSecsSinceEpoch();
+            m_rebuildFinishedAtMs.store(finishedAtMs);
+            m_rebuildRunning.store(false);
+
+            QJsonObject params;
+            params[QStringLiteral("startedAtMs")] = m_rebuildStartedAtMs.load();
+            params[QStringLiteral("finishedAtMs")] = finishedAtMs;
+            params[QStringLiteral("status")] = QStringLiteral("succeeded");
+            sendNotification(QStringLiteral("rebuildAllComplete"), params);
+        }
+    }
 
     QJsonObject lastProgress;
     lastProgress[QStringLiteral("scanned")] = processed;

@@ -1575,12 +1575,13 @@ IndexHealth SQLiteStore::getHealth()
         sqlite3_finalize(stmt);
     }
 
-    // FTS index size: use database file page stats instead of scanning all rows.
-    // This is O(1) vs O(n) for SUM(length(chunk_text)).
+    // Database logical size: use allocated vs freelist page stats.
+    // This reports live-used bytes, not the on-disk file high-water mark.
     {
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(m_db,
-            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+            "SELECT (page_count - freelist_count) * page_size "
+            "FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()",
             -1, &stmt, nullptr);
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             health.ftsIndexSize = sqlite3_column_int64(stmt, 0);

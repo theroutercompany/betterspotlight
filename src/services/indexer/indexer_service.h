@@ -53,9 +53,11 @@ private:
 
     bool m_isIndexing = false;
     std::atomic<bool> m_rebuildRunning{false};
+    std::atomic<bool> m_rebuildAwaitingDrain{false};
     std::atomic<qint64> m_rebuildStartedAtMs{0};
     std::atomic<qint64> m_rebuildFinishedAtMs{0};
     std::thread m_rebuildThread;
+    bool m_lastQueueActive = false;
 
     // Stored roots for rebuild
     std::vector<std::string> m_currentRoots;
