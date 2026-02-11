@@ -476,23 +476,6 @@ Window {
                                 RowLayout {
                                     spacing: 12
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
-
-                                    Label { text: qsTr("Embedding model:"); font.pixelSize: 13; color: "#666666" }
-                                    Label { text: "BGE-small-en-v1.5"; font.pixelSize: 13; font.family: "Menlo"; color: "#1A1A1A" }
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 1
-                                    color: "#C0C0C0"
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
-                                }
-
-                                RowLayout {
-                                    spacing: 12
-                                    Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     Label {
                                         text: qsTr("Enable query router")
@@ -509,7 +492,6 @@ Window {
                                 RowLayout {
                                     spacing: 12
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     Label {
                                         text: qsTr("Enable fast embedding expert")
@@ -526,7 +508,6 @@ Window {
                                 RowLayout {
                                     spacing: 12
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     Label {
                                         text: qsTr("Enable dual-index semantic fusion")
@@ -543,7 +524,6 @@ Window {
                                 RowLayout {
                                     spacing: 12
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     Label {
                                         text: qsTr("Enable reranker cascade")
@@ -560,7 +540,6 @@ Window {
                                 RowLayout {
                                     spacing: 12
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     Label {
                                         text: qsTr("Enable personalized LTR")
@@ -577,7 +556,200 @@ Window {
                                 ColumnLayout {
                                     spacing: 4
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Query router min confidence")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController
+                                                  ? Number(settingsController.queryRouterMinConfidence).toFixed(2)
+                                                  : "0.45"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0.0
+                                        to: 1.0
+                                        stepSize: 0.01
+                                        value: settingsController ? settingsController.queryRouterMinConfidence : 0.45
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.queryRouterMinConfidence = value
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Strong embedding top-K")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.strongEmbeddingTopK.toString() : "40"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 10
+                                        to: 200
+                                        stepSize: 1
+                                        value: settingsController ? settingsController.strongEmbeddingTopK : 40
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.strongEmbeddingTopK = Math.round(value)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Fast embedding top-K")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.fastEmbeddingTopK.toString() : "60"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 10
+                                        to: 300
+                                        stepSize: 1
+                                        value: settingsController ? settingsController.fastEmbeddingTopK : 60
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.fastEmbeddingTopK = Math.round(value)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Reranker stage-1 max")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.rerankerStage1Max.toString() : "40"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 4
+                                        to: 200
+                                        stepSize: 1
+                                        value: settingsController ? settingsController.rerankerStage1Max : 40
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.rerankerStage1Max = Math.round(value)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Reranker stage-2 max")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.rerankerStage2Max.toString() : "12"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 4
+                                        to: 100
+                                        stepSize: 1
+                                        value: settingsController ? settingsController.rerankerStage2Max : 12
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.rerankerStage2Max = Math.round(value)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Enable answer snippet preview (QA-extractive)")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.qaSnippetEnabled : true
+                                        onToggled: { if (settingsController) settingsController.qaSnippetEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Enable automatic vector generation migration")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.autoVectorMigration : true
+                                        onToggled: { if (settingsController) settingsController.autoVectorMigration = checked }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
 
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -606,7 +778,6 @@ Window {
                                 ColumnLayout {
                                     spacing: 4
                                     Layout.fillWidth: true
-                                    visible: settingsController ? settingsController.embeddingEnabled : false
 
                                     RowLayout {
                                         Layout.fillWidth: true
@@ -630,6 +801,110 @@ Window {
                                         value: settingsController ? settingsController.rerankBudgetMs : 120
                                         onMoved: { if (settingsController) settingsController.rerankBudgetMs = value }
                                     }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("BM25 weight (name)")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? Number(settingsController.bm25WeightName).toFixed(2) : "10.00"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0
+                                        to: 30
+                                        stepSize: 0.1
+                                        value: settingsController ? settingsController.bm25WeightName : 10.0
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.bm25WeightName = value
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("BM25 weight (path)")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? Number(settingsController.bm25WeightPath).toFixed(2) : "5.00"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0
+                                        to: 30
+                                        stepSize: 0.1
+                                        value: settingsController ? settingsController.bm25WeightPath : 5.0
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.bm25WeightPath = value
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("BM25 weight (content)")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? Number(settingsController.bm25WeightContent).toFixed(2) : "1.00"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0
+                                        to: 10
+                                        stepSize: 0.05
+                                        value: settingsController ? settingsController.bm25WeightContent : 1.0
+                                        onMoved: {
+                                            if (settingsController) {
+                                                settingsController.bm25WeightContent = value
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: qsTr("All model/runtime behavior controls remain visible even when disabled. Runtime model inventory and effective wiring are shown in Index Health. BM25 weights are persisted immediately and apply to lexical ranking after next service/index reload.")
+                                    font.pixelSize: 11
+                                    color: "#666666"
+                                    wrapMode: Text.WordWrap
                                 }
                             }
                         }
@@ -666,6 +941,44 @@ Window {
                                     Label { text: qsTr("1 MB"); font.pixelSize: 11; color: "#999999" }
                                     Item { Layout.fillWidth: true }
                                     Label { text: qsTr("500 MB"); font.pixelSize: 11; color: "#999999" }
+                                }
+
+                                Rectangle { Layout.fillWidth: true; height: 1; color: "#C0C0C0" }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: qsTr("Extraction timeout")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Label {
+                                        text: {
+                                            var ms = extractionTimeoutSlider.value
+                                            if (ms < 1000) return Math.round(ms) + " ms"
+                                            return (ms / 1000).toFixed(1) + " s"
+                                        }
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                        color: "#1A1A1A"
+                                    }
+                                }
+
+                                Slider {
+                                    id: extractionTimeoutSlider
+                                    Layout.fillWidth: true
+                                    from: 1000
+                                    to: 120000
+                                    stepSize: 500
+                                    value: settingsController ? settingsController.extractionTimeoutMs : 30000
+                                    onMoved: {
+                                        if (settingsController) {
+                                            settingsController.extractionTimeoutMs = Math.round(value)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1344,8 +1657,8 @@ Window {
                                                     return qsTr("Unavailable")
                                                 }
                                                 var pid = serviceStats["pid"] || 0
-                                                var rss = Number(serviceStats["rssBytes"] || 0)
-                                                var cpu = Number(serviceStats["cpuPercent"] || 0)
+                                                var rss = Number(serviceStats["rssKb"] || 0) * 1024
+                                                var cpu = Number(serviceStats["cpuPct"] || 0)
                                                 var rssMb = (rss / (1024 * 1024)).toFixed(1)
                                                 return qsTr("PID %1  RSS %2 MB  CPU %3%")
                                                     .arg(pid)
@@ -1398,6 +1711,546 @@ Window {
                                               "timestamp")
                                     font.pixelSize: 12
                                     color: "#666666"
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Runtime Controls (Effective)")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Repeater {
+                                    model: [
+                                        { label: qsTr("Semantic Search Enabled"), key: "embeddingEnabled" },
+                                        { label: qsTr("Query Router Enabled"), key: "queryRouterEnabled" },
+                                        { label: qsTr("Query Router Min Confidence"), key: "queryRouterMinConfidence" },
+                                        { label: qsTr("Fast Embedding Enabled"), key: "fastEmbeddingEnabled" },
+                                        { label: qsTr("Dual-Index Fusion Enabled"), key: "dualEmbeddingFusionEnabled" },
+                                        { label: qsTr("Strong Embedding Top-K"), key: "strongEmbeddingTopK" },
+                                        { label: qsTr("Fast Embedding Top-K"), key: "fastEmbeddingTopK" },
+                                        { label: qsTr("Reranker Cascade Enabled"), key: "rerankerCascadeEnabled" },
+                                        { label: qsTr("Reranker Stage-1 Max"), key: "rerankerStage1Max" },
+                                        { label: qsTr("Reranker Stage-2 Max"), key: "rerankerStage2Max" },
+                                        { label: qsTr("Semantic Budget (ms)"), key: "semanticBudgetMs" },
+                                        { label: qsTr("Rerank Budget (ms)"), key: "rerankBudgetMs" },
+                                        { label: qsTr("Max File Size (MB)"), key: "maxFileSizeMB" },
+                                        { label: qsTr("Extraction Timeout (ms)"), key: "extractionTimeoutMs" },
+                                        { label: qsTr("BM25 Name Weight"), key: "bm25WeightName" },
+                                        { label: qsTr("BM25 Path Weight"), key: "bm25WeightPath" },
+                                        { label: qsTr("BM25 Content Weight"), key: "bm25WeightContent" },
+                                        { label: qsTr("Personalized LTR Enabled"), key: "personalizedLtrEnabled" },
+                                        { label: qsTr("QA Snippet Enabled"), key: "qaSnippetEnabled" },
+                                        { label: qsTr("Auto Vector Migration"), key: "autoVectorMigration" },
+                                        { label: qsTr("Semantic Threshold NL Base"), key: "semanticThresholdNaturalLanguageBase" },
+                                        { label: qsTr("Semantic Threshold Short Base"), key: "semanticThresholdShortAmbiguousBase" },
+                                        { label: qsTr("Semantic Threshold Path/Code Base"), key: "semanticThresholdPathOrCodeBase" },
+                                        { label: qsTr("Semantic Threshold Need Scale"), key: "semanticThresholdNeedScale" },
+                                        { label: qsTr("Semantic Threshold Min"), key: "semanticThresholdMin" },
+                                        { label: qsTr("Semantic Threshold Max"), key: "semanticThresholdMax" },
+                                        { label: qsTr("Semantic-Only Floor NL"), key: "semanticOnlyFloorNaturalLanguage" },
+                                        { label: qsTr("Semantic-Only Floor Short"), key: "semanticOnlyFloorShortAmbiguous" },
+                                        { label: qsTr("Semantic-Only Floor Path/Code"), key: "semanticOnlyFloorPathOrCode" },
+                                        { label: qsTr("Strict Lexical Weak Cutoff"), key: "strictLexicalWeakCutoff" },
+                                        { label: qsTr("Semantic-Only Cap NL Weak"), key: "semanticOnlyCapNaturalLanguageWeak" },
+                                        { label: qsTr("Semantic-Only Cap NL Strong"), key: "semanticOnlyCapNaturalLanguageStrong" },
+                                        { label: qsTr("Semantic-Only Cap Short"), key: "semanticOnlyCapShortAmbiguous" },
+                                        { label: qsTr("Semantic-Only Cap Path/Code"), key: "semanticOnlyCapPathOrCode" },
+                                        { label: qsTr("Semantic-Only Cap Path/Code Divisor"), key: "semanticOnlyCapPathOrCodeDivisor" },
+                                        { label: qsTr("Merge Lexical NL Weak"), key: "mergeLexicalWeightNaturalLanguageWeak" },
+                                        { label: qsTr("Merge Semantic NL Weak"), key: "mergeSemanticWeightNaturalLanguageWeak" },
+                                        { label: qsTr("Merge Lexical NL Strong"), key: "mergeLexicalWeightNaturalLanguageStrong" },
+                                        { label: qsTr("Merge Semantic NL Strong"), key: "mergeSemanticWeightNaturalLanguageStrong" },
+                                        { label: qsTr("Merge Lexical Path/Code"), key: "mergeLexicalWeightPathOrCode" },
+                                        { label: qsTr("Merge Semantic Path/Code"), key: "mergeSemanticWeightPathOrCode" },
+                                        { label: qsTr("Merge Lexical Short"), key: "mergeLexicalWeightShortAmbiguous" },
+                                        { label: qsTr("Merge Semantic Short"), key: "mergeSemanticWeightShortAmbiguous" },
+                                        { label: qsTr("Semantic Safety Weak NL"), key: "semanticOnlySafetySimilarityWeakNatural" },
+                                        { label: qsTr("Semantic Safety Default"), key: "semanticOnlySafetySimilarityDefault" },
+                                        { label: qsTr("Relaxed Semantic Delta Weak NL"), key: "relaxedSemanticOnlyDeltaWeakNatural" },
+                                        { label: qsTr("Relaxed Semantic Delta Default"), key: "relaxedSemanticOnlyDeltaDefault" },
+                                        { label: qsTr("Relaxed Semantic Min Weak NL"), key: "relaxedSemanticOnlyMinWeakNatural" },
+                                        { label: qsTr("Relaxed Semantic Min Default"), key: "relaxedSemanticOnlyMinDefault" },
+                                        { label: qsTr("Semantic Passage Cap NL"), key: "semanticPassageCapNaturalLanguage" },
+                                        { label: qsTr("Semantic Passage Cap Other"), key: "semanticPassageCapOther" },
+                                        { label: qsTr("Semantic Softmax Temp NL"), key: "semanticSoftmaxTemperatureNaturalLanguage" },
+                                        { label: qsTr("Semantic Softmax Temp Other"), key: "semanticSoftmaxTemperatureOther" },
+                                        { label: qsTr("Reranker Stage1 Weight Scale"), key: "rerankerStage1WeightScale" },
+                                        { label: qsTr("Reranker Stage1 Min Weight"), key: "rerankerStage1MinWeight" },
+                                        { label: qsTr("Reranker Stage2 Weight Scale"), key: "rerankerStage2WeightScale" },
+                                        { label: qsTr("Reranker Ambiguity Margin"), key: "rerankerAmbiguityMarginThreshold" },
+                                        { label: qsTr("Reranker Fallback Elapsed @80"), key: "rerankerFallbackElapsed80Ms" },
+                                        { label: qsTr("Reranker Fallback Elapsed @130"), key: "rerankerFallbackElapsed130Ms" },
+                                        { label: qsTr("Reranker Fallback Elapsed @180"), key: "rerankerFallbackElapsed180Ms" },
+                                        { label: qsTr("Reranker Fallback Cap Default"), key: "rerankerFallbackCapDefault" },
+                                        { label: qsTr("Reranker Fallback Cap @80"), key: "rerankerFallbackCapElapsed80" },
+                                        { label: qsTr("Reranker Fallback Cap @130"), key: "rerankerFallbackCapElapsed130" },
+                                        { label: qsTr("Reranker Fallback Cap @180"), key: "rerankerFallbackCapElapsed180" },
+                                        { label: qsTr("Reranker Fallback Budget Cap"), key: "rerankerFallbackBudgetCap" }
+                                    ]
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 12
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 12
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 220
+                                        }
+                                        Label {
+                                            property var runtimeSettings: (healthTab.healthData["runtimeSettings"] || {})
+                                            text: {
+                                                var v = runtimeSettings[modelData.key]
+                                                if (v === undefined || v === null) return "--"
+                                                if (typeof v === "boolean") return v ? "true" : "false"
+                                                if (typeof v === "number") {
+                                                    if (Math.abs(v - Math.round(v)) < 0.0001) {
+                                                        return Math.round(v).toString()
+                                                    }
+                                                    return Number(v).toFixed(2)
+                                                }
+                                                return String(v)
+                                            }
+                                            font.pixelSize: 12
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Runtime Components")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Repeater {
+                                    model: [
+                                        { label: qsTr("Query Router Runtime Mode"), key: "queryRouterRuntimeMode" },
+                                        { label: qsTr("Query Router Model Declared"), key: "queryRouterModelDeclared" },
+                                        { label: qsTr("Query Router Model Active"), key: "queryRouterModelActive" },
+                                        { label: qsTr("Strong Embedding Available"), key: "embeddingStrongAvailable" },
+                                        { label: qsTr("Strong Embedding Model ID"), key: "embeddingStrongModelId" },
+                                        { label: qsTr("Strong Embedding Provider"), key: "embeddingStrongProvider" },
+                                        { label: qsTr("Strong Embedding Generation"), key: "embeddingStrongGeneration" },
+                                        { label: qsTr("Fast Embedding Available"), key: "embeddingFastAvailable" },
+                                        { label: qsTr("Fast Embedding Model ID"), key: "embeddingFastModelId" },
+                                        { label: qsTr("Fast Embedding Provider"), key: "embeddingFastProvider" },
+                                        { label: qsTr("Fast Embedding Generation"), key: "embeddingFastGeneration" },
+                                        { label: qsTr("Fast Cross-Encoder Available"), key: "crossEncoderFastAvailable" },
+                                        { label: qsTr("Strong Cross-Encoder Available"), key: "crossEncoderStrongAvailable" },
+                                        { label: qsTr("Personalized LTR Available"), key: "personalizedLtrAvailable" },
+                                        { label: qsTr("Personalized LTR Model Version"), key: "personalizedLtrModelVersion" },
+                                        { label: qsTr("QA Extractive Available"), key: "qaExtractiveAvailable" },
+                                        { label: qsTr("QA Preview Mode"), key: "qaPreviewMode" },
+                                        { label: qsTr("Vector Store Available"), key: "vectorStoreAvailable" },
+                                        { label: qsTr("Strong Vector Index Available"), key: "vectorIndexStrongAvailable" },
+                                        { label: qsTr("Fast Vector Index Available"), key: "vectorIndexFastAvailable" },
+                                        { label: qsTr("Model Registry Initialized"), key: "modelRegistryInitialized" }
+                                    ]
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 12
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 12
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 230
+                                        }
+                                        Label {
+                                            property var runtimeComponents: (healthTab.healthData["runtimeComponents"] || {})
+                                            text: {
+                                                var v = runtimeComponents[modelData.key]
+                                                if (v === undefined || v === null) return "--"
+                                                if (typeof v === "boolean") return v ? "true" : "false"
+                                                return String(v)
+                                            }
+                                            font.pixelSize: 12
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Model Manifest Inventory")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Label {
+                                    text: qsTr("Models Directory: ") + (healthTab.healthData["modelsDirResolved"] || "--")
+                                    font.pixelSize: 12
+                                    color: "#1A1A1A"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideMiddle
+                                }
+                                Label {
+                                    text: qsTr("Manifest Path: ") + (healthTab.healthData["manifestPathResolved"] || "--")
+                                    font.pixelSize: 12
+                                    color: "#1A1A1A"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideMiddle
+                                }
+                                Label {
+                                    text: qsTr("Manifest Present: ")
+                                          + ((healthTab.healthData["manifestPresent"] === true) ? qsTr("Yes") : qsTr("No"))
+                                    font.pixelSize: 12
+                                    color: (healthTab.healthData["manifestPresent"] === true) ? "#2E7D32" : "#C62828"
+                                }
+
+                                Repeater {
+                                    model: healthTab.healthData["modelManifest"] || []
+
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        color: {
+                                            var state = modelData.runtimeState || ""
+                                            if (state === "active") return "#E8F5E9"
+                                            if (state === "available_not_selected" || state === "inactive") return "#FFF8E1"
+                                            if (state === "unavailable") return "#FFEBEE"
+                                            return "#F4F4F4"
+                                        }
+                                        border.color: "#D0D0D0"
+                                        border.width: 1
+                                        radius: 4
+                                        implicitHeight: entryLayout.implicitHeight + 12
+
+                                        ColumnLayout {
+                                            id: entryLayout
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            spacing: 4
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+                                                Label {
+                                                    text: (modelData.role || "--")
+                                                    font.pixelSize: 12
+                                                    font.family: "Menlo"
+                                                    font.weight: Font.DemiBold
+                                                    color: "#1A1A1A"
+                                                    Layout.preferredWidth: 210
+                                                }
+                                                Label {
+                                                    text: qsTr("%1 | %2").arg(modelData.task || "unknown").arg(modelData.latencyTier || "unknown")
+                                                    font.pixelSize: 11
+                                                    color: "#666666"
+                                                    Layout.preferredWidth: 150
+                                                }
+                                                Label {
+                                                    text: modelData.runtimeState || "--"
+                                                    font.pixelSize: 11
+                                                    color: (modelData.runtimeState === "active") ? "#2E7D32"
+                                                         : ((modelData.runtimeState === "unavailable") ? "#C62828" : "#8A4B00")
+                                                    Layout.fillWidth: true
+                                                    horizontalAlignment: Text.AlignRight
+                                                }
+                                            }
+
+                                            Label {
+                                                text: qsTr("Name: %1    Model ID: %2    Generation: %3")
+                                                    .arg(modelData.name || "--")
+                                                    .arg(modelData.modelId || "--")
+                                                    .arg(modelData.generationId || "--")
+                                                font.pixelSize: 11
+                                                color: "#1A1A1A"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                            Label {
+                                                text: qsTr("File: %1").arg(modelData.modelPath || "--")
+                                                font.pixelSize: 11
+                                                color: "#1A1A1A"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                            Label {
+                                                text: qsTr("File Exists: %1    Readable: %2    Size: %3")
+                                                    .arg(modelData.modelExists ? "true" : "false")
+                                                    .arg(modelData.modelReadable ? "true" : "false")
+                                                    .arg(formatHealthValue({size: modelData.modelSizeBytes || 0}, "size", "bytes"))
+                                                font.pixelSize: 11
+                                                color: (modelData.modelExists && modelData.modelReadable) ? "#2E7D32" : "#C62828"
+                                                Layout.fillWidth: true
+                                            }
+                                            Label {
+                                                text: qsTr("Fallback Role: %1    Tokenizer: %2    Max Seq: %3    Dimensions: %4")
+                                                    .arg(modelData.fallbackRole || "--")
+                                                    .arg(modelData.tokenizer || "--")
+                                                    .arg(Number(modelData.maxSeqLength || 0).toLocaleString())
+                                                    .arg(Number(modelData.dimensions || 0).toLocaleString())
+                                                font.pixelSize: 11
+                                                color: "#666666"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                            Label {
+                                                visible: (modelData.runtimeReason || "").length > 0
+                                                text: qsTr("Runtime Reason: ") + (modelData.runtimeReason || "")
+                                                font.pixelSize: 11
+                                                color: "#8A4B00"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: !(healthTab.healthData["modelManifest"] || []).length
+                                    text: qsTr("No manifest entries available.")
+                                    font.pixelSize: 11
+                                    color: "#999999"
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Environment Overrides")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                Repeater {
+                                    model: healthTab.healthData["environmentKnown"] || []
+
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        color: modelData.isSet ? "#E3F2FD" : "#F9F9F9"
+                                        border.color: "#D0D0D0"
+                                        border.width: 1
+                                        radius: 4
+                                        implicitHeight: envLayout.implicitHeight + 10
+
+                                        ColumnLayout {
+                                            id: envLayout
+                                            anchors.fill: parent
+                                            anchors.margins: 5
+                                            spacing: 3
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label {
+                                                    text: modelData.key || "--"
+                                                    font.family: "Menlo"
+                                                    font.pixelSize: 11
+                                                    font.weight: Font.DemiBold
+                                                    color: "#1A1A1A"
+                                                    Layout.fillWidth: true
+                                                }
+                                                Label {
+                                                    text: modelData.isSet ? qsTr("set") : qsTr("default")
+                                                    font.pixelSize: 10
+                                                    color: modelData.isSet ? "#1565C0" : "#777777"
+                                                }
+                                            }
+                                            Label {
+                                                text: modelData.description || ""
+                                                font.pixelSize: 11
+                                                color: "#666666"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                            Label {
+                                                text: qsTr("Effective: %1").arg(modelData.effectiveValue || "--")
+                                                font.pixelSize: 11
+                                                color: "#1A1A1A"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                            Label {
+                                                visible: modelData.isSet
+                                                text: qsTr("Raw: %1").arg(modelData.value || "")
+                                                font.pixelSize: 10
+                                                color: "#777777"
+                                                Layout.fillWidth: true
+                                                wrapMode: Text.WrapAnywhere
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    text: qsTr("Detected BETTERSPOTLIGHT_* keys in current process environment:")
+                                    font.pixelSize: 11
+                                    color: "#666666"
+                                }
+
+                                Repeater {
+                                    model: healthTab.healthData["environmentAll"] || []
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 8
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: modelData.key || "--"
+                                            font.family: "Menlo"
+                                            font.pixelSize: 10
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 330
+                                            elide: Text.ElideRight
+                                        }
+                                        Label {
+                                            text: modelData.value || ""
+                                            font.pixelSize: 10
+                                            color: "#666666"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideMiddle
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: !(healthTab.healthData["environmentAll"] || []).length
+                                    text: qsTr("No BETTERSPOTLIGHT_* environment variables detected.")
+                                    font.pixelSize: 11
+                                    color: "#999999"
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            Layout.fillWidth: true
+                            title: qsTr("Raw Runtime Settings (DB)")
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 6
+
+                                Repeater {
+                                    model: {
+                                        var raw = healthTab.healthData["runtimeSettingsRaw"] || {}
+                                        return Object.keys(raw).sort()
+                                    }
+
+                                    delegate: RowLayout {
+                                        required property var modelData
+                                        spacing: 8
+                                        Layout.fillWidth: true
+
+                                        Label {
+                                            text: modelData + ":"
+                                            font.pixelSize: 11
+                                            font.family: "Menlo"
+                                            color: "#1A1A1A"
+                                            Layout.preferredWidth: 260
+                                            elide: Text.ElideRight
+                                        }
+                                        Label {
+                                            property var raw: (healthTab.healthData["runtimeSettingsRaw"] || {})
+                                            text: (raw[modelData] === undefined || raw[modelData] === null)
+                                                  ? "--"
+                                                  : String(raw[modelData])
+                                            font.pixelSize: 11
+                                            color: "#666666"
+                                            Layout.fillWidth: true
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: {
+                                        var raw = healthTab.healthData["runtimeSettingsRaw"] || {}
+                                        return Object.keys(raw).length === 0
+                                    }
+                                    text: qsTr("No runtime settings found in DB.")
+                                    font.pixelSize: 11
+                                    color: "#999999"
+                                }
+
+                                Rectangle { Layout.fillWidth: true; height: 1; color: "#C0C0C0" }
+
+                                Label {
+                                    text: qsTr("Advanced runtime override (writes directly to settings table)")
+                                    font.pixelSize: 11
+                                    color: "#666666"
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    TextField {
+                                        id: runtimeSettingKeyField
+                                        Layout.preferredWidth: 220
+                                        placeholderText: qsTr("setting key")
+                                        font.pixelSize: 11
+                                        font.family: "Menlo"
+                                    }
+
+                                    TextField {
+                                        id: runtimeSettingValueField
+                                        Layout.fillWidth: true
+                                        placeholderText: qsTr("setting value")
+                                        font.pixelSize: 11
+                                        font.family: "Menlo"
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Button {
+                                        text: qsTr("Set / Update")
+                                        enabled: runtimeSettingKeyField.text.trim().length > 0
+                                        onClicked: {
+                                            if (!settingsController) return
+                                            var key = runtimeSettingKeyField.text.trim()
+                                            var value = runtimeSettingValueField.text
+                                            var ok = settingsController.setRuntimeSetting(key, value)
+                                            if (ok) {
+                                                healthTab.setActionStatus(qsTr("Updated runtime setting: %1").arg(key), false)
+                                                healthTab.refreshHealth()
+                                            } else {
+                                                healthTab.setActionStatus(qsTr("Failed to update runtime setting."), true)
+                                            }
+                                        }
+                                    }
+
+                                    Button {
+                                        text: qsTr("Remove")
+                                        enabled: runtimeSettingKeyField.text.trim().length > 0
+                                        onClicked: {
+                                            if (!settingsController) return
+                                            var key = runtimeSettingKeyField.text.trim()
+                                            var ok = settingsController.removeRuntimeSetting(key)
+                                            if (ok) {
+                                                healthTab.setActionStatus(qsTr("Removed runtime setting: %1").arg(key), false)
+                                                healthTab.refreshHealth()
+                                            } else {
+                                                healthTab.setActionStatus(qsTr("Failed to remove runtime setting."), true)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1541,10 +2394,7 @@ Window {
                                     Button { text: qsTr("Rebuild All"); onClicked: rebuildAllDialog.open() }
                                     Button {
                                         text: qsTr("Rebuild Vector Index")
-                                        enabled: settingsController
-                                                 ? (settingsController.embeddingEnabled
-                                                    && !healthTab.vectorRebuildRunning)
-                                                 : false
+                                        enabled: !healthTab.vectorRebuildRunning
                                         onClicked: rebuildVectorDialog.open()
                                     }
                                     Button { text: qsTr("Clear Cache"); onClicked: clearCacheDialog.open() }

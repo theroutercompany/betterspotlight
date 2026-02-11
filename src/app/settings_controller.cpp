@@ -15,6 +15,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace bs {
 
@@ -161,18 +162,42 @@ void syncRuntimeSettingsToDb(const QJsonObject& settings)
                   boolToSqlValue(settings.value(QStringLiteral("embeddingEnabled")).toBool(true)));
     upsertSetting(db, QStringLiteral("queryRouterEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("queryRouterEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("queryRouterMinConfidence"),
+                  QString::number(settings.value(QStringLiteral("queryRouterMinConfidence")).toDouble(0.45), 'f', 2));
     upsertSetting(db, QStringLiteral("fastEmbeddingEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true)));
     upsertSetting(db, QStringLiteral("dualEmbeddingFusionEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("strongEmbeddingTopK"),
+                  QString::number(settings.value(QStringLiteral("strongEmbeddingTopK")).toInt(40)));
+    upsertSetting(db, QStringLiteral("fastEmbeddingTopK"),
+                  QString::number(settings.value(QStringLiteral("fastEmbeddingTopK")).toInt(60)));
     upsertSetting(db, QStringLiteral("rerankerCascadeEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("rerankerStage1Max"),
+                  QString::number(settings.value(QStringLiteral("rerankerStage1Max")).toInt(40)));
+    upsertSetting(db, QStringLiteral("rerankerStage2Max"),
+                  QString::number(settings.value(QStringLiteral("rerankerStage2Max")).toInt(12)));
+    upsertSetting(db, QStringLiteral("autoVectorMigration"),
+                  boolToSqlValue(settings.value(QStringLiteral("autoVectorMigration")).toBool(true)));
+    upsertSetting(db, QStringLiteral("bm25WeightName"),
+                  QString::number(settings.value(QStringLiteral("bm25WeightName")).toDouble(10.0), 'g', 17));
+    upsertSetting(db, QStringLiteral("bm25WeightPath"),
+                  QString::number(settings.value(QStringLiteral("bm25WeightPath")).toDouble(5.0), 'g', 17));
+    upsertSetting(db, QStringLiteral("bm25WeightContent"),
+                  QString::number(settings.value(QStringLiteral("bm25WeightContent")).toDouble(1.0), 'g', 17));
+    upsertSetting(db, QStringLiteral("qaSnippetEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("qaSnippetEnabled")).toBool(true)));
     upsertSetting(db, QStringLiteral("personalizedLtrEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true)));
     upsertSetting(db, QStringLiteral("semanticBudgetMs"),
                   QString::number(settings.value(QStringLiteral("semanticBudgetMs")).toInt(70)));
     upsertSetting(db, QStringLiteral("rerankBudgetMs"),
                   QString::number(settings.value(QStringLiteral("rerankBudgetMs")).toInt(120)));
+    upsertSetting(db, QStringLiteral("max_file_size"),
+                  QString::number(settings.value(QStringLiteral("maxFileSizeMB")).toInt(50) * 1024 * 1024));
+    upsertSetting(db, QStringLiteral("extraction_timeout_ms"),
+                  QString::number(settings.value(QStringLiteral("extractionTimeoutMs")).toInt(30000)));
     sqlite3_close(db);
 }
 
@@ -266,6 +291,56 @@ bool SettingsController::personalizedLtrEnabled() const
     return m_settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true);
 }
 
+double SettingsController::queryRouterMinConfidence() const
+{
+    return m_settings.value(QStringLiteral("queryRouterMinConfidence")).toDouble(0.45);
+}
+
+int SettingsController::strongEmbeddingTopK() const
+{
+    return m_settings.value(QStringLiteral("strongEmbeddingTopK")).toInt(40);
+}
+
+int SettingsController::fastEmbeddingTopK() const
+{
+    return m_settings.value(QStringLiteral("fastEmbeddingTopK")).toInt(60);
+}
+
+int SettingsController::rerankerStage1Max() const
+{
+    return m_settings.value(QStringLiteral("rerankerStage1Max")).toInt(40);
+}
+
+int SettingsController::rerankerStage2Max() const
+{
+    return m_settings.value(QStringLiteral("rerankerStage2Max")).toInt(12);
+}
+
+bool SettingsController::autoVectorMigration() const
+{
+    return m_settings.value(QStringLiteral("autoVectorMigration")).toBool(true);
+}
+
+double SettingsController::bm25WeightName() const
+{
+    return m_settings.value(QStringLiteral("bm25WeightName")).toDouble(10.0);
+}
+
+double SettingsController::bm25WeightPath() const
+{
+    return m_settings.value(QStringLiteral("bm25WeightPath")).toDouble(5.0);
+}
+
+double SettingsController::bm25WeightContent() const
+{
+    return m_settings.value(QStringLiteral("bm25WeightContent")).toDouble(1.0);
+}
+
+bool SettingsController::qaSnippetEnabled() const
+{
+    return m_settings.value(QStringLiteral("qaSnippetEnabled")).toBool(true);
+}
+
 int SettingsController::semanticBudgetMs() const
 {
     return m_settings.value(QStringLiteral("semanticBudgetMs")).toInt(70);
@@ -279,6 +354,11 @@ int SettingsController::rerankBudgetMs() const
 int SettingsController::maxFileSizeMB() const
 {
     return m_settings.value(QStringLiteral("maxFileSizeMB")).toInt(50);
+}
+
+int SettingsController::extractionTimeoutMs() const
+{
+    return m_settings.value(QStringLiteral("extractionTimeoutMs")).toInt(30000);
 }
 
 QStringList SettingsController::userPatterns() const
@@ -518,6 +598,124 @@ void SettingsController::setPersonalizedLtrEnabled(bool enabled)
     emit settingsChanged(QStringLiteral("personalizedLtrEnabled"));
 }
 
+void SettingsController::setQueryRouterMinConfidence(double value)
+{
+    const double clamped = std::clamp(value, 0.0, 1.0);
+    if (std::abs(queryRouterMinConfidence() - clamped) < 0.0001) {
+        return;
+    }
+    m_settings[QStringLiteral("queryRouterMinConfidence")] = clamped;
+    saveSettings();
+    emit queryRouterMinConfidenceChanged();
+    emit settingsChanged(QStringLiteral("queryRouterMinConfidence"));
+}
+
+void SettingsController::setStrongEmbeddingTopK(int value)
+{
+    const int clamped = std::clamp(value, 1, 200);
+    if (strongEmbeddingTopK() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("strongEmbeddingTopK")] = clamped;
+    saveSettings();
+    emit strongEmbeddingTopKChanged();
+    emit settingsChanged(QStringLiteral("strongEmbeddingTopK"));
+}
+
+void SettingsController::setFastEmbeddingTopK(int value)
+{
+    const int clamped = std::clamp(value, 1, 300);
+    if (fastEmbeddingTopK() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("fastEmbeddingTopK")] = clamped;
+    saveSettings();
+    emit fastEmbeddingTopKChanged();
+    emit settingsChanged(QStringLiteral("fastEmbeddingTopK"));
+}
+
+void SettingsController::setRerankerStage1Max(int value)
+{
+    const int clamped = std::clamp(value, 4, 200);
+    if (rerankerStage1Max() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("rerankerStage1Max")] = clamped;
+    saveSettings();
+    emit rerankerStage1MaxChanged();
+    emit settingsChanged(QStringLiteral("rerankerStage1Max"));
+}
+
+void SettingsController::setRerankerStage2Max(int value)
+{
+    const int clamped = std::clamp(value, 4, 100);
+    if (rerankerStage2Max() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("rerankerStage2Max")] = clamped;
+    saveSettings();
+    emit rerankerStage2MaxChanged();
+    emit settingsChanged(QStringLiteral("rerankerStage2Max"));
+}
+
+void SettingsController::setAutoVectorMigration(bool enabled)
+{
+    if (autoVectorMigration() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("autoVectorMigration")] = enabled;
+    saveSettings();
+    emit autoVectorMigrationChanged();
+    emit settingsChanged(QStringLiteral("autoVectorMigration"));
+}
+
+void SettingsController::setBm25WeightName(double value)
+{
+    const double clamped = std::max(0.0, value);
+    if (std::abs(bm25WeightName() - clamped) < 0.0001) {
+        return;
+    }
+    m_settings[QStringLiteral("bm25WeightName")] = clamped;
+    saveSettings();
+    emit bm25WeightNameChanged();
+    emit settingsChanged(QStringLiteral("bm25WeightName"));
+}
+
+void SettingsController::setBm25WeightPath(double value)
+{
+    const double clamped = std::max(0.0, value);
+    if (std::abs(bm25WeightPath() - clamped) < 0.0001) {
+        return;
+    }
+    m_settings[QStringLiteral("bm25WeightPath")] = clamped;
+    saveSettings();
+    emit bm25WeightPathChanged();
+    emit settingsChanged(QStringLiteral("bm25WeightPath"));
+}
+
+void SettingsController::setBm25WeightContent(double value)
+{
+    const double clamped = std::max(0.0, value);
+    if (std::abs(bm25WeightContent() - clamped) < 0.0001) {
+        return;
+    }
+    m_settings[QStringLiteral("bm25WeightContent")] = clamped;
+    saveSettings();
+    emit bm25WeightContentChanged();
+    emit settingsChanged(QStringLiteral("bm25WeightContent"));
+}
+
+void SettingsController::setQaSnippetEnabled(bool enabled)
+{
+    if (qaSnippetEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("qaSnippetEnabled")] = enabled;
+    saveSettings();
+    emit qaSnippetEnabledChanged();
+    emit settingsChanged(QStringLiteral("qaSnippetEnabled"));
+}
+
 void SettingsController::setSemanticBudgetMs(int ms)
 {
     const int clamped = std::clamp(ms, 20, 500);
@@ -552,6 +750,18 @@ void SettingsController::setMaxFileSizeMB(int mb)
     saveSettings();
     emit maxFileSizeMBChanged();
     emit settingsChanged(QStringLiteral("maxFileSizeMB"));
+}
+
+void SettingsController::setExtractionTimeoutMs(int ms)
+{
+    const int clamped = std::clamp(ms, 1000, 120000);
+    if (extractionTimeoutMs() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("extractionTimeoutMs")] = clamped;
+    saveSettings();
+    emit extractionTimeoutMsChanged();
+    emit settingsChanged(QStringLiteral("extractionTimeoutMs"));
 }
 
 void SettingsController::setUserPatterns(const QStringList& patterns)
@@ -747,6 +957,64 @@ void SettingsController::reindexFolder(const QString& folderPath)
     emit reindexFolderRequested(folderPath);
 }
 
+bool SettingsController::setRuntimeSetting(const QString& key, const QString& value)
+{
+    const QString normalizedKey = key.trimmed();
+    if (normalizedKey.isEmpty()) {
+        return false;
+    }
+
+    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                           + QStringLiteral("/betterspotlight/index.db");
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    upsertSetting(db, normalizedKey, value);
+    sqlite3_close(db);
+    emit settingsChanged(normalizedKey);
+    return true;
+}
+
+bool SettingsController::removeRuntimeSetting(const QString& key)
+{
+    const QString normalizedKey = key.trimmed();
+    if (normalizedKey.isEmpty()) {
+        return false;
+    }
+
+    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                           + QStringLiteral("/betterspotlight/index.db");
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    static constexpr const char* kDeleteSql = "DELETE FROM settings WHERE key = ?1";
+    sqlite3_stmt* stmt = nullptr;
+    bool ok = false;
+    if (sqlite3_prepare_v2(db, kDeleteSql, -1, &stmt, nullptr) == SQLITE_OK) {
+        const QByteArray keyUtf8 = normalizedKey.toUtf8();
+        sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+        ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    if (ok) {
+        emit settingsChanged(normalizedKey);
+    }
+    return ok;
+}
+
 void SettingsController::loadSettings()
 {
     QFile file(settingsFilePath());
@@ -785,9 +1053,20 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("dualEmbeddingFusionEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("rerankerCascadeEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("personalizedLtrEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("queryRouterMinConfidence"), 0.45);
+    ensureDefault(m_settings, QStringLiteral("strongEmbeddingTopK"), 40);
+    ensureDefault(m_settings, QStringLiteral("fastEmbeddingTopK"), 60);
+    ensureDefault(m_settings, QStringLiteral("rerankerStage1Max"), 40);
+    ensureDefault(m_settings, QStringLiteral("rerankerStage2Max"), 12);
+    ensureDefault(m_settings, QStringLiteral("autoVectorMigration"), true);
+    ensureDefault(m_settings, QStringLiteral("bm25WeightName"), 10.0);
+    ensureDefault(m_settings, QStringLiteral("bm25WeightPath"), 5.0);
+    ensureDefault(m_settings, QStringLiteral("bm25WeightContent"), 1.0);
+    ensureDefault(m_settings, QStringLiteral("qaSnippetEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("semanticBudgetMs"), 70);
     ensureDefault(m_settings, QStringLiteral("rerankBudgetMs"), 120);
     ensureDefault(m_settings, QStringLiteral("maxFileSizeMB"), 50);
+    ensureDefault(m_settings, QStringLiteral("extractionTimeoutMs"), 30000);
     ensureDefault(m_settings, QStringLiteral("userPatterns"), QJsonArray{});
     ensureDefault(m_settings, QStringLiteral("enableFeedbackLogging"), true);
     ensureDefault(m_settings, QStringLiteral("enableInteractionTracking"), true);

@@ -47,6 +47,7 @@
 #include <cmath>
 #include <sys/types.h>
 #include <unistd.h>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -235,6 +236,15 @@ bool shouldApplyConsumerPrefilter(const QString& queryLower,
     // Consumer-first default for phrase-like lookups while still avoiding
     // obvious code/path-style queries.
     return querySignalTokens.size() >= 2 || queryTokensRaw.size() >= 3;
+}
+
+bool envFlagEnabled(const QString& raw)
+{
+    const QString normalized = raw.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
 }
 
 QueryClass classifyQueryShape(const QString& queryLower,
@@ -1217,6 +1227,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return ok ? parsed : defaultValue;
     };
 
+    const bool embeddingEnabled = readBoolSetting(QStringLiteral("embeddingEnabled"), true);
     const bool queryRouterEnabled = readBoolSetting(QStringLiteral("queryRouterEnabled"), true);
     const double queryRouterMinConfidence =
         std::clamp(readDoubleSetting(QStringLiteral("queryRouterMinConfidence"), 0.45), 0.0, 1.0);
@@ -1231,6 +1242,100 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const int rerankerStage1Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage1Max"), 40));
     const int rerankerStage2Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage2Max"), 12));
     const bool personalizedLtrEnabled = readBoolSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    const double semanticThresholdNaturalLanguageBase = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdNaturalLanguageBase"), 0.62), 0.0, 1.0);
+    const double semanticThresholdShortAmbiguousBase = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdShortAmbiguousBase"), 0.66), 0.0, 1.0);
+    const double semanticThresholdPathOrCodeBase = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdPathOrCodeBase"), 0.70), 0.0, 1.0);
+    const double semanticThresholdNeedScale = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdNeedScale"), 0.06), 0.0, 1.0);
+    const double semanticThresholdMin = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdMin"), 0.55), 0.0, 1.0);
+    const double semanticThresholdMax = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticThresholdMax"), 0.80),
+        semanticThresholdMin,
+        1.0);
+    const double semanticOnlyFloorNaturalLanguage = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticOnlyFloorNaturalLanguage"), 0.08), 0.0, 1.0);
+    const double semanticOnlyFloorShortAmbiguous = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticOnlyFloorShortAmbiguous"), 0.10), 0.0, 1.0);
+    const double semanticOnlyFloorPathOrCode = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticOnlyFloorPathOrCode"), 0.15), 0.0, 1.0);
+    const double strictLexicalWeakCutoff = std::max(
+        0.0, readDoubleSetting(QStringLiteral("strictLexicalWeakCutoff"), 2.0));
+    const int semanticOnlyCapNaturalLanguageWeak = std::max(
+        1, readIntSetting(QStringLiteral("semanticOnlyCapNaturalLanguageWeak"), 8));
+    const int semanticOnlyCapNaturalLanguageStrong = std::max(
+        1, readIntSetting(QStringLiteral("semanticOnlyCapNaturalLanguageStrong"), 6));
+    const int semanticOnlyCapShortAmbiguous = std::max(
+        1, readIntSetting(QStringLiteral("semanticOnlyCapShortAmbiguous"), 4));
+    const int semanticOnlyCapPathOrCode = std::max(
+        1, readIntSetting(QStringLiteral("semanticOnlyCapPathOrCode"), 3));
+    const int semanticOnlyCapPathOrCodeDivisor = std::max(
+        1, readIntSetting(QStringLiteral("semanticOnlyCapPathOrCodeDivisor"), 2));
+    const double mergeLexicalWeightNaturalLanguageWeak = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeLexicalWeightNaturalLanguageWeak"), 0.45), 0.0, 1.0);
+    const double mergeSemanticWeightNaturalLanguageWeak = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeSemanticWeightNaturalLanguageWeak"), 0.55), 0.0, 1.0);
+    const double mergeLexicalWeightNaturalLanguageStrong = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeLexicalWeightNaturalLanguageStrong"), 0.55), 0.0, 1.0);
+    const double mergeSemanticWeightNaturalLanguageStrong = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeSemanticWeightNaturalLanguageStrong"), 0.45), 0.0, 1.0);
+    const double mergeLexicalWeightPathOrCode = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeLexicalWeightPathOrCode"), 0.75), 0.0, 1.0);
+    const double mergeSemanticWeightPathOrCode = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeSemanticWeightPathOrCode"), 0.25), 0.0, 1.0);
+    const double mergeLexicalWeightShortAmbiguous = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeLexicalWeightShortAmbiguous"), 0.65), 0.0, 1.0);
+    const double mergeSemanticWeightShortAmbiguous = std::clamp(
+        readDoubleSetting(QStringLiteral("mergeSemanticWeightShortAmbiguous"), 0.35), 0.0, 1.0);
+    const double semanticOnlySafetySimilarityWeakNatural = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticOnlySafetySimilarityWeakNatural"), 0.74), 0.0, 1.0);
+    const double semanticOnlySafetySimilarityDefault = std::clamp(
+        readDoubleSetting(QStringLiteral("semanticOnlySafetySimilarityDefault"), 0.78), 0.0, 1.0);
+    const double relaxedSemanticOnlyDeltaWeakNatural = std::max(
+        0.0, readDoubleSetting(QStringLiteral("relaxedSemanticOnlyDeltaWeakNatural"), 0.02));
+    const double relaxedSemanticOnlyDeltaDefault = std::max(
+        0.0, readDoubleSetting(QStringLiteral("relaxedSemanticOnlyDeltaDefault"), 0.03));
+    const double relaxedSemanticOnlyMinWeakNatural = std::clamp(
+        readDoubleSetting(QStringLiteral("relaxedSemanticOnlyMinWeakNatural"), 0.64), 0.0, 1.0);
+    const double relaxedSemanticOnlyMinDefault = std::clamp(
+        readDoubleSetting(QStringLiteral("relaxedSemanticOnlyMinDefault"), 0.66), 0.0, 1.0);
+    const int semanticPassageCapNaturalLanguage = std::max(
+        1, readIntSetting(QStringLiteral("semanticPassageCapNaturalLanguage"), 3));
+    const int semanticPassageCapOther = std::max(
+        1, readIntSetting(QStringLiteral("semanticPassageCapOther"), 2));
+    const double semanticSoftmaxTemperatureNaturalLanguage = std::max(
+        0.1, readDoubleSetting(QStringLiteral("semanticSoftmaxTemperatureNaturalLanguage"), 8.0));
+    const double semanticSoftmaxTemperatureOther = std::max(
+        0.1, readDoubleSetting(QStringLiteral("semanticSoftmaxTemperatureOther"), 6.0));
+    const double rerankerStage1WeightScale = std::clamp(
+        readDoubleSetting(QStringLiteral("rerankerStage1WeightScale"), 0.55), 0.0, 4.0);
+    const double rerankerStage1MinWeight = std::max(
+        0.0, readDoubleSetting(QStringLiteral("rerankerStage1MinWeight"), 8.0));
+    const double rerankerStage2WeightScale = std::clamp(
+        readDoubleSetting(QStringLiteral("rerankerStage2WeightScale"), 1.0), 0.0, 4.0);
+    const double rerankerAmbiguityMarginThreshold = std::clamp(
+        readDoubleSetting(QStringLiteral("rerankerAmbiguityMarginThreshold"), 0.08), 0.0, 1.0);
+    const int rerankerFallbackElapsed80Ms = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackElapsed80Ms"), 80));
+    const int rerankerFallbackElapsed130Ms = std::max(
+        rerankerFallbackElapsed80Ms,
+        readIntSetting(QStringLiteral("rerankerFallbackElapsed130Ms"), 130));
+    const int rerankerFallbackElapsed180Ms = std::max(
+        rerankerFallbackElapsed130Ms,
+        readIntSetting(QStringLiteral("rerankerFallbackElapsed180Ms"), 180));
+    const int rerankerFallbackCapDefault = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackCapDefault"), 40));
+    const int rerankerFallbackCapElapsed80 = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackCapElapsed80"), 32));
+    const int rerankerFallbackCapElapsed130 = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackCapElapsed130"), 24));
+    const int rerankerFallbackCapElapsed180 = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackCapElapsed180"), 12));
+    const int rerankerFallbackBudgetCap = std::max(
+        1, readIntSetting(QStringLiteral("rerankerFallbackBudgetCap"), 8));
 
     const QString queryLower = query.toLower();
     const QueryHints queryHints = parseQueryHints(queryLower);
@@ -1810,43 +1915,97 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const bool naturalLanguageQuery = queryClass == QueryClass::NaturalLanguage;
     const bool shortAmbiguousQuery = queryClass == QueryClass::ShortAmbiguous;
     const float routerSemanticNeed = std::clamp(structured.semanticNeedScore, 0.0f, 1.0f);
-    const float semanticThresholdBase = naturalLanguageQuery ? 0.62f
-        : (shortAmbiguousQuery ? 0.66f : 0.70f);
+    const float semanticThresholdBase = naturalLanguageQuery
+        ? static_cast<float>(semanticThresholdNaturalLanguageBase)
+        : (shortAmbiguousQuery
+            ? static_cast<float>(semanticThresholdShortAmbiguousBase)
+            : static_cast<float>(semanticThresholdPathOrCodeBase));
     const float semanticThreshold = std::clamp(
-        semanticThresholdBase - ((routerApplied ? routerSemanticNeed : 0.0f) * 0.06f),
-        0.55f,
-        0.80f);
-    const float semanticOnlyFloor = naturalLanguageQuery ? 0.08f
-        : (shortAmbiguousQuery ? 0.10f : 0.15f);
+        semanticThresholdBase
+            - ((routerApplied ? routerSemanticNeed : 0.0f)
+               * static_cast<float>(semanticThresholdNeedScale)),
+        static_cast<float>(semanticThresholdMin),
+        static_cast<float>(semanticThresholdMax));
+    const float semanticOnlyFloor = naturalLanguageQuery
+        ? static_cast<float>(semanticOnlyFloorNaturalLanguage)
+        : (shortAmbiguousQuery
+            ? static_cast<float>(semanticOnlyFloorShortAmbiguous)
+            : static_cast<float>(semanticOnlyFloorPathOrCode));
     const bool strictLexicalWeakOrEmpty =
-        strictHits.empty() || bestLexicalStrength(strictHits) < 2.0;
+        strictHits.empty() || bestLexicalStrength(strictHits) < strictLexicalWeakCutoff;
     const int semanticOnlyCap = naturalLanguageQuery
-        ? (strictLexicalWeakOrEmpty ? std::min(8, limit) : std::min(6, limit))
-        : (shortAmbiguousQuery ? std::min(4, limit) : std::min(3, limit / 2));
+        ? (strictLexicalWeakOrEmpty
+               ? std::min(semanticOnlyCapNaturalLanguageWeak, limit)
+               : std::min(semanticOnlyCapNaturalLanguageStrong, limit))
+        : (shortAmbiguousQuery
+               ? std::min(semanticOnlyCapShortAmbiguous, limit)
+               : std::min(semanticOnlyCapPathOrCode,
+                          std::max(1, limit / semanticOnlyCapPathOrCodeDivisor)));
 
     float mergeLexicalWeight, mergeSemanticWeight;
-    if (naturalLanguageQuery) {
-        if (strictLexicalWeakOrEmpty) {
-            mergeLexicalWeight = 0.45f;
-            mergeSemanticWeight = 0.55f;
+    const auto normalizeBlendWeights = [](double lexicalWeight,
+                                          double semanticWeight,
+                                          double defaultLexical,
+                                          double defaultSemantic) {
+        lexicalWeight = std::clamp(lexicalWeight, 0.0, 1.0);
+        semanticWeight = std::clamp(semanticWeight, 0.0, 1.0);
+        const double sum = lexicalWeight + semanticWeight;
+        if (sum > 0.000001) {
+            lexicalWeight /= sum;
+            semanticWeight /= sum;
         } else {
-            mergeLexicalWeight = 0.55f;
-            mergeSemanticWeight = 0.45f;
+            lexicalWeight = defaultLexical;
+            semanticWeight = defaultSemantic;
         }
+        return std::pair<float, float>{
+            static_cast<float>(lexicalWeight),
+            static_cast<float>(semanticWeight),
+        };
+    };
+    if (naturalLanguageQuery) {
+        const auto normalized = strictLexicalWeakOrEmpty
+            ? normalizeBlendWeights(
+                mergeLexicalWeightNaturalLanguageWeak,
+                mergeSemanticWeightNaturalLanguageWeak,
+                0.45,
+                0.55)
+            : normalizeBlendWeights(
+                mergeLexicalWeightNaturalLanguageStrong,
+                mergeSemanticWeightNaturalLanguageStrong,
+                0.55,
+                0.45);
+        mergeLexicalWeight = normalized.first;
+        mergeSemanticWeight = normalized.second;
     } else if (queryClass == QueryClass::PathOrCode) {
-        mergeLexicalWeight = 0.75f;
-        mergeSemanticWeight = 0.25f;
+        const auto normalized = normalizeBlendWeights(
+            mergeLexicalWeightPathOrCode,
+            mergeSemanticWeightPathOrCode,
+            0.75,
+            0.25);
+        mergeLexicalWeight = normalized.first;
+        mergeSemanticWeight = normalized.second;
     } else { // ShortAmbiguous
-        mergeLexicalWeight = 0.65f;
-        mergeSemanticWeight = 0.35f;
+        const auto normalized = normalizeBlendWeights(
+            mergeLexicalWeightShortAmbiguous,
+            mergeSemanticWeightShortAmbiguous,
+            0.65,
+            0.35);
+        mergeLexicalWeight = normalized.first;
+        mergeSemanticWeight = normalized.second;
     }
 
     const float kSemanticOnlySafetySimilarity =
-        (strictLexicalWeakOrEmpty && naturalLanguageQuery) ? 0.74f : 0.78f;
+        (strictLexicalWeakOrEmpty && naturalLanguageQuery)
+            ? static_cast<float>(semanticOnlySafetySimilarityWeakNatural)
+            : static_cast<float>(semanticOnlySafetySimilarityDefault);
     const float relaxedSemanticOnlySimilarity =
         (strictLexicalWeakOrEmpty && naturalLanguageQuery)
-            ? std::max(semanticThreshold + 0.02f, 0.64f)
-            : std::max(semanticThreshold + 0.03f, 0.66f);
+            ? std::max(
+                semanticThreshold + static_cast<float>(relaxedSemanticOnlyDeltaWeakNatural),
+                static_cast<float>(relaxedSemanticOnlyMinWeakNatural))
+            : std::max(
+                semanticThreshold + static_cast<float>(relaxedSemanticOnlyDeltaDefault),
+                static_cast<float>(relaxedSemanticOnlyMinDefault));
 
     std::vector<SemanticResult> semanticResults;
     std::unordered_map<int64_t, float> semanticSimilarityByItemId;
@@ -1857,7 +2016,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     int strongSemanticCandidates = 0;
     int fastSemanticCandidates = 0;
     bool dualIndexUsed = false;
-    if (m_embeddingManager && m_embeddingManager->isAvailable() && m_vectorStore) {
+    if (embeddingEnabled
+        && m_embeddingManager && m_embeddingManager->isAvailable() && m_vectorStore) {
         QElapsedTimer semanticTimer;
         semanticTimer.start();
         std::unordered_map<int64_t, double> combinedSemanticByItemId;
@@ -1972,8 +2132,12 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         mergeConfig.lexicalWeight = mergeLexicalWeight;
         mergeConfig.semanticWeight = mergeSemanticWeight;
         mergeConfig.maxResults = std::max(limit * 2, limit);
-        mergeConfig.semanticPassageCap = naturalLanguageQuery ? 3 : 2;
-        mergeConfig.semanticSoftmaxTemperature = naturalLanguageQuery ? 8.0f : 6.0f;
+        mergeConfig.semanticPassageCap = naturalLanguageQuery
+            ? semanticPassageCapNaturalLanguage
+            : semanticPassageCapOther;
+        mergeConfig.semanticSoftmaxTemperature = naturalLanguageQuery
+            ? static_cast<float>(semanticSoftmaxTemperatureNaturalLanguage)
+            : static_cast<float>(semanticSoftmaxTemperatureOther);
         results = SearchMerger::merge(results, semanticResults, mergeConfig);
 
         int semanticOnlyAdded = 0;
@@ -2081,7 +2245,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     // Cross-encoder reranking (soft boost, before M2 boosts)
     const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
-    if (rerankerCascadeEnabled
+    if (embeddingEnabled
+        && rerankerCascadeEnabled
         && ((m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable())
             || (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()))) {
         RerankerCascadeConfig cascadeConfig;
@@ -2089,9 +2254,13 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         cascadeConfig.stage1MaxCandidates = rerankerStage1Max;
         cascadeConfig.stage2MaxCandidates = rerankerStage2Max;
         cascadeConfig.rerankBudgetMs = rerankBudgetMs;
-        cascadeConfig.stage1Weight = std::max(8.0f, m_scorer.weights().crossEncoderWeight * 0.55f);
-        cascadeConfig.stage2Weight = m_scorer.weights().crossEncoderWeight;
-        cascadeConfig.ambiguityMarginThreshold = 0.08f;
+        cascadeConfig.stage1Weight = static_cast<float>(std::max(
+            rerankerStage1MinWeight,
+            static_cast<double>(m_scorer.weights().crossEncoderWeight) * rerankerStage1WeightScale));
+        cascadeConfig.stage2Weight = static_cast<float>(
+            static_cast<double>(m_scorer.weights().crossEncoderWeight) * rerankerStage2WeightScale);
+        cascadeConfig.ambiguityMarginThreshold =
+            static_cast<float>(rerankerAmbiguityMarginThreshold);
         const RerankerCascadeStats cascadeStats = RerankerCascade::run(
             originalRawQuery,
             results,
@@ -2105,21 +2274,22 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         rerankerStage2Depth = cascadeStats.stage2Depth;
         rerankerAmbiguous = cascadeStats.ambiguous;
         rerankDepthApplied = std::max(rerankerStage1Depth, rerankerStage2Depth);
-    } else if (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
+    } else if (embeddingEnabled
+               && m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
         RerankerConfig rerankerConfig;
         rerankerConfig.weight = m_scorer.weights().crossEncoderWeight;
-        int rerankCap = 40;
-        if (elapsedBeforeRerankMs >= 180) {
-            rerankCap = 12;
-        } else if (elapsedBeforeRerankMs >= 130) {
-            rerankCap = 24;
-        } else if (elapsedBeforeRerankMs >= 80) {
-            rerankCap = 32;
+        int rerankCap = rerankerFallbackCapDefault;
+        if (elapsedBeforeRerankMs >= rerankerFallbackElapsed180Ms) {
+            rerankCap = rerankerFallbackCapElapsed180;
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed130Ms) {
+            rerankCap = rerankerFallbackCapElapsed130;
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed80Ms) {
+            rerankCap = rerankerFallbackCapElapsed80;
         }
         rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), rerankCap);
         rerankDepthApplied = rerankerConfig.maxCandidates;
         if (elapsedBeforeRerankMs >= rerankBudgetMs) {
-            rerankDepthApplied = std::min(rerankDepthApplied, 8);
+            rerankDepthApplied = std::min(rerankDepthApplied, rerankerFallbackBudgetCap);
             rerankerConfig.maxCandidates = rerankDepthApplied;
         }
         m_crossEncoderReranker->rerank(originalRawQuery, results, rerankerConfig);
@@ -2480,6 +2650,104 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("mergeSemanticWeightApplied")] = mergeSemanticWeight;
         debugInfo[QStringLiteral("semanticBudgetMs")] = semanticBudgetMs;
         debugInfo[QStringLiteral("rerankBudgetMs")] = rerankBudgetMs;
+        debugInfo[QStringLiteral("embeddingEnabled")] = embeddingEnabled;
+        debugInfo[QStringLiteral("queryRouterEnabled")] = queryRouterEnabled;
+        debugInfo[QStringLiteral("queryRouterMinConfidence")] = queryRouterMinConfidence;
+        debugInfo[QStringLiteral("fastEmbeddingEnabled")] = fastEmbeddingEnabled;
+        debugInfo[QStringLiteral("dualEmbeddingFusionEnabled")] = dualEmbeddingFusionEnabled;
+        debugInfo[QStringLiteral("strongEmbeddingTopK")] = strongEmbeddingTopK;
+        debugInfo[QStringLiteral("fastEmbeddingTopK")] = fastEmbeddingTopK;
+        debugInfo[QStringLiteral("rerankerCascadeEnabled")] = rerankerCascadeEnabled;
+        debugInfo[QStringLiteral("rerankerStage1Max")] = rerankerStage1Max;
+        debugInfo[QStringLiteral("rerankerStage2Max")] = rerankerStage2Max;
+        debugInfo[QStringLiteral("personalizedLtrEnabled")] = personalizedLtrEnabled;
+        debugInfo[QStringLiteral("semanticThresholdNaturalLanguageBase")] =
+            semanticThresholdNaturalLanguageBase;
+        debugInfo[QStringLiteral("semanticThresholdShortAmbiguousBase")] =
+            semanticThresholdShortAmbiguousBase;
+        debugInfo[QStringLiteral("semanticThresholdPathOrCodeBase")] =
+            semanticThresholdPathOrCodeBase;
+        debugInfo[QStringLiteral("semanticThresholdNeedScale")] =
+            semanticThresholdNeedScale;
+        debugInfo[QStringLiteral("semanticThresholdMin")] = semanticThresholdMin;
+        debugInfo[QStringLiteral("semanticThresholdMax")] = semanticThresholdMax;
+        debugInfo[QStringLiteral("semanticOnlyFloorNaturalLanguage")] =
+            semanticOnlyFloorNaturalLanguage;
+        debugInfo[QStringLiteral("semanticOnlyFloorShortAmbiguous")] =
+            semanticOnlyFloorShortAmbiguous;
+        debugInfo[QStringLiteral("semanticOnlyFloorPathOrCode")] =
+            semanticOnlyFloorPathOrCode;
+        debugInfo[QStringLiteral("strictLexicalWeakCutoff")] = strictLexicalWeakCutoff;
+        debugInfo[QStringLiteral("semanticOnlyCapNaturalLanguageWeak")] =
+            semanticOnlyCapNaturalLanguageWeak;
+        debugInfo[QStringLiteral("semanticOnlyCapNaturalLanguageStrong")] =
+            semanticOnlyCapNaturalLanguageStrong;
+        debugInfo[QStringLiteral("semanticOnlyCapShortAmbiguous")] =
+            semanticOnlyCapShortAmbiguous;
+        debugInfo[QStringLiteral("semanticOnlyCapPathOrCode")] =
+            semanticOnlyCapPathOrCode;
+        debugInfo[QStringLiteral("semanticOnlyCapPathOrCodeDivisor")] =
+            semanticOnlyCapPathOrCodeDivisor;
+        debugInfo[QStringLiteral("mergeLexicalWeightNaturalLanguageWeak")] =
+            mergeLexicalWeightNaturalLanguageWeak;
+        debugInfo[QStringLiteral("mergeSemanticWeightNaturalLanguageWeak")] =
+            mergeSemanticWeightNaturalLanguageWeak;
+        debugInfo[QStringLiteral("mergeLexicalWeightNaturalLanguageStrong")] =
+            mergeLexicalWeightNaturalLanguageStrong;
+        debugInfo[QStringLiteral("mergeSemanticWeightNaturalLanguageStrong")] =
+            mergeSemanticWeightNaturalLanguageStrong;
+        debugInfo[QStringLiteral("mergeLexicalWeightPathOrCode")] =
+            mergeLexicalWeightPathOrCode;
+        debugInfo[QStringLiteral("mergeSemanticWeightPathOrCode")] =
+            mergeSemanticWeightPathOrCode;
+        debugInfo[QStringLiteral("mergeLexicalWeightShortAmbiguous")] =
+            mergeLexicalWeightShortAmbiguous;
+        debugInfo[QStringLiteral("mergeSemanticWeightShortAmbiguous")] =
+            mergeSemanticWeightShortAmbiguous;
+        debugInfo[QStringLiteral("semanticOnlySafetySimilarityWeakNatural")] =
+            semanticOnlySafetySimilarityWeakNatural;
+        debugInfo[QStringLiteral("semanticOnlySafetySimilarityDefault")] =
+            semanticOnlySafetySimilarityDefault;
+        debugInfo[QStringLiteral("relaxedSemanticOnlyDeltaWeakNatural")] =
+            relaxedSemanticOnlyDeltaWeakNatural;
+        debugInfo[QStringLiteral("relaxedSemanticOnlyDeltaDefault")] =
+            relaxedSemanticOnlyDeltaDefault;
+        debugInfo[QStringLiteral("relaxedSemanticOnlyMinWeakNatural")] =
+            relaxedSemanticOnlyMinWeakNatural;
+        debugInfo[QStringLiteral("relaxedSemanticOnlyMinDefault")] =
+            relaxedSemanticOnlyMinDefault;
+        debugInfo[QStringLiteral("semanticPassageCapNaturalLanguage")] =
+            semanticPassageCapNaturalLanguage;
+        debugInfo[QStringLiteral("semanticPassageCapOther")] =
+            semanticPassageCapOther;
+        debugInfo[QStringLiteral("semanticSoftmaxTemperatureNaturalLanguage")] =
+            semanticSoftmaxTemperatureNaturalLanguage;
+        debugInfo[QStringLiteral("semanticSoftmaxTemperatureOther")] =
+            semanticSoftmaxTemperatureOther;
+        debugInfo[QStringLiteral("rerankerStage1WeightScale")] =
+            rerankerStage1WeightScale;
+        debugInfo[QStringLiteral("rerankerStage1MinWeight")] =
+            rerankerStage1MinWeight;
+        debugInfo[QStringLiteral("rerankerStage2WeightScale")] =
+            rerankerStage2WeightScale;
+        debugInfo[QStringLiteral("rerankerAmbiguityMarginThreshold")] =
+            rerankerAmbiguityMarginThreshold;
+        debugInfo[QStringLiteral("rerankerFallbackElapsed80Ms")] =
+            rerankerFallbackElapsed80Ms;
+        debugInfo[QStringLiteral("rerankerFallbackElapsed130Ms")] =
+            rerankerFallbackElapsed130Ms;
+        debugInfo[QStringLiteral("rerankerFallbackElapsed180Ms")] =
+            rerankerFallbackElapsed180Ms;
+        debugInfo[QStringLiteral("rerankerFallbackCapDefault")] =
+            rerankerFallbackCapDefault;
+        debugInfo[QStringLiteral("rerankerFallbackCapElapsed80")] =
+            rerankerFallbackCapElapsed80;
+        debugInfo[QStringLiteral("rerankerFallbackCapElapsed130")] =
+            rerankerFallbackCapElapsed130;
+        debugInfo[QStringLiteral("rerankerFallbackCapElapsed180")] =
+            rerankerFallbackCapElapsed180;
+        debugInfo[QStringLiteral("rerankerFallbackBudgetCap")] =
+            rerankerFallbackBudgetCap;
         debugInfo[QStringLiteral("semanticOnlySuppressedCount")] = semanticOnlySuppressedCount;
         debugInfo[QStringLiteral("semanticOnlyAdmittedCount")] = semanticOnlyAdmittedCount;
         QJsonObject semanticReasonSummary;
@@ -2650,6 +2918,14 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     const int maxChunks =
         std::clamp(params.value(QStringLiteral("maxChunks")).toInt(24), 1, 80);
 
+    bool qaSnippetEnabled = true;
+    if (m_store.has_value()) {
+        if (const auto raw = m_store->getSetting(QStringLiteral("qaSnippetEnabled"));
+            raw.has_value()) {
+            qaSnippetEnabled = envFlagEnabled(raw.value());
+        }
+    }
+
     int64_t itemId = params.value(QStringLiteral("itemId")).toInteger(0);
     QString path = params.value(QStringLiteral("path")).toString().trimmed();
 
@@ -2690,6 +2966,20 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     timer.start();
     const bool qaModelDeclared = m_modelRegistry && m_modelRegistry->hasModel("qa-extractive");
     const bool qaModelActive = m_qaExtractiveModel && m_qaExtractiveModel->isAvailable();
+
+    if (!qaSnippetEnabled) {
+        QJsonObject result;
+        result[QStringLiteral("available")] = false;
+        result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+        result[QStringLiteral("path")] = path;
+        result[QStringLiteral("reason")] = QStringLiteral("feature_disabled");
+        result[QStringLiteral("answer")] = QString();
+        result[QStringLiteral("timedOut")] = false;
+        result[QStringLiteral("elapsedMs")] = timer.elapsed();
+        result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+        result[QStringLiteral("qaModelActive")] = qaModelActive;
+        return IpcMessage::makeResponse(id, result);
+    }
 
     if (signalTokens.isEmpty()) {
         QJsonObject result;
@@ -3156,6 +3446,531 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         queryStats.value(QStringLiteral("semanticOnlyAdmittedCount")).toInteger();
     indexHealth[QStringLiteral("semanticOnlySuppressedCount")] =
         queryStats.value(QStringLiteral("semanticOnlySuppressedCount")).toInteger();
+
+    const auto readSettingValue = [&](const QString& key) -> std::optional<QString> {
+        if (!m_store.has_value()) {
+            return std::nullopt;
+        }
+        return m_store->getSetting(key);
+    };
+    const auto readBoolRuntimeSetting = [&](const QString& key, bool defaultValue) -> bool {
+        const std::optional<QString> value = readSettingValue(key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        return envFlagEnabled(value.value());
+    };
+    const auto readIntRuntimeSetting = [&](const QString& key, int defaultValue) -> int {
+        const std::optional<QString> value = readSettingValue(key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const int parsed = value.value().toInt(&ok);
+        return ok ? parsed : defaultValue;
+    };
+    const auto readDoubleRuntimeSetting = [&](const QString& key, double defaultValue) -> double {
+        const std::optional<QString> value = readSettingValue(key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const double parsed = value.value().toDouble(&ok);
+        return ok ? parsed : defaultValue;
+    };
+
+    QJsonObject runtimeSettings;
+    runtimeSettings[QStringLiteral("embeddingEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("embeddingEnabled"), true);
+    runtimeSettings[QStringLiteral("queryRouterEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("queryRouterEnabled"), true);
+    runtimeSettings[QStringLiteral("queryRouterMinConfidence")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("queryRouterMinConfidence"), 0.45), 0.0, 1.0);
+    runtimeSettings[QStringLiteral("fastEmbeddingEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("fastEmbeddingEnabled"), true);
+    runtimeSettings[QStringLiteral("dualEmbeddingFusionEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    runtimeSettings[QStringLiteral("strongEmbeddingTopK")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("strongEmbeddingTopK"), 40));
+    runtimeSettings[QStringLiteral("fastEmbeddingTopK")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("fastEmbeddingTopK"), 60));
+    runtimeSettings[QStringLiteral("rerankerCascadeEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("rerankerCascadeEnabled"), true);
+    runtimeSettings[QStringLiteral("rerankerStage1Max")] = std::max(
+        4, readIntRuntimeSetting(QStringLiteral("rerankerStage1Max"), 40));
+    runtimeSettings[QStringLiteral("rerankerStage2Max")] = std::max(
+        4, readIntRuntimeSetting(QStringLiteral("rerankerStage2Max"), 12));
+    runtimeSettings[QStringLiteral("qaSnippetEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("qaSnippetEnabled"), true);
+    runtimeSettings[QStringLiteral("personalizedLtrEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
+        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
+    runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(
+        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 120));
+    const int maxFileSizeBytes = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("max_file_size"), 50 * 1024 * 1024));
+    runtimeSettings[QStringLiteral("maxFileSizeBytes")] = maxFileSizeBytes;
+    runtimeSettings[QStringLiteral("maxFileSizeMB")] =
+        static_cast<double>(maxFileSizeBytes) / (1024.0 * 1024.0);
+    runtimeSettings[QStringLiteral("extractionTimeoutMs")] = std::max(
+        1000, readIntRuntimeSetting(QStringLiteral("extraction_timeout_ms"), 30000));
+    runtimeSettings[QStringLiteral("bm25WeightName")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightName"), 10.0));
+    runtimeSettings[QStringLiteral("bm25WeightPath")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightPath"), 5.0));
+    runtimeSettings[QStringLiteral("bm25WeightContent")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightContent"), 1.0));
+    runtimeSettings[QStringLiteral("autoVectorMigration")] =
+        readBoolRuntimeSetting(QStringLiteral("autoVectorMigration"), true);
+    runtimeSettings[QStringLiteral("semanticThresholdNaturalLanguageBase")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdNaturalLanguageBase"), 0.62),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticThresholdShortAmbiguousBase")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdShortAmbiguousBase"), 0.66),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticThresholdPathOrCodeBase")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdPathOrCodeBase"), 0.70),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticThresholdNeedScale")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdNeedScale"), 0.06),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticThresholdMin")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdMin"), 0.55),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticThresholdMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticThresholdMax"), 0.80),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticOnlyFloorNaturalLanguage")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticOnlyFloorNaturalLanguage"), 0.08),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticOnlyFloorShortAmbiguous")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticOnlyFloorShortAmbiguous"), 0.10),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticOnlyFloorPathOrCode")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticOnlyFloorPathOrCode"), 0.15),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("strictLexicalWeakCutoff")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("strictLexicalWeakCutoff"), 2.0));
+    runtimeSettings[QStringLiteral("semanticOnlyCapNaturalLanguageWeak")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticOnlyCapNaturalLanguageWeak"), 8));
+    runtimeSettings[QStringLiteral("semanticOnlyCapNaturalLanguageStrong")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticOnlyCapNaturalLanguageStrong"), 6));
+    runtimeSettings[QStringLiteral("semanticOnlyCapShortAmbiguous")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticOnlyCapShortAmbiguous"), 4));
+    runtimeSettings[QStringLiteral("semanticOnlyCapPathOrCode")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticOnlyCapPathOrCode"), 3));
+    runtimeSettings[QStringLiteral("semanticOnlyCapPathOrCodeDivisor")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticOnlyCapPathOrCodeDivisor"), 2));
+    runtimeSettings[QStringLiteral("mergeLexicalWeightNaturalLanguageWeak")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeLexicalWeightNaturalLanguageWeak"), 0.45),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeSemanticWeightNaturalLanguageWeak")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeSemanticWeightNaturalLanguageWeak"), 0.55),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeLexicalWeightNaturalLanguageStrong")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeLexicalWeightNaturalLanguageStrong"), 0.55),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeSemanticWeightNaturalLanguageStrong")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeSemanticWeightNaturalLanguageStrong"), 0.45),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeLexicalWeightPathOrCode")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeLexicalWeightPathOrCode"), 0.75),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeSemanticWeightPathOrCode")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeSemanticWeightPathOrCode"), 0.25),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeLexicalWeightShortAmbiguous")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeLexicalWeightShortAmbiguous"), 0.65),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("mergeSemanticWeightShortAmbiguous")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("mergeSemanticWeightShortAmbiguous"), 0.35),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticOnlySafetySimilarityWeakNatural")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticOnlySafetySimilarityWeakNatural"), 0.74),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticOnlySafetySimilarityDefault")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("semanticOnlySafetySimilarityDefault"), 0.78),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("relaxedSemanticOnlyDeltaWeakNatural")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("relaxedSemanticOnlyDeltaWeakNatural"), 0.02));
+    runtimeSettings[QStringLiteral("relaxedSemanticOnlyDeltaDefault")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("relaxedSemanticOnlyDeltaDefault"), 0.03));
+    runtimeSettings[QStringLiteral("relaxedSemanticOnlyMinWeakNatural")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("relaxedSemanticOnlyMinWeakNatural"), 0.64),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("relaxedSemanticOnlyMinDefault")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("relaxedSemanticOnlyMinDefault"), 0.66),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("semanticPassageCapNaturalLanguage")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticPassageCapNaturalLanguage"), 3));
+    runtimeSettings[QStringLiteral("semanticPassageCapOther")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("semanticPassageCapOther"), 2));
+    runtimeSettings[QStringLiteral("semanticSoftmaxTemperatureNaturalLanguage")] = std::max(
+        0.1, readDoubleRuntimeSetting(QStringLiteral("semanticSoftmaxTemperatureNaturalLanguage"), 8.0));
+    runtimeSettings[QStringLiteral("semanticSoftmaxTemperatureOther")] = std::max(
+        0.1, readDoubleRuntimeSetting(QStringLiteral("semanticSoftmaxTemperatureOther"), 6.0));
+    runtimeSettings[QStringLiteral("rerankerStage1WeightScale")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("rerankerStage1WeightScale"), 0.55),
+        0.0,
+        4.0);
+    runtimeSettings[QStringLiteral("rerankerStage1MinWeight")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("rerankerStage1MinWeight"), 8.0));
+    runtimeSettings[QStringLiteral("rerankerStage2WeightScale")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("rerankerStage2WeightScale"), 1.0),
+        0.0,
+        4.0);
+    runtimeSettings[QStringLiteral("rerankerAmbiguityMarginThreshold")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("rerankerAmbiguityMarginThreshold"), 0.08),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("rerankerFallbackElapsed80Ms")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackElapsed80Ms"), 80));
+    runtimeSettings[QStringLiteral("rerankerFallbackElapsed130Ms")] = std::max(
+        runtimeSettings.value(QStringLiteral("rerankerFallbackElapsed80Ms")).toInt(),
+        readIntRuntimeSetting(QStringLiteral("rerankerFallbackElapsed130Ms"), 130));
+    runtimeSettings[QStringLiteral("rerankerFallbackElapsed180Ms")] = std::max(
+        runtimeSettings.value(QStringLiteral("rerankerFallbackElapsed130Ms")).toInt(),
+        readIntRuntimeSetting(QStringLiteral("rerankerFallbackElapsed180Ms"), 180));
+    runtimeSettings[QStringLiteral("rerankerFallbackCapDefault")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackCapDefault"), 40));
+    runtimeSettings[QStringLiteral("rerankerFallbackCapElapsed80")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackCapElapsed80"), 32));
+    runtimeSettings[QStringLiteral("rerankerFallbackCapElapsed130")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackCapElapsed130"), 24));
+    runtimeSettings[QStringLiteral("rerankerFallbackCapElapsed180")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackCapElapsed180"), 12));
+    runtimeSettings[QStringLiteral("rerankerFallbackBudgetCap")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("rerankerFallbackBudgetCap"), 8));
+    indexHealth[QStringLiteral("runtimeSettings")] = runtimeSettings;
+
+    QJsonObject runtimeSettingsRaw;
+    if (sqlite3* db = m_store->rawDb()) {
+        static constexpr const char* kRuntimeSettingsSql = R"(
+            SELECT key, value
+            FROM settings
+            ORDER BY key ASC
+        )";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, kRuntimeSettingsSql, -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char* key = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+                const char* value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+                if (key && key[0] != '\0') {
+                    runtimeSettingsRaw[QString::fromUtf8(key)] =
+                        value ? QString::fromUtf8(value) : QString();
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    indexHealth[QStringLiteral("runtimeSettingsRaw")] = runtimeSettingsRaw;
+
+    QJsonObject runtimeComponents;
+    runtimeComponents[QStringLiteral("queryRouterRuntimeMode")] = QStringLiteral("heuristic_rules");
+    runtimeComponents[QStringLiteral("queryRouterModelDeclared")] =
+        m_modelRegistry && m_modelRegistry->hasModel("query-router");
+    runtimeComponents[QStringLiteral("queryRouterModelActive")] = false;
+    runtimeComponents[QStringLiteral("queryRouterInactiveReason")] =
+        QStringLiteral("Query router currently uses heuristic implementation.");
+    runtimeComponents[QStringLiteral("embeddingStrongAvailable")] =
+        (m_embeddingManager && m_embeddingManager->isAvailable());
+    runtimeComponents[QStringLiteral("embeddingStrongModelId")] =
+        m_embeddingManager ? m_embeddingManager->activeModelId() : QString();
+    runtimeComponents[QStringLiteral("embeddingStrongProvider")] =
+        m_embeddingManager ? m_embeddingManager->providerName() : QString();
+    runtimeComponents[QStringLiteral("embeddingStrongGeneration")] =
+        m_embeddingManager ? m_embeddingManager->activeGenerationId() : QString();
+    runtimeComponents[QStringLiteral("embeddingFastAvailable")] =
+        (m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable());
+    runtimeComponents[QStringLiteral("embeddingFastModelId")] =
+        m_fastEmbeddingManager ? m_fastEmbeddingManager->activeModelId() : QString();
+    runtimeComponents[QStringLiteral("embeddingFastProvider")] =
+        m_fastEmbeddingManager ? m_fastEmbeddingManager->providerName() : QString();
+    runtimeComponents[QStringLiteral("embeddingFastGeneration")] =
+        m_fastEmbeddingManager ? m_fastEmbeddingManager->activeGenerationId() : QString();
+    runtimeComponents[QStringLiteral("crossEncoderFastAvailable")] =
+        (m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable());
+    runtimeComponents[QStringLiteral("crossEncoderStrongAvailable")] =
+        (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable());
+    runtimeComponents[QStringLiteral("personalizedLtrAvailable")] =
+        (m_personalizedLtr && m_personalizedLtr->isAvailable());
+    runtimeComponents[QStringLiteral("personalizedLtrModelVersion")] =
+        m_personalizedLtr ? m_personalizedLtr->modelVersion() : QString();
+    runtimeComponents[QStringLiteral("qaExtractiveAvailable")] =
+        (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable());
+    runtimeComponents[QStringLiteral("qaSnippetEnabled")] =
+        runtimeSettings.value(QStringLiteral("qaSnippetEnabled")).toBool(true);
+    runtimeComponents[QStringLiteral("qaPreviewMode")] =
+        (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable())
+            ? QStringLiteral("model_plus_extractive_fallback")
+            : QStringLiteral("extractive_fallback_only");
+    runtimeComponents[QStringLiteral("vectorStoreAvailable")] =
+        (m_vectorStore != nullptr);
+    runtimeComponents[QStringLiteral("vectorIndexStrongAvailable")] =
+        (m_vectorIndex && m_vectorIndex->isAvailable());
+    runtimeComponents[QStringLiteral("vectorIndexFastAvailable")] =
+        (m_fastVectorIndex && m_fastVectorIndex->isAvailable());
+    runtimeComponents[QStringLiteral("modelRegistryInitialized")] =
+        (m_modelRegistry != nullptr);
+    indexHealth[QStringLiteral("runtimeComponents")] = runtimeComponents;
+
+    const QString modelsDirResolved = m_modelRegistry
+        ? m_modelRegistry->modelsDir()
+        : ModelRegistry::resolveModelsDir();
+    const QString manifestPath = modelsDirResolved + QStringLiteral("/manifest.json");
+    indexHealth[QStringLiteral("modelsDirResolved")] = modelsDirResolved;
+    indexHealth[QStringLiteral("manifestPathResolved")] = manifestPath;
+    indexHealth[QStringLiteral("manifestPresent")] = QFileInfo::exists(manifestPath);
+
+    QJsonArray modelManifest;
+    if (m_modelRegistry) {
+        std::vector<QString> roles;
+        roles.reserve(m_modelRegistry->manifest().models.size());
+        for (const auto& pair : m_modelRegistry->manifest().models) {
+            roles.push_back(QString::fromStdString(pair.first));
+        }
+        std::sort(roles.begin(), roles.end(),
+                  [](const QString& a, const QString& b) {
+                      return a.toLower() < b.toLower();
+                  });
+
+        const auto modelIdMatches = [](const QString& runtimeModelId,
+                                       const QString& entryModelId,
+                                       const QString& entryName) {
+            return !runtimeModelId.isEmpty()
+                && (runtimeModelId == entryModelId || runtimeModelId == entryName);
+        };
+
+        for (const QString& role : roles) {
+            const auto it = m_modelRegistry->manifest().models.find(role.toStdString());
+            if (it == m_modelRegistry->manifest().models.end()) {
+                continue;
+            }
+            const ModelManifestEntry& entry = it->second;
+
+            const QString modelPath = modelsDirResolved + QStringLiteral("/") + entry.file;
+            const QFileInfo modelInfo(modelPath);
+            const QString vocabPath = entry.vocab.isEmpty()
+                ? QString()
+                : (modelsDirResolved + QStringLiteral("/") + entry.vocab);
+            const QFileInfo vocabInfo(vocabPath);
+
+            bool runtimeActive = false;
+            QString runtimeState = QStringLiteral("inactive");
+            QString runtimeReason;
+
+            if (role == QLatin1String("bi-encoder")) {
+                runtimeActive = m_embeddingManager
+                    && m_embeddingManager->isAvailable()
+                    && modelIdMatches(m_embeddingManager->activeModelId(),
+                                      entry.modelId, entry.name);
+                runtimeState = runtimeActive
+                    ? QStringLiteral("active")
+                    : ((m_embeddingManager && m_embeddingManager->isAvailable())
+                           ? QStringLiteral("available_not_selected")
+                           : QStringLiteral("unavailable"));
+                if (!runtimeActive && (m_embeddingManager && m_embeddingManager->isAvailable())) {
+                    runtimeReason = QStringLiteral("Embedding manager loaded a fallback role/model.");
+                }
+            } else if (role == QLatin1String("bi-encoder-fast")) {
+                runtimeActive = m_fastEmbeddingManager
+                    && m_fastEmbeddingManager->isAvailable()
+                    && modelIdMatches(m_fastEmbeddingManager->activeModelId(),
+                                      entry.modelId, entry.name);
+                runtimeState = runtimeActive
+                    ? QStringLiteral("active")
+                    : ((m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable())
+                           ? QStringLiteral("available_not_selected")
+                           : QStringLiteral("unavailable"));
+            } else if (role == QLatin1String("cross-encoder-fast")) {
+                runtimeActive = m_fastCrossEncoderReranker
+                    && m_fastCrossEncoderReranker->isAvailable();
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            } else if (role == QLatin1String("cross-encoder")) {
+                runtimeActive = m_crossEncoderReranker
+                    && m_crossEncoderReranker->isAvailable();
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            } else if (role == QLatin1String("qa-extractive")) {
+                runtimeActive = m_qaExtractiveModel
+                    && m_qaExtractiveModel->isAvailable();
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            } else if (role == QLatin1String("query-router")) {
+                runtimeActive = false;
+                runtimeState = QStringLiteral("inactive");
+                runtimeReason = QStringLiteral("Heuristic query router is active in current build.");
+            } else {
+                runtimeState = QStringLiteral("declared_only");
+            }
+
+            QJsonObject model;
+            model[QStringLiteral("role")] = role;
+            model[QStringLiteral("name")] = entry.name;
+            model[QStringLiteral("task")] = entry.task;
+            model[QStringLiteral("latencyTier")] = entry.latencyTier;
+            model[QStringLiteral("modelId")] = entry.modelId;
+            model[QStringLiteral("generationId")] = entry.generationId;
+            model[QStringLiteral("fallbackRole")] = entry.fallbackRole;
+            model[QStringLiteral("file")] = entry.file;
+            model[QStringLiteral("vocab")] = entry.vocab;
+            model[QStringLiteral("dimensions")] = entry.dimensions;
+            model[QStringLiteral("maxSeqLength")] = entry.maxSeqLength;
+            model[QStringLiteral("tokenizer")] = entry.tokenizer;
+            model[QStringLiteral("queryPrefix")] = entry.queryPrefix;
+            model[QStringLiteral("extractionStrategy")] = entry.extractionStrategy;
+            model[QStringLiteral("poolingStrategy")] = entry.poolingStrategy;
+            model[QStringLiteral("semanticAggregationMode")] = entry.semanticAggregationMode;
+            model[QStringLiteral("outputTransform")] = entry.outputTransform;
+            model[QStringLiteral("modelPath")] = modelPath;
+            model[QStringLiteral("modelExists")] = modelInfo.exists();
+            model[QStringLiteral("modelReadable")] = modelInfo.isReadable();
+            model[QStringLiteral("modelSizeBytes")] =
+                modelInfo.exists() ? modelInfo.size() : 0;
+            model[QStringLiteral("vocabPath")] = vocabPath;
+            model[QStringLiteral("vocabExists")] =
+                entry.vocab.isEmpty() ? false : vocabInfo.exists();
+            model[QStringLiteral("vocabReadable")] =
+                entry.vocab.isEmpty() ? false : vocabInfo.isReadable();
+            model[QStringLiteral("runtimeActive")] = runtimeActive;
+            model[QStringLiteral("runtimeState")] = runtimeState;
+            model[QStringLiteral("runtimeReason")] = runtimeReason;
+            model[QStringLiteral("providerPreferred")] =
+                entry.providerPolicy.preferredProvider;
+            model[QStringLiteral("providerPreferCoreMl")] =
+                entry.providerPolicy.preferCoreMl;
+            model[QStringLiteral("providerAllowCpuFallback")] =
+                entry.providerPolicy.allowCpuFallback;
+            model[QStringLiteral("providerDisableCoreMlEnvVar")] =
+                entry.providerPolicy.disableCoreMlEnvVar;
+
+            QJsonArray inputs;
+            for (const QString& input : entry.inputs) {
+                inputs.append(input);
+            }
+            model[QStringLiteral("inputs")] = inputs;
+
+            QJsonArray outputs;
+            for (const QString& output : entry.outputs) {
+                outputs.append(output);
+            }
+            model[QStringLiteral("outputs")] = outputs;
+
+            modelManifest.append(model);
+        }
+    }
+    indexHealth[QStringLiteral("modelManifest")] = modelManifest;
+
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QJsonArray environmentKnown;
+    const auto appendKnownEnv = [&](const QString& key,
+                                    const QString& description,
+                                    const QString& fallbackValue,
+                                    bool parseAsBool) {
+        const bool isSet = env.contains(key);
+        const QString rawValue = env.value(key);
+        QJsonObject row;
+        row[QStringLiteral("key")] = key;
+        row[QStringLiteral("description")] = description;
+        row[QStringLiteral("isSet")] = isSet;
+        row[QStringLiteral("value")] = rawValue;
+        row[QStringLiteral("fallback")] = fallbackValue;
+        if (parseAsBool) {
+            const bool effective = isSet ? envFlagEnabled(rawValue) : envFlagEnabled(fallbackValue);
+            row[QStringLiteral("effectiveBool")] = effective;
+            row[QStringLiteral("effectiveValue")] = effective
+                ? QStringLiteral("true")
+                : QStringLiteral("false");
+        } else {
+            row[QStringLiteral("effectiveValue")] = isSet ? rawValue : fallbackValue;
+        }
+        environmentKnown.append(row);
+    };
+
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR"),
+                   QStringLiteral("Override BetterSpotlight data directory."),
+                   m_dataDir,
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"),
+                   QStringLiteral("Override models directory (manifest + model artifacts)."),
+                   modelsDirResolved,
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_DISABLE_COREML"),
+                   QStringLiteral("Disable CoreML execution provider and force CPU path."),
+                   QStringLiteral("0"),
+                   true);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"),
+                   QStringLiteral("Override IPC socket directory."),
+                   QString(),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_EMBED_BATCH_BASE"),
+                   QStringLiteral("Base embedding batch size."),
+                   QStringLiteral("24"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_EMBED_BATCH_MIN"),
+                   QStringLiteral("Minimum embedding batch size under pressure."),
+                   QStringLiteral("8"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_EMBED_RSS_SOFT_MB"),
+                   QStringLiteral("Embedding pipeline soft RSS cap (MB)."),
+                   QStringLiteral("900"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_EMBED_RSS_HARD_MB"),
+                   QStringLiteral("Embedding pipeline hard RSS cap (MB)."),
+                   QStringLiteral("1200"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_INDEXER_RSS_SOFT_MB"),
+                   QStringLiteral("Indexer soft RSS cap (MB)."),
+                   QStringLiteral("900"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_INDEXER_RSS_HARD_MB"),
+                   QStringLiteral("Indexer hard RSS cap (MB)."),
+                   QStringLiteral("1200"),
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_INDEXER_PREP_WORKERS_PRESSURE"),
+                   QStringLiteral("Indexer prep worker backpressure threshold."),
+                   QStringLiteral("4"),
+                   false);
+
+    QJsonArray environmentAll;
+    QStringList envKeys = env.keys();
+    envKeys.erase(std::remove_if(envKeys.begin(), envKeys.end(),
+                                 [](const QString& key) {
+                                     return !key.startsWith(QStringLiteral("BETTERSPOTLIGHT_"));
+                                 }),
+                  envKeys.end());
+    envKeys.sort(Qt::CaseInsensitive);
+    for (const QString& key : envKeys) {
+        QJsonObject row;
+        row[QStringLiteral("key")] = key;
+        row[QStringLiteral("value")] = env.value(key);
+        environmentAll.append(row);
+    }
+    indexHealth[QStringLiteral("environmentKnown")] = environmentKnown;
+    indexHealth[QStringLiteral("environmentAll")] = environmentAll;
 
     bool includesHomeRoot = false;
     const QString homePath = QDir::homePath();
