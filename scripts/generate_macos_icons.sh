@@ -56,18 +56,17 @@ render_png 512  "${ICONSET_DIR}/icon_512x512.png"
 render_png 1024 "${ICONSET_DIR}/icon_512x512@2x.png"
 
 draw_menubar_icon() {
-  local color="$1"
-  local sparkle="$2"
+  local marker="$1"
+  local marker_y="$2"
   local out="$3"
 
   magick -size 64x64 xc:none \
-    -fill "${color}" -stroke "rgba(0,0,0,0.25)" -strokewidth 2 \
-    -draw "roundrectangle 8,8 56,56 13,13" \
-    -fill none -stroke white -strokewidth 4 \
-    -draw "circle 30,30 30,19" \
-    -draw "line 39,39 48,48" \
-    -fill white -stroke none \
-    -draw "${sparkle}" \
+    -fill none -stroke "rgba(0,0,0,0.97)" -strokewidth 9 \
+    -draw "circle 24,24 24,8" \
+    -draw "line 35,35 56,56" \
+    -fill "rgba(0,0,0,0.97)" -stroke none \
+    -draw "${marker}" \
+    -draw "ellipse 53,${marker_y} 4.6,4.6 0,360" \
     -colorspace sRGB -alpha on -type TrueColorAlpha \
     "${out}"
 }
@@ -75,21 +74,19 @@ draw_menubar_icon() {
 draw_menubar_error_icon() {
   local out="$1"
   magick -size 64x64 xc:none \
-    -fill "#C62828" -stroke "rgba(0,0,0,0.25)" -strokewidth 2 \
-    -draw "roundrectangle 8,8 56,56 13,13" \
-    -fill none -stroke white -strokewidth 4 \
-    -draw "circle 30,30 30,19" \
-    -draw "line 39,39 48,48" \
-    -fill white -stroke none \
-    -draw "roundrectangle 29,16 35,34 2,2" \
-    -draw "ellipse 32,43 3,3 0,360" \
+    -fill none -stroke "rgba(0,0,0,0.97)" -strokewidth 9 \
+    -draw "circle 24,24 24,8" \
+    -draw "line 35,35 56,56" \
+    -fill "rgba(0,0,0,0.97)" -stroke none \
+    -draw "roundrectangle 50,7 57,31 2,2" \
+    -draw "ellipse 53,40 4,4 0,360" \
     -colorspace sRGB -alpha on -type TrueColorAlpha \
     "${out}"
 }
 
-draw_menubar_icon "#1976D2" "polygon 45,15 47,21 53,23 47,25 45,31 43,25 37,23 43,21" "${ASSET_DIR}/menubar_idle.png"
-draw_menubar_icon "#FB8C00" "polygon 45,14 47,20 53,22 47,24 45,30 43,24 37,22 43,20" "${ASSET_DIR}/menubar_indexing_a.png"
-draw_menubar_icon "#F57C00" "polygon 47,16 49,22 55,24 49,26 47,32 45,26 39,24 45,22" "${ASSET_DIR}/menubar_indexing_b.png"
+draw_menubar_icon "polygon 53,7 55,14 61,17 55,20 53,27 51,20 45,17 51,14" "13" "${ASSET_DIR}/menubar_idle.png"
+draw_menubar_icon "polygon 53,7 55,14 61,17 55,20 53,27 51,20 45,17 51,14" "19" "${ASSET_DIR}/menubar_indexing_a.png"
+draw_menubar_icon "polygon 53,7 55,14 61,17 55,20 53,27 51,20 45,17 51,14" "25" "${ASSET_DIR}/menubar_indexing_b.png"
 draw_menubar_error_icon "${ASSET_DIR}/menubar_error.png"
 
 iconutil -c icns "${ICONSET_DIR}" -o "${APP_ICNS}"

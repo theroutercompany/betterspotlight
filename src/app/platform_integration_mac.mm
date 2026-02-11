@@ -16,6 +16,42 @@ QString toQString(NSString* value)
     return value ? QString::fromUtf8(value.UTF8String) : QString();
 }
 
+NSImage* loadBundleIconImage()
+{
+    NSBundle* bundle = [NSBundle mainBundle];
+    if (!bundle) {
+        return nil;
+    }
+
+    NSDictionary* info = [bundle infoDictionary];
+    NSString* iconStem = [info objectForKey:@"CFBundleIconFile"];
+    if (iconStem && iconStem.length > 0) {
+        NSImage* image = [NSImage imageNamed:iconStem];
+        if (image) {
+            return image;
+        }
+
+        NSString* extension = [iconStem pathExtension];
+        if (!extension || extension.length == 0) {
+            extension = @"icns";
+        }
+        NSString* stem = [iconStem stringByDeletingPathExtension];
+        NSString* iconPath = [bundle pathForResource:stem ofType:extension];
+        if (iconPath) {
+            NSImage* fileImage = [[NSImage alloc] initWithContentsOfFile:iconPath];
+            if (fileImage) {
+                return fileImage;
+            }
+        }
+    }
+
+    NSString* fallbackPath = [bundle pathForResource:@"BetterSpotlight" ofType:@"icns"];
+    if (fallbackPath) {
+        return [[NSImage alloc] initWithContentsOfFile:fallbackPath];
+    }
+    return nil;
+}
+
 class MacPlatformIntegration final : public PlatformIntegration {
 public:
     PlatformOperationResult setLaunchAtLogin(bool enabled) override
@@ -64,6 +100,10 @@ public:
         }
 
         if (enabled) {
+            NSImage* iconImage = loadBundleIconImage();
+            if (iconImage) {
+                [NSApp setApplicationIconImage:iconImage];
+            }
             [NSApp activateIgnoringOtherApps:NO];
         }
 

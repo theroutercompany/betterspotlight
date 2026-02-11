@@ -22,7 +22,14 @@
 
 namespace {
 
-QIcon fallbackTrayStateIcon(const QColor& color, bool isErrorIcon)
+enum class TrayGlyphVariant {
+    Idle,
+    IndexingA,
+    IndexingB,
+    Error,
+};
+
+QIcon fallbackTrayStateIcon(TrayGlyphVariant variant)
 {
     constexpr int kSize = 24;
     QPixmap pixmap(kSize, kSize);
@@ -30,46 +37,45 @@ QIcon fallbackTrayStateIcon(const QColor& color, bool isErrorIcon)
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-
-    constexpr qreal kInset = 2.0;
-    const QRectF tile(kInset, kInset, kSize - (2.0 * kInset), kSize - (2.0 * kInset));
-    painter.setPen(QPen(QColor(0, 0, 0, 70), 1.0));
-    painter.setBrush(color);
-    painter.drawRoundedRect(tile, 5.0, 5.0);
+    const QColor ink(0, 0, 0, 235);
 
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter.drawEllipse(QRectF(6.8, 6.8, 8.0, 8.0));
-    painter.drawLine(QPointF(13.2, 13.2), QPointF(17.2, 17.2));
+    painter.setPen(QPen(ink, 2.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawEllipse(QRectF(4.2, 4.2, 11.0, 11.0));
+    painter.drawLine(QPointF(13.2, 13.2), QPointF(19.4, 19.4));
 
     painter.setPen(Qt::NoPen);
-    painter.setBrush(Qt::white);
-    if (isErrorIcon) {
-        painter.drawRoundedRect(QRectF(11.0, 4.0, 2.0, 7.2), 0.9, 0.9);
-        painter.drawEllipse(QRectF(11.0, 13.3, 2.0, 2.0));
+    painter.setBrush(ink);
+    if (variant == TrayGlyphVariant::Error) {
+        painter.drawRoundedRect(QRectF(17.2, 3.5, 2.5, 8.2), 1.0, 1.0);
+        painter.drawEllipse(QRectF(17.2, 14.0, 2.5, 2.5));
+    } else if (variant == TrayGlyphVariant::IndexingA
+               || variant == TrayGlyphVariant::IndexingB) {
+        const qreal cy = (variant == TrayGlyphVariant::IndexingA) ? 5.0 : 8.0;
+        painter.drawEllipse(QRectF(17.2, cy, 3.1, 3.1));
     } else {
         QPolygonF sparkle;
-        sparkle << QPointF(18.5, 5.0)
-                << QPointF(19.5, 8.0)
-                << QPointF(22.5, 9.0)
-                << QPointF(19.5, 10.0)
-                << QPointF(18.5, 13.0)
-                << QPointF(17.5, 10.0)
-                << QPointF(14.5, 9.0)
-                << QPointF(17.5, 8.0);
+        sparkle << QPointF(18.6, 3.6)
+                << QPointF(19.6, 6.6)
+                << QPointF(22.6, 7.6)
+                << QPointF(19.6, 8.6)
+                << QPointF(18.6, 11.6)
+                << QPointF(17.6, 8.6)
+                << QPointF(14.6, 7.6)
+                << QPointF(17.6, 6.6);
         painter.drawPolygon(sparkle);
     }
 
     return QIcon(pixmap);
 }
 
-QIcon trayStateIcon(const QString& resourcePath, const QColor& fallbackColor, bool isErrorIcon)
+QIcon trayStateIcon(const QString& resourcePath, TrayGlyphVariant variant)
 {
     const QIcon icon(resourcePath);
     if (!icon.isNull()) {
         return icon;
     }
-    return fallbackTrayStateIcon(fallbackColor, isErrorIcon);
+    return fallbackTrayStateIcon(variant);
 }
 
 } // namespace
@@ -89,6 +95,7 @@ int main(int argc, char* argv[])
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     app.setOrganizationName(QStringLiteral("BetterSpotlight"));
     app.setOrganizationDomain(QStringLiteral("com.betterspotlight"));
+    app.setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon_master.png")));
 
     // Critical: app runs in background as a status bar app -- no dock icon,
     // no quit when last window closes.
@@ -163,13 +170,13 @@ int main(int argc, char* argv[])
 
     QSystemTrayIcon trayIcon;
     const QIcon idleTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_idle.png"),
-                                             QColor(QStringLiteral("#1976D2")), false);
+                                             TrayGlyphVariant::Idle);
     const QIcon indexingTrayIconA = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_a.png"),
-                                                  QColor(QStringLiteral("#FB8C00")), false);
+                                                  TrayGlyphVariant::IndexingA);
     const QIcon indexingTrayIconB = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_b.png"),
-                                                  QColor(QStringLiteral("#F57C00")), false);
+                                                  TrayGlyphVariant::IndexingB);
     const QIcon errorTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_error.png"),
-                                              QColor(QStringLiteral("#C62828")), true);
+                                              TrayGlyphVariant::Error);
     trayIcon.setIcon(indexingTrayIconA);
     trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Starting services"));
 

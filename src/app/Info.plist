@@ -13,7 +13,9 @@
     <key>CFBundleName</key>
     <string>BetterSpotlight</string>
     <key>CFBundleIconFile</key>
-    <string>BetterSpotlight.icns</string>
+    <string>BetterSpotlight</string>
+    <key>CFBundleIconName</key>
+    <string>BetterSpotlight</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
