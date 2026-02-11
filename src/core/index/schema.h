@@ -223,6 +223,18 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('targetVectorGeneration', 'v
 INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationState', 'idle');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationProgressPct', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingEnabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('queryRouterEnabled', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('queryRouterMinConfidence', '0.45');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('fastEmbeddingEnabled', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('dualEmbeddingFusionEnabled', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('strongEmbeddingTopK', '40');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('fastEmbeddingTopK', '60');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticBudgetMs', '70');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerCascadeEnabled', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankBudgetMs', '120');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerStage1Max', '40');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerStage2Max', '12');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('personalizedLtrEnabled', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onboardingCompleted', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('lastFeedbackAggregation', '0');
 )";

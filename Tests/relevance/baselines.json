@@ -1108,6 +1108,61 @@
       "semanticRequired": false,
       "requiresVectors": false,
       "notes": "noise normalization robustness"
+    },
+    {
+      "id": "M4-101",
+      "category": "dev_code",
+      "query": "auth_handler ts",
+      "mode": "auto",
+      "expectedFileName": "auth_handler.ts",
+      "topN": 1,
+      "semanticRequired": true,
+      "requiresVectors": true,
+      "notes": "code-focused relevance slice"
+    },
+    {
+      "id": "M4-102",
+      "category": "dev_code",
+      "query": "api routes go service",
+      "mode": "auto",
+      "expectedFileName": "api_routes.go",
+      "topN": 1,
+      "semanticRequired": true,
+      "requiresVectors": true,
+      "notes": "code-focused relevance slice"
+    },
+    {
+      "id": "M4-103",
+      "category": "dev_code",
+      "query": "database_migration.py",
+      "mode": "auto",
+      "expectedFileName": "database_migration.py",
+      "topN": 1,
+      "semanticRequired": true,
+      "requiresVectors": true,
+      "notes": "code-focused relevance slice"
+    },
+    {
+      "id": "M4-104",
+      "category": "dev_code",
+      "query": "config parser cpp source",
+      "mode": "auto",
+      "expectedFileName": "config_parser.cpp",
+      "topN": 1,
+      "semanticRequired": true,
+      "requiresVectors": true,
+      "notes": "code-focused relevance slice"
+    },
+    {
+      "id": "M4-105",
+      "category": "dev_code",
+      "query": "rust logger implementation",
+      "mode": "auto",
+      "expectedFileName": "logger.rs",
+      "topN": 1,
+      "semanticRequired": true,
+      "requiresVectors": true,
+      "notes": "code-focused relevance slice"
     }
   ]
 }

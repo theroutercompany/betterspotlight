@@ -481,6 +481,156 @@ Window {
                                     Label { text: qsTr("Embedding model:"); font.pixelSize: 13; color: "#666666" }
                                     Label { text: "BGE-small-en-v1.5"; font.pixelSize: 13; font.family: "Menlo"; color: "#1A1A1A" }
                                 }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 1
+                                    color: "#C0C0C0"
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    Label {
+                                        text: qsTr("Enable query router")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.queryRouterEnabled : true
+                                        onToggled: { if (settingsController) settingsController.queryRouterEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    Label {
+                                        text: qsTr("Enable fast embedding expert")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.fastEmbeddingEnabled : true
+                                        onToggled: { if (settingsController) settingsController.fastEmbeddingEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    Label {
+                                        text: qsTr("Enable dual-index semantic fusion")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.dualEmbeddingFusionEnabled : true
+                                        onToggled: { if (settingsController) settingsController.dualEmbeddingFusionEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    Label {
+                                        text: qsTr("Enable reranker cascade")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.rerankerCascadeEnabled : true
+                                        onToggled: { if (settingsController) settingsController.rerankerCascadeEnabled = checked }
+                                    }
+                                }
+
+                                RowLayout {
+                                    spacing: 12
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    Label {
+                                        text: qsTr("Enable personalized LTR")
+                                        font.pixelSize: 13
+                                        color: "#1A1A1A"
+                                        Layout.fillWidth: true
+                                    }
+                                    Switch {
+                                        checked: settingsController ? settingsController.personalizedLtrEnabled : true
+                                        onToggled: { if (settingsController) settingsController.personalizedLtrEnabled = checked }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Semantic budget (ms)")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.semanticBudgetMs.toString() : "70"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 20
+                                        to: 200
+                                        stepSize: 5
+                                        value: settingsController ? settingsController.semanticBudgetMs : 70
+                                        onMoved: { if (settingsController) settingsController.semanticBudgetMs = value }
+                                    }
+                                }
+
+                                ColumnLayout {
+                                    spacing: 4
+                                    Layout.fillWidth: true
+                                    visible: settingsController ? settingsController.embeddingEnabled : false
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Label {
+                                            text: qsTr("Rerank budget (ms)")
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                        }
+                                        Label {
+                                            text: settingsController ? settingsController.rerankBudgetMs.toString() : "120"
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                        }
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 40
+                                        to: 300
+                                        stepSize: 5
+                                        value: settingsController ? settingsController.rerankBudgetMs : 120
+                                        onMoved: { if (settingsController) settingsController.rerankBudgetMs = value }
+                                    }
+                                }
                             }
                         }
 

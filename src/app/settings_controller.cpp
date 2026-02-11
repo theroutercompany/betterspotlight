@@ -118,6 +118,64 @@ void ensureDefault(QJsonObject& obj, const QString& key, const QJsonValue& value
     }
 }
 
+void upsertSetting(sqlite3* db, const QString& key, const QString& value)
+{
+    if (!db) {
+        return;
+    }
+    static constexpr const char* kSql = R"(
+        INSERT INTO settings (key, value) VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return;
+    }
+    const QByteArray keyUtf8 = key.toUtf8();
+    const QByteArray valueUtf8 = value.toUtf8();
+    sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, valueUtf8.constData(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+QString boolToSqlValue(bool value)
+{
+    return value ? QStringLiteral("1") : QStringLiteral("0");
+}
+
+void syncRuntimeSettingsToDb(const QJsonObject& settings)
+{
+    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                           + QStringLiteral("/betterspotlight/index.db");
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+
+    upsertSetting(db, QStringLiteral("embeddingEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("embeddingEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("queryRouterEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("queryRouterEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("fastEmbeddingEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("dualEmbeddingFusionEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("rerankerCascadeEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("personalizedLtrEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("semanticBudgetMs"),
+                  QString::number(settings.value(QStringLiteral("semanticBudgetMs")).toInt(70)));
+    upsertSetting(db, QStringLiteral("rerankBudgetMs"),
+                  QString::number(settings.value(QStringLiteral("rerankBudgetMs")).toInt(120)));
+    sqlite3_close(db);
+}
+
 } // namespace
 
 SettingsController::SettingsController(QObject* parent)
@@ -181,6 +239,41 @@ bool SettingsController::enableOcr() const
 bool SettingsController::embeddingEnabled() const
 {
     return m_settings.value(QStringLiteral("embeddingEnabled")).toBool(false);
+}
+
+bool SettingsController::queryRouterEnabled() const
+{
+    return m_settings.value(QStringLiteral("queryRouterEnabled")).toBool(true);
+}
+
+bool SettingsController::fastEmbeddingEnabled() const
+{
+    return m_settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true);
+}
+
+bool SettingsController::dualEmbeddingFusionEnabled() const
+{
+    return m_settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true);
+}
+
+bool SettingsController::rerankerCascadeEnabled() const
+{
+    return m_settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true);
+}
+
+bool SettingsController::personalizedLtrEnabled() const
+{
+    return m_settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true);
+}
+
+int SettingsController::semanticBudgetMs() const
+{
+    return m_settings.value(QStringLiteral("semanticBudgetMs")).toInt(70);
+}
+
+int SettingsController::rerankBudgetMs() const
+{
+    return m_settings.value(QStringLiteral("rerankBudgetMs")).toInt(120);
 }
 
 int SettingsController::maxFileSizeMB() const
@@ -368,6 +461,85 @@ void SettingsController::setEmbeddingEnabled(bool enabled)
     saveSettings();
     emit embeddingEnabledChanged();
     emit settingsChanged(QStringLiteral("embeddingEnabled"));
+}
+
+void SettingsController::setQueryRouterEnabled(bool enabled)
+{
+    if (queryRouterEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("queryRouterEnabled")] = enabled;
+    saveSettings();
+    emit queryRouterEnabledChanged();
+    emit settingsChanged(QStringLiteral("queryRouterEnabled"));
+}
+
+void SettingsController::setFastEmbeddingEnabled(bool enabled)
+{
+    if (fastEmbeddingEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("fastEmbeddingEnabled")] = enabled;
+    saveSettings();
+    emit fastEmbeddingEnabledChanged();
+    emit settingsChanged(QStringLiteral("fastEmbeddingEnabled"));
+}
+
+void SettingsController::setDualEmbeddingFusionEnabled(bool enabled)
+{
+    if (dualEmbeddingFusionEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("dualEmbeddingFusionEnabled")] = enabled;
+    saveSettings();
+    emit dualEmbeddingFusionEnabledChanged();
+    emit settingsChanged(QStringLiteral("dualEmbeddingFusionEnabled"));
+}
+
+void SettingsController::setRerankerCascadeEnabled(bool enabled)
+{
+    if (rerankerCascadeEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("rerankerCascadeEnabled")] = enabled;
+    saveSettings();
+    emit rerankerCascadeEnabledChanged();
+    emit settingsChanged(QStringLiteral("rerankerCascadeEnabled"));
+}
+
+void SettingsController::setPersonalizedLtrEnabled(bool enabled)
+{
+    if (personalizedLtrEnabled() == enabled) {
+        return;
+    }
+    m_settings[QStringLiteral("personalizedLtrEnabled")] = enabled;
+    saveSettings();
+    emit personalizedLtrEnabledChanged();
+    emit settingsChanged(QStringLiteral("personalizedLtrEnabled"));
+}
+
+void SettingsController::setSemanticBudgetMs(int ms)
+{
+    const int clamped = std::clamp(ms, 20, 500);
+    if (semanticBudgetMs() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("semanticBudgetMs")] = clamped;
+    saveSettings();
+    emit semanticBudgetMsChanged();
+    emit settingsChanged(QStringLiteral("semanticBudgetMs"));
+}
+
+void SettingsController::setRerankBudgetMs(int ms)
+{
+    const int clamped = std::clamp(ms, 40, 600);
+    if (rerankBudgetMs() == clamped) {
+        return;
+    }
+    m_settings[QStringLiteral("rerankBudgetMs")] = clamped;
+    saveSettings();
+    emit rerankBudgetMsChanged();
+    emit settingsChanged(QStringLiteral("rerankBudgetMs"));
 }
 
 void SettingsController::setMaxFileSizeMB(int mb)
@@ -608,6 +780,13 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("enablePdf"), true);
     ensureDefault(m_settings, QStringLiteral("enableOcr"), false);
     ensureDefault(m_settings, QStringLiteral("embeddingEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("queryRouterEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("fastEmbeddingEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("rerankerCascadeEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("personalizedLtrEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("semanticBudgetMs"), 70);
+    ensureDefault(m_settings, QStringLiteral("rerankBudgetMs"), 120);
     ensureDefault(m_settings, QStringLiteral("maxFileSizeMB"), 50);
     ensureDefault(m_settings, QStringLiteral("userPatterns"), QJsonArray{});
     ensureDefault(m_settings, QStringLiteral("enableFeedbackLogging"), true);
@@ -639,6 +818,7 @@ void SettingsController::saveSettings()
 
     file.write(QJsonDocument(m_settings).toJson(QJsonDocument::Indented));
     file.commit();
+    syncRuntimeSettingsToDb(m_settings);
 }
 
 QString SettingsController::settingsFilePath() const
