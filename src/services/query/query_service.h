@@ -27,6 +27,7 @@ class FeedbackAggregator;
 class PathPreferences;
 class TypeAffinity;
 class PersonalizedLtr;
+class QaExtractiveModel;
 class VectorIndex;
 class VectorStore;
 class SearchMerger;
@@ -81,6 +82,7 @@ private:
     std::unique_ptr<CrossEncoderReranker> m_crossEncoderReranker;
     std::unique_ptr<CrossEncoderReranker> m_fastCrossEncoderReranker;
     std::unique_ptr<PersonalizedLtr> m_personalizedLtr;
+    std::unique_ptr<QaExtractiveModel> m_qaExtractiveModel;
 
     struct VectorRebuildState {
         enum class Status {

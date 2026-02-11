@@ -14,6 +14,7 @@
 #include "core/ranking/match_classifier.h"
 #include "core/ranking/cross_encoder_reranker.h"
 #include "core/ranking/personalized_ltr.h"
+#include "core/ranking/qa_extractive_model.h"
 #include "core/ranking/reranker_cascade.h"
 
 #include <sqlite3.h>
@@ -816,6 +817,14 @@ void QueryService::initM2Modules()
                  qUtf8Printable(m_personalizedLtr->modelVersion()));
     } else {
         LOG_WARN(bsIpc, "Personalized LTR unavailable (cold start)");
+    }
+
+    m_qaExtractiveModel =
+        std::make_unique<QaExtractiveModel>(m_modelRegistry.get(), "qa-extractive");
+    if (m_qaExtractiveModel->initialize()) {
+        LOG_INFO(bsIpc, "QA extractive model initialized");
+    } else {
+        LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
     }
 
     maybeStartBackgroundVectorMigration();
@@ -2680,6 +2689,7 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     QElapsedTimer timer;
     timer.start();
     const bool qaModelDeclared = m_modelRegistry && m_modelRegistry->hasModel("qa-extractive");
+    const bool qaModelActive = m_qaExtractiveModel && m_qaExtractiveModel->isAvailable();
 
     if (signalTokens.isEmpty()) {
         QJsonObject result;
@@ -2761,6 +2771,8 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     int bestOverlap = 0;
     int bestChunkIndex = 0;
     double bestScore = -1.0;
+    QaExtractiveModel::Answer bestModelAnswer;
+    int bestModelChunkIndex = -1;
     const QString queryLower = query.toLower();
 
     for (size_t chunkIdx = 0; chunkIdx < chunks.size(); ++chunkIdx) {
@@ -2770,6 +2782,14 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
         }
 
         const QString& chunk = chunks[chunkIdx];
+        if (qaModelActive) {
+            const auto modelAnswer = m_qaExtractiveModel->extract(query, chunk, maxChars);
+            if (modelAnswer.available && (!bestModelAnswer.available
+                                          || modelAnswer.confidence > bestModelAnswer.confidence)) {
+                bestModelAnswer = modelAnswer;
+                bestModelChunkIndex = static_cast<int>(chunkIdx);
+            }
+        }
         QStringList candidates = splitAnswerSentences(chunk);
         if (candidates.empty()) {
             candidates.push_back(chunk.simplified());
@@ -2827,6 +2847,24 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     }
 
     if (bestSentence.isEmpty() || bestScore < 0.20) {
+        if (bestModelAnswer.available) {
+            QJsonObject result;
+            result[QStringLiteral("available")] = true;
+            result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
+            result[QStringLiteral("path")] = path;
+            result[QStringLiteral("answer")] = bestModelAnswer.answer;
+            result[QStringLiteral("confidence")] = bestModelAnswer.confidence;
+            result[QStringLiteral("reason")] = QStringLiteral("ok");
+            result[QStringLiteral("source")] = QStringLiteral("qa_extractive_model");
+            result[QStringLiteral("timedOut")] = false;
+            result[QStringLiteral("elapsedMs")] = timer.elapsed();
+            result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+            result[QStringLiteral("qaModelActive")] = qaModelActive;
+            result[QStringLiteral("matchedTokens")] = 0;
+            result[QStringLiteral("chunkOrdinal")] = bestModelChunkIndex;
+            return IpcMessage::makeResponse(id, result);
+        }
+
         QJsonObject result;
         result[QStringLiteral("available")] = false;
         result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
@@ -2840,21 +2878,30 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     }
 
     const QString clipped = clipAnswerText(bestSentence, maxChars, queryTokens);
-    const double confidence = std::clamp(bestScore / 1.8, 0.0, 1.0);
+    double confidence = std::clamp(bestScore / 1.8, 0.0, 1.0);
+    QString source = QStringLiteral("extractive_preview");
+    int chunkOrdinal = bestChunkIndex;
+    if (bestModelAnswer.available && bestModelAnswer.confidence >= confidence) {
+        confidence = bestModelAnswer.confidence;
+        source = QStringLiteral("qa_extractive_model");
+        chunkOrdinal = bestModelChunkIndex;
+    }
 
     QJsonObject result;
     result[QStringLiteral("available")] = true;
     result[QStringLiteral("itemId")] = static_cast<qint64>(itemId);
     result[QStringLiteral("path")] = path;
-    result[QStringLiteral("answer")] = clipped;
+    result[QStringLiteral("answer")] =
+        (source == QLatin1String("qa_extractive_model")) ? bestModelAnswer.answer : clipped;
     result[QStringLiteral("confidence")] = confidence;
     result[QStringLiteral("reason")] = QStringLiteral("ok");
-    result[QStringLiteral("source")] = QStringLiteral("extractive_preview");
+    result[QStringLiteral("source")] = source;
     result[QStringLiteral("timedOut")] = false;
     result[QStringLiteral("elapsedMs")] = timer.elapsed();
     result[QStringLiteral("qaModelDeclared")] = qaModelDeclared;
+    result[QStringLiteral("qaModelActive")] = qaModelActive;
     result[QStringLiteral("matchedTokens")] = bestOverlap;
-    result[QStringLiteral("chunkOrdinal")] = bestChunkIndex;
+    result[QStringLiteral("chunkOrdinal")] = chunkOrdinal;
     return IpcMessage::makeResponse(id, result);
 }
 
