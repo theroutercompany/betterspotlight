@@ -382,17 +382,38 @@ QVariantMap SearchController::getHealthSync()
             const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
             const int pending = queueResult.value(QStringLiteral("pending")).toInt();
             const int processing = queueResult.value(QStringLiteral("processing")).toInt();
+            const int failed = queueResult.value(QStringLiteral("failed")).toInt();
             const int dropped = queueResult.value(QStringLiteral("dropped")).toInt();
             const bool paused = queueResult.value(QStringLiteral("paused")).toBool();
+            const int preparing = queueResult.value(QStringLiteral("preparing")).toInt();
+            const int writing = queueResult.value(QStringLiteral("writing")).toInt();
+            const bool rebuildRunning = queueResult.value(QStringLiteral("rebuildRunning")).toBool();
+            const QJsonObject lastProgress =
+                queueResult.value(QStringLiteral("lastProgressReport")).toObject();
+            const int scanned = lastProgress.value(QStringLiteral("scanned")).toInt();
+            const int total = lastProgress.value(QStringLiteral("total")).toInt();
+            const double progressPct = total > 0
+                ? (100.0 * static_cast<double>(scanned) / static_cast<double>(total))
+                : 0.0;
 
             indexHealth[QStringLiteral("queuePending")] = pending;
             indexHealth[QStringLiteral("queueInProgress")] = processing;
+            indexHealth[QStringLiteral("queueFailed")] = failed;
             indexHealth[QStringLiteral("queueDropped")] = dropped;
+            indexHealth[QStringLiteral("queuePaused")] = paused;
+            indexHealth[QStringLiteral("queueScanned")] = scanned;
+            indexHealth[QStringLiteral("queueTotal")] = total;
+            indexHealth[QStringLiteral("queueProgressPct")] = progressPct;
+            indexHealth[QStringLiteral("queueRebuildRunning")] = rebuildRunning;
+            indexHealth[QStringLiteral("queueRebuildStatus")] =
+                queueResult.value(QStringLiteral("rebuildStatus")).toString();
+            indexHealth[QStringLiteral("queueRebuildStartedAtMs")] =
+                queueResult.value(QStringLiteral("rebuildStartedAtMs")).toInteger();
+            indexHealth[QStringLiteral("queueRebuildFinishedAtMs")] =
+                queueResult.value(QStringLiteral("rebuildFinishedAtMs")).toInteger();
             indexHealth[QStringLiteral("queueSource")] = QStringLiteral("indexer_rpc");
-            indexHealth[QStringLiteral("queuePreparing")] =
-                queueResult.value(QStringLiteral("preparing")).toInt();
-            indexHealth[QStringLiteral("queueWriting")] =
-                queueResult.value(QStringLiteral("writing")).toInt();
+            indexHealth[QStringLiteral("queuePreparing")] = preparing;
+            indexHealth[QStringLiteral("queueWriting")] = writing;
             indexHealth[QStringLiteral("queueCoalesced")] =
                 queueResult.value(QStringLiteral("coalesced")).toInt();
             indexHealth[QStringLiteral("queueStaleDropped")] =
@@ -401,14 +422,35 @@ QVariantMap SearchController::getHealthSync()
                 queueResult.value(QStringLiteral("prepWorkers")).toInt();
             indexHealth[QStringLiteral("queueWriterBatchDepth")] =
                 queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
+            if (queueResult.contains(QStringLiteral("bsignorePath"))) {
+                indexHealth[QStringLiteral("bsignorePath")] =
+                    queueResult.value(QStringLiteral("bsignorePath")).toString();
+            }
+            if (queueResult.contains(QStringLiteral("bsignoreFileExists"))) {
+                indexHealth[QStringLiteral("bsignoreFileExists")] =
+                    queueResult.value(QStringLiteral("bsignoreFileExists")).toBool();
+            }
+            if (queueResult.contains(QStringLiteral("bsignoreLoaded"))) {
+                indexHealth[QStringLiteral("bsignoreLoaded")] =
+                    queueResult.value(QStringLiteral("bsignoreLoaded")).toBool();
+            }
+            if (queueResult.contains(QStringLiteral("bsignorePatternCount"))) {
+                indexHealth[QStringLiteral("bsignorePatternCount")] =
+                    queueResult.value(QStringLiteral("bsignorePatternCount")).toInt();
+            }
+            if (queueResult.contains(QStringLiteral("bsignoreLastLoadedAtMs"))) {
+                indexHealth[QStringLiteral("bsignoreLastLoadedAtMs")] =
+                    queueResult.value(QStringLiteral("bsignoreLastLoadedAtMs")).toInteger();
+            }
 
             const QJsonArray roots = queueResult.value(QStringLiteral("roots")).toArray();
             if (!roots.isEmpty()) {
                 QJsonArray rootStatus;
+                const bool activeWork =
+                    pending > 0 || processing > 0 || preparing > 0 || writing > 0 || rebuildRunning;
                 const QString status = paused
-                                           ? QStringLiteral("active")
-                                           : (processing > 0 ? QStringLiteral("scanning")
-                                                             : QStringLiteral("active"));
+                    ? QStringLiteral("paused")
+                    : (activeWork ? QStringLiteral("scanning") : QStringLiteral("idle"));
                 for (const QJsonValue& root : roots) {
                     QJsonObject rootEntry;
                     rootEntry[QStringLiteral("path")] = root.toString();

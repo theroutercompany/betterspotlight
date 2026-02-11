@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QStandardPaths>
+#include <QMetaObject>
 #include <cinttypes>
 #include <algorithm>
 
@@ -94,6 +95,7 @@ IndexerService::~IndexerService()
     if (m_pipeline) {
         m_pipeline->stop();
     }
+    joinRebuildThreadIfNeeded();
 }
 
 QJsonObject IndexerService::handleRequest(const QJsonObject& request)
@@ -314,14 +316,50 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
                                      QStringLiteral("Indexing is not running; call startIndexing first"));
     }
 
-    m_pipeline->rebuildAll(m_currentRoots);
+    if (m_rebuildRunning.load()) {
+        QJsonObject result;
+        result[QStringLiteral("started")] = false;
+        result[QStringLiteral("alreadyRunning")] = true;
+        result[QStringLiteral("rebuildStatus")] = QStringLiteral("running");
+        result[QStringLiteral("rebuildStartedAtMs")] = m_rebuildStartedAtMs.load();
+        result[QStringLiteral("rebuildFinishedAtMs")] = m_rebuildFinishedAtMs.load();
+        return IpcMessage::makeResponse(id, result);
+    }
+
+    joinRebuildThreadIfNeeded();
+
+    m_rebuildRunning.store(true);
+    m_rebuildStartedAtMs.store(QDateTime::currentMSecsSinceEpoch());
+    m_rebuildFinishedAtMs.store(0);
+
+    const std::vector<std::string> rebuildRoots = m_currentRoots;
+    m_rebuildThread = std::thread([this, rebuildRoots]() {
+        if (m_pipeline) {
+            m_pipeline->rebuildAll(rebuildRoots);
+        }
+        m_rebuildFinishedAtMs.store(QDateTime::currentMSecsSinceEpoch());
+        m_rebuildRunning.store(false);
+
+        QJsonObject params;
+        params[QStringLiteral("startedAtMs")] = m_rebuildStartedAtMs.load();
+        params[QStringLiteral("finishedAtMs")] = m_rebuildFinishedAtMs.load();
+        params[QStringLiteral("status")] = QStringLiteral("succeeded");
+        QMetaObject::invokeMethod(this, [this, params]() {
+            sendNotification(QStringLiteral("rebuildAllComplete"), params);
+        }, Qt::QueuedConnection);
+    });
 
     LOG_INFO(bsIpc, "Rebuild all initiated");
 
     QJsonObject result;
-    result[QStringLiteral("cleared")] = true;
+    result[QStringLiteral("started")] = true;
+    result[QStringLiteral("alreadyRunning")] = false;
+    result[QStringLiteral("cleared")] = false;
     result[QStringLiteral("deletedEntries")] = 0;
     result[QStringLiteral("reindexingStarted")] = true;
+    result[QStringLiteral("rebuildStatus")] = QStringLiteral("running");
+    result[QStringLiteral("rebuildStartedAtMs")] = m_rebuildStartedAtMs.load();
+    result[QStringLiteral("rebuildFinishedAtMs")] = m_rebuildFinishedAtMs.load();
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -346,8 +384,16 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("paused")] = false;
         result[QStringLiteral("roots")] = roots;
         result[QStringLiteral("lastProgressReport")] = lastProgress;
+        result[QStringLiteral("rebuildRunning")] = m_rebuildRunning.load();
+        result[QStringLiteral("rebuildStatus")] = m_rebuildRunning.load()
+            ? QStringLiteral("running")
+            : QStringLiteral("idle");
+        result[QStringLiteral("rebuildStartedAtMs")] = m_rebuildStartedAtMs.load();
+        result[QStringLiteral("rebuildFinishedAtMs")] = m_rebuildFinishedAtMs.load();
         const QJsonObject bsignore = bsignoreStatusJson();
         result[QStringLiteral("bsignorePath")] = bsignore.value(QStringLiteral("path")).toString();
+        result[QStringLiteral("bsignoreFileExists")] =
+            bsignore.value(QStringLiteral("fileExists")).toBool(false);
         result[QStringLiteral("bsignoreLoaded")] = bsignore.value(QStringLiteral("loaded")).toBool(false);
         result[QStringLiteral("bsignorePatternCount")] =
             bsignore.value(QStringLiteral("patternCount")).toInt(0);
@@ -378,8 +424,16 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     result[QStringLiteral("writerBatchDepth")] = static_cast<qint64>(stats.writerBatchDepth);
     result[QStringLiteral("roots")] = roots;
     result[QStringLiteral("lastProgressReport")] = lastProgress;
+    result[QStringLiteral("rebuildRunning")] = m_rebuildRunning.load();
+    result[QStringLiteral("rebuildStatus")] = m_rebuildRunning.load()
+        ? QStringLiteral("running")
+        : QStringLiteral("idle");
+    result[QStringLiteral("rebuildStartedAtMs")] = m_rebuildStartedAtMs.load();
+    result[QStringLiteral("rebuildFinishedAtMs")] = m_rebuildFinishedAtMs.load();
     const QJsonObject bsignore = bsignoreStatusJson();
     result[QStringLiteral("bsignorePath")] = bsignore.value(QStringLiteral("path")).toString();
+    result[QStringLiteral("bsignoreFileExists")] =
+        bsignore.value(QStringLiteral("fileExists")).toBool(false);
     result[QStringLiteral("bsignoreLoaded")] = bsignore.value(QStringLiteral("loaded")).toBool(false);
     result[QStringLiteral("bsignorePatternCount")] =
         bsignore.value(QStringLiteral("patternCount")).toInt(0);
@@ -387,6 +441,16 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
     result[QStringLiteral("memory")] = memoryTelemetry();
     return IpcMessage::makeResponse(id, result);
+}
+
+void IndexerService::joinRebuildThreadIfNeeded()
+{
+    if (m_rebuildThread.joinable()) {
+        if (m_rebuildThread.get_id() == std::this_thread::get_id()) {
+            return;
+        }
+        m_rebuildThread.join();
+    }
 }
 
 void IndexerService::configureBsignoreWatcher()
@@ -440,6 +504,7 @@ QJsonObject IndexerService::bsignoreStatusJson() const
 {
     QJsonObject status;
     status[QStringLiteral("path")] = m_bsignorePath;
+    status[QStringLiteral("fileExists")] = QFileInfo::exists(m_bsignorePath);
     status[QStringLiteral("loaded")] = m_bsignoreLoaded;
     status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
     status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;

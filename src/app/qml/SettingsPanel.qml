@@ -1343,6 +1343,15 @@ Window {
                         if (!healthData) return false
                         return (healthData["vectorRebuildStatus"] || "idle") === "running"
                     }
+                    property bool indexWorkRunning: {
+                        if (!healthData) return false
+                        var pending = Number(healthData["queuePending"] || 0)
+                        var inProgress = Number(healthData["queueInProgress"] || 0)
+                        var preparing = Number(healthData["queuePreparing"] || 0)
+                        var writing = Number(healthData["queueWriting"] || 0)
+                        var rebuildAll = healthData["queueRebuildRunning"] === true
+                        return pending > 0 || inProgress > 0 || preparing > 0 || writing > 0 || rebuildAll
+                    }
 
                     function setActionStatus(message, isError) {
                         actionStatusMessage = message || ""
@@ -1370,7 +1379,7 @@ Window {
                             healthTab.diagnosticsData = serviceManager.serviceDiagnostics()
                         }
 
-                        if (healthTab.vectorRebuildRunning) {
+                        if (healthTab.vectorRebuildRunning || healthTab.indexWorkRunning) {
                             if (!healthRefreshTimer.running) {
                                 healthRefreshTimer.start()
                             }
@@ -1511,8 +1520,10 @@ Window {
                                             width: 8; height: 8; radius: 4
                                             color: {
                                                 var st = modelData.status || "unknown"
-                                                if (st === "active") return "#2E7D32"
                                                 if (st === "scanning") return "#F57F17"
+                                                if (st === "active") return "#2E7D32"
+                                                if (st === "idle") return "#999999"
+                                                if (st === "paused") return "#1565C0"
                                                 if (st === "error") return "#C62828"
                                                 return "#999999"
                                             }
@@ -1525,8 +1536,10 @@ Window {
                                         Label {
                                             text: {
                                                 var st = modelData.status || "unknown"
-                                                if (st === "active") return qsTr("Active")
                                                 if (st === "scanning") return qsTr("Scanning")
+                                                if (st === "active") return qsTr("Active")
+                                                if (st === "idle") return qsTr("Idle")
+                                                if (st === "paused") return qsTr("Paused")
                                                 if (st === "error") return qsTr("Error")
                                                 return qsTr("Unknown")
                                             }
@@ -1608,8 +1621,16 @@ Window {
                                     model: [
                                         { label: qsTr("Pending"), key: "queuePending", format: "int" },
                                         { label: qsTr("In Progress"), key: "queueInProgress", format: "int" },
+                                        { label: qsTr("Preparing"), key: "queuePreparing", format: "int" },
+                                        { label: qsTr("Writing"), key: "queueWriting", format: "int" },
+                                        { label: qsTr("Failed"), key: "queueFailed", format: "int" },
                                         { label: qsTr("Dropped"), key: "queueDropped", format: "int" },
-                                        { label: qsTr("Embedding Queue"), key: "queueEmbedding", format: "int" }
+                                        { label: qsTr("Embedding Queue"), key: "queueEmbedding", format: "int" },
+                                        { label: qsTr("Scanned"), key: "queueScanned", format: "int" },
+                                        { label: qsTr("Total"), key: "queueTotal", format: "int" },
+                                        { label: qsTr("Scan Progress"), key: "queueProgressPct", format: "percent" },
+                                        { label: qsTr("Paused"), key: "queuePaused", format: "string_bool" },
+                                        { label: qsTr("Rebuild-All Status"), key: "queueRebuildStatus", format: "status" }
                                     ]
 
                                     delegate: RowLayout {
@@ -1695,11 +1716,35 @@ Window {
                                 Label {
                                     property var bsignore: (healthTab.healthData["bsignoreDetails"] || {})
                                     text: qsTr("Loaded: %1   Patterns: %2")
-                                        .arg((bsignore["loaded"] === true || healthTab.healthData["bsignoreLoaded"] === true)
-                                             ? qsTr("Yes") : qsTr("No"))
+                                        .arg((function() {
+                                            var hasDetailExists = (bsignore["fileExists"] === true || bsignore["fileExists"] === false)
+                                            var exists = hasDetailExists
+                                                ? (bsignore["fileExists"] === true)
+                                                : (healthTab.healthData["bsignoreFileExists"] === true)
+                                            var loaded = (bsignore["loaded"] === true || healthTab.healthData["bsignoreLoaded"] === true)
+                                            if (!exists) {
+                                                return qsTr("No (file missing)")
+                                            }
+                                            return loaded ? qsTr("Yes") : qsTr("No")
+                                        })())
                                         .arg(Number(bsignore["patternCount"] || healthTab.healthData["bsignorePatternCount"] || 0).toLocaleString())
                                     font.pixelSize: 12
                                     color: "#1A1A1A"
+                                }
+
+                                Label {
+                                    property var bsignore: (healthTab.healthData["bsignoreDetails"] || {})
+                                    text: qsTr("File Exists: %1")
+                                        .arg((function() {
+                                            if (bsignore["fileExists"] === true || bsignore["fileExists"] === false) {
+                                                return bsignore["fileExists"] === true ? qsTr("Yes") : qsTr("No")
+                                            }
+                                            return healthTab.healthData["bsignoreFileExists"] === true
+                                                ? qsTr("Yes")
+                                                : qsTr("No")
+                                        })())
+                                    font.pixelSize: 12
+                                    color: "#666666"
                                 }
 
                                 Label {
@@ -2567,6 +2612,8 @@ Window {
         switch (format) {
         case "bool":
             return val ? qsTr("Healthy") : qsTr("Unhealthy")
+        case "string_bool":
+            return val ? qsTr("Yes") : qsTr("No")
         case "status":
             if (!val || val === "idle") return qsTr("Idle")
             if (val === "running") return qsTr("Running")

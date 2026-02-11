@@ -12,6 +12,8 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <atomic>
+#include <thread>
 
 namespace bs {
 
@@ -33,6 +35,7 @@ private:
     QJsonObject handleReindexPath(uint64_t id, const QJsonObject& params);
     QJsonObject handleRebuildAll(uint64_t id);
     QJsonObject handleGetQueueStatus(uint64_t id);
+    void joinRebuildThreadIfNeeded();
     void configureBsignoreWatcher();
     void reloadBsignore();
     QJsonObject bsignoreStatusJson() const;
@@ -49,6 +52,10 @@ private:
     std::unique_ptr<Pipeline> m_pipeline;
 
     bool m_isIndexing = false;
+    std::atomic<bool> m_rebuildRunning{false};
+    std::atomic<qint64> m_rebuildStartedAtMs{0};
+    std::atomic<qint64> m_rebuildFinishedAtMs{0};
+    std::thread m_rebuildThread;
 
     // Stored roots for rebuild
     std::vector<std::string> m_currentRoots;

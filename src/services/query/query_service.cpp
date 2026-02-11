@@ -914,7 +914,7 @@ void QueryService::reloadBsignore()
         m_bsignoreLoaded = m_bsignoreParser.loadFromFile(m_bsignorePath.toStdString());
     } else {
         m_bsignoreParser.clear();
-        m_bsignoreLoaded = true;
+        m_bsignoreLoaded = false;
     }
     m_bsignorePatternCount = static_cast<int>(m_bsignoreParser.patterns().size());
 
@@ -948,6 +948,7 @@ QJsonObject QueryService::bsignoreStatusJson() const
 {
     QJsonObject status;
     status[QStringLiteral("path")] = m_bsignorePath;
+    status[QStringLiteral("fileExists")] = QFileInfo::exists(m_bsignorePath);
     status[QStringLiteral("loaded")] = m_bsignoreLoaded;
     status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
     status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;
@@ -3423,6 +3424,8 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("vectorGeneration")] = vectorGeneration;
     const QJsonObject bsignoreStatus = bsignoreStatusJson();
     indexHealth[QStringLiteral("bsignorePath")] = bsignoreStatus.value(QStringLiteral("path")).toString();
+    indexHealth[QStringLiteral("bsignoreFileExists")] =
+        bsignoreStatus.value(QStringLiteral("fileExists")).toBool(false);
     indexHealth[QStringLiteral("bsignoreLoaded")] = bsignoreStatus.value(QStringLiteral("loaded")).toBool(false);
     indexHealth[QStringLiteral("bsignorePatternCount")] =
         bsignoreStatus.value(QStringLiteral("patternCount")).toInt(0);

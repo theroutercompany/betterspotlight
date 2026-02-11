@@ -2,6 +2,7 @@
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QFile>
+#include <QFileInfo>
 #include <QTextStream>
 #include "core/fs/path_rules.h"
 
@@ -66,6 +67,7 @@ private slots:
     void testLoadBsignoreAppliesPatterns();
     void testReloadBsignoreReflectsChanges();
     void testReloadBsignoreMissingFileClearsPatterns();
+    void testLoadBsignoreMissingFileMarksNotLoaded();
 
     // ── Edge cases ───────────────────────────────────────────────
     void testEmptyPath();
@@ -443,6 +445,20 @@ void TestPathRules::testReloadBsignoreMissingFileClearsPatterns()
     QVERIFY(QFile::remove(bsignorePath));
     QVERIFY(rules.reloadBsignore());
     QCOMPARE(rules.validate("/Users/me/project/x.cache"), bs::ValidationResult::Include);
+}
+
+void TestPathRules::testLoadBsignoreMissingFileMarksNotLoaded()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    const QString bsignorePath = dir.path() + "/.bsignore";
+    QVERIFY(!QFileInfo::exists(bsignorePath));
+
+    bs::PathRules rules;
+    QVERIFY(rules.loadBsignore(bsignorePath.toStdString()));
+    QCOMPARE(rules.bsignoreLoaded(), false);
+    QCOMPARE(rules.bsignorePatternCount(), static_cast<size_t>(0));
 }
 
 // ── Edge cases ───────────────────────────────────────────────────

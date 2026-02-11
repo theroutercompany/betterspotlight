@@ -267,7 +267,7 @@ bool PathRules::loadBsignore(const std::string& bsignorePath)
     if (!info.exists()) {
         m_bsignoreParser.clear();
         m_bsignorePatternCount = 0;
-        m_bsignoreLoaded = true;
+        m_bsignoreLoaded = false;
         LOG_INFO(bsFs, ".bsignore not found at %s; using empty pattern set",
                  bsignorePath.c_str());
         return true;
