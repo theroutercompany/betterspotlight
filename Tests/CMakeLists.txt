@@ -91,6 +91,10 @@ bs_add_test(test-rules-engine        Unit/test_rules_engine.cpp)
 
 # ── M3 Unit tests ────────────────────────────────────────────────
 bs_add_test(test-model-registry    Unit/test_model_registry.cpp)
+bs_add_test(test-query-router      Unit/test_query_router.cpp)
+bs_add_test(test-reranker-cascade  Unit/test_reranker_cascade.cpp)
+bs_add_test(test-personalized-ltr  Unit/test_personalized_ltr.cpp)
+bs_add_test(test-dual-index-calibration Unit/test_dual_index_calibration.cpp)
 
 # ── Wave 3: Stability & reliability tests ─────────────────────────
 bs_add_test(test-sqlite-store-reliability     Unit/test_sqlite_store_reliability.cpp)

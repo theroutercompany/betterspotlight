@@ -36,6 +36,8 @@ void TestModelRegistry::testManifestParsing()
                 "outputs": ["last_hidden_state"],
                 "extractionStrategy": "cls_token",
                 "semanticAggregationMode": "max_softmax_cap",
+                "latencyTier": "strong",
+                "task": "embedding",
                 "providerPolicy": {
                     "preferredProvider": "coreml",
                     "preferCoreMl": true,
@@ -53,7 +55,9 @@ void TestModelRegistry::testManifestParsing()
                 "tokenizer": "wordpiece",
                 "inputs": ["input_ids", "attention_mask"],
                 "outputs": ["logits"],
-                "extractionStrategy": "single_score"
+                "extractionStrategy": "single_score",
+                "latencyTier": "fast",
+                "task": "rerank"
             }
         }
     })";
@@ -85,6 +89,8 @@ void TestModelRegistry::testManifestParsing()
     QCOMPARE(biEncoder.inputs[2], QStringLiteral("token_type_ids"));
     QCOMPARE(biEncoder.outputs.size(), 1UL);
     QCOMPARE(biEncoder.outputs[0], QStringLiteral("last_hidden_state"));
+    QCOMPARE(biEncoder.latencyTier, QStringLiteral("strong"));
+    QCOMPARE(biEncoder.task, QStringLiteral("embedding"));
     QCOMPARE(biEncoder.providerPolicy.preferredProvider, QStringLiteral("coreml"));
     QCOMPARE(biEncoder.providerPolicy.preferCoreMl, true);
     QCOMPARE(biEncoder.providerPolicy.allowCpuFallback, true);
@@ -96,6 +102,8 @@ void TestModelRegistry::testManifestParsing()
     QCOMPARE(crossEncoder.name, QStringLiteral("ms-marco-MiniLM-L-6-v2"));
     QCOMPARE(crossEncoder.dimensions, 1);
     QCOMPARE(crossEncoder.inputs.size(), 2UL);
+    QCOMPARE(crossEncoder.latencyTier, QStringLiteral("fast"));
+    QCOMPARE(crossEncoder.task, QStringLiteral("rerank"));
 }
 
 void TestModelRegistry::testManifestMissingFile()

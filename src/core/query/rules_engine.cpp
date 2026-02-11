@@ -3,6 +3,7 @@
 #include "core/query/doctype_classifier.h"
 #include "core/query/entity_extractor.h"
 #include "core/query/query_normalizer.h"
+#include "core/query/query_router.h"
 #include "core/query/stopwords.h"
 #include "core/query/temporal_parser.h"
 
@@ -47,8 +48,24 @@ StructuredQuery RulesEngine::analyze(const QString& originalQuery)
         }
     }
 
-    // NLU confidence: always 0.0 for rules-based engine
-    sq.nluConfidence = 0.0f;
+    // Query router augments deterministic rules with class/domain confidence.
+    const QueryRouterResult router = QueryRouter::route(
+        originalQuery, sq.cleanedQuery, sq.keyTokens);
+    if (router.valid) {
+        sq.queryClass = router.queryClass;
+        sq.queryClassConfidence = router.routerConfidence;
+        sq.queryDomain = router.queryDomain;
+        sq.queryDomainConfidence = router.queryDomainConfidence;
+        sq.semanticNeedScore = router.semanticNeedScore;
+        sq.nluConfidence = router.routerConfidence;
+    } else {
+        sq.queryClass = QueryClass::Unknown;
+        sq.queryClassConfidence = 0.0f;
+        sq.queryDomain = QueryDomain::Unknown;
+        sq.queryDomainConfidence = 0.0f;
+        sq.semanticNeedScore = 0.0f;
+        sq.nluConfidence = 0.0f;
+    }
 
     return sq;
 }

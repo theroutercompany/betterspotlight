@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #if defined(ONNXRUNTIME_FOUND) && __has_include(<onnxruntime_cxx_api.h>)
 #define BS_WITH_ONNX 1
@@ -56,8 +57,9 @@ public:
     bool available = false;
 };
 
-CrossEncoderReranker::CrossEncoderReranker(ModelRegistry* registry)
+CrossEncoderReranker::CrossEncoderReranker(ModelRegistry* registry, std::string role)
     : m_impl(std::make_unique<Impl>())
+    , m_role(std::move(role))
 {
     m_impl->registry = registry;
 }
@@ -72,9 +74,13 @@ bool CrossEncoderReranker::initialize()
         return false;
     }
 
-    ModelSession* modelSession = m_impl->registry->getSession("cross-encoder");
+    if (m_role.empty()) {
+        m_role = "cross-encoder";
+    }
+    ModelSession* modelSession = m_impl->registry->getSession(m_role);
     if (!modelSession || !modelSession->isAvailable()) {
-        qWarning() << "CrossEncoderReranker: cross-encoder session unavailable";
+        qWarning() << "CrossEncoderReranker:" << QString::fromStdString(m_role)
+                   << "session unavailable";
         return false;
     }
 
