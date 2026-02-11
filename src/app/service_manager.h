@@ -88,6 +88,10 @@ private:
     bool m_indexingActive = false;
     TrayState m_trayState = TrayState::Indexing;
     QTimer m_indexingStatusTimer;
+    bool m_lastQueueRebuildRunning = false;
+    qint64 m_lastQueueRebuildFinishedAtMs = 0;
+    bool m_pendingPostRebuildVectorRefresh = false;
+    int m_pendingPostRebuildVectorRefreshAttempts = 0;
 };
 
 } // namespace bs

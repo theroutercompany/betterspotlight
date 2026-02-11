@@ -89,6 +89,36 @@ bool isErrorStatus(const QString& status)
     return status == QLatin1String("error") || status == QLatin1String("crashed");
 }
 
+bool readBoolSetting(const QJsonObject& settings, const QString& key, bool fallback)
+{
+    if (!settings.contains(key)) {
+        return fallback;
+    }
+    const QJsonValue value = settings.value(key);
+    if (value.isBool()) {
+        return value.toBool(fallback);
+    }
+    if (value.isDouble()) {
+        return value.toDouble(fallback ? 1.0 : 0.0) != 0.0;
+    }
+    if (value.isString()) {
+        const QString normalized = value.toString().trimmed().toLower();
+        if (normalized == QLatin1String("1")
+            || normalized == QLatin1String("true")
+            || normalized == QLatin1String("on")
+            || normalized == QLatin1String("yes")) {
+            return true;
+        }
+        if (normalized == QLatin1String("0")
+            || normalized == QLatin1String("false")
+            || normalized == QLatin1String("off")
+            || normalized == QLatin1String("no")) {
+            return false;
+        }
+    }
+    return fallback;
+}
+
 QJsonObject readAppSettings()
 {
     const QString settingsPath =
@@ -171,6 +201,10 @@ void ServiceManager::start()
     LOG_INFO(bsCore, "ServiceManager: starting services");
     m_initialIndexingStarted = false;
     m_indexingActive = false;
+    m_lastQueueRebuildRunning = false;
+    m_lastQueueRebuildFinishedAtMs = 0;
+    m_pendingPostRebuildVectorRefresh = false;
+    m_pendingPostRebuildVectorRefreshAttempts = 0;
 
     // Register all three service binaries
     const QStringList serviceNames = {
@@ -209,6 +243,10 @@ void ServiceManager::stop()
     m_allReady = false;
     m_initialIndexingStarted = false;
     m_indexingActive = false;
+    m_lastQueueRebuildRunning = false;
+    m_lastQueueRebuildFinishedAtMs = 0;
+    m_pendingPostRebuildVectorRefresh = false;
+    m_pendingPostRebuildVectorRefreshAttempts = 0;
     m_indexingStatusTimer.stop();
     m_indexerStatus = QStringLiteral("stopped");
     m_extractorStatus = QStringLiteral("stopped");
@@ -591,7 +629,52 @@ void ServiceManager::refreshIndexerQueueStatus()
     const qint64 processing = result.value(QStringLiteral("processing")).toInteger();
     const qint64 preparing = result.value(QStringLiteral("preparing")).toInteger();
     const qint64 writing = result.value(QStringLiteral("writing")).toInteger();
+    const bool rebuildRunning = result.value(QStringLiteral("rebuildRunning")).toBool(false);
+    const qint64 rebuildFinishedAtMs =
+        result.value(QStringLiteral("rebuildFinishedAtMs")).toInteger();
     const bool active = pending > 0 || processing > 0 || preparing > 0 || writing > 0;
+
+    // Rebuild-All is a two-phase operation: filesystem indexing first, then vector
+    // rebuild. Automatically trigger phase 2 after rebuild-all scan/index drain.
+    if (m_lastQueueRebuildRunning && !rebuildRunning
+        && rebuildFinishedAtMs > 0
+        && rebuildFinishedAtMs != m_lastQueueRebuildFinishedAtMs) {
+        const QJsonObject settings = readAppSettings();
+        if (readBoolSetting(settings, QStringLiteral("autoVectorMigration"), true)) {
+            m_pendingPostRebuildVectorRefresh = true;
+            m_pendingPostRebuildVectorRefreshAttempts = 0;
+            LOG_INFO(bsCore,
+                     "ServiceManager: index rebuild completed at %lld, scheduling vector rebuild",
+                     static_cast<long long>(rebuildFinishedAtMs));
+        } else {
+            LOG_INFO(bsCore,
+                     "ServiceManager: index rebuild completed but auto vector migration is disabled");
+        }
+    }
+
+    m_lastQueueRebuildRunning = rebuildRunning;
+    if (rebuildFinishedAtMs > 0) {
+        m_lastQueueRebuildFinishedAtMs = rebuildFinishedAtMs;
+    }
+
+    if (m_pendingPostRebuildVectorRefresh && !rebuildRunning) {
+        if (m_pendingPostRebuildVectorRefreshAttempts >= 5) {
+            LOG_WARN(bsCore,
+                     "ServiceManager: giving up auto vector rebuild after %d attempts",
+                     m_pendingPostRebuildVectorRefreshAttempts);
+            m_pendingPostRebuildVectorRefresh = false;
+            m_pendingPostRebuildVectorRefreshAttempts = 0;
+        } else {
+            ++m_pendingPostRebuildVectorRefreshAttempts;
+            if (rebuildVectorIndex()) {
+                LOG_INFO(bsCore,
+                         "ServiceManager: auto vector rebuild triggered (attempt=%d)",
+                         m_pendingPostRebuildVectorRefreshAttempts);
+                m_pendingPostRebuildVectorRefresh = false;
+                m_pendingPostRebuildVectorRefreshAttempts = 0;
+            }
+        }
+    }
 
     if (m_indexingActive == active) {
         return;
