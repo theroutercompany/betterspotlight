@@ -96,6 +96,29 @@ Rectangle {
                 maximumLineCount: 1
                 visible: text.length > 0
             }
+
+            Rectangle {
+                Layout.fillWidth: true
+                radius: 4
+                color: isSelected ? "#FFFFFF26" : "#EEF3F9"
+                visible: (itemData.answerStatus || "") === "loading"
+                      || (itemData.answerSnippet || "").length > 0
+                implicitHeight: answerText.implicitHeight + 8
+
+                Text {
+                    id: answerText
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    text: (itemData.answerStatus || "") === "loading"
+                        ? "Generating answer preview..."
+                        : ("Answer: " + (itemData.answerSnippet || ""))
+                    font.pixelSize: 10
+                    color: isSelected ? "#FFFFFFE0" : "#2C3A4B"
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                }
+            }
         }
 
         ColumnLayout {

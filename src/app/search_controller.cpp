@@ -185,6 +185,108 @@ void SearchController::copyPath(int index)
     }
 }
 
+QVariantMap SearchController::requestAnswerSnippet(int index)
+{
+    QVariantMap responseSummary;
+    responseSummary[QStringLiteral("ok")] = false;
+
+    const int resultIndex = resultIndexForRow(index);
+    if (resultIndex < 0 || resultIndex >= m_results.size()) {
+        responseSummary[QStringLiteral("reason")] = QStringLiteral("invalid_index");
+        return responseSummary;
+    }
+
+    if (!m_supervisor) {
+        responseSummary[QStringLiteral("reason")] = QStringLiteral("supervisor_unavailable");
+        return responseSummary;
+    }
+    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
+    if (!client || !client->isConnected()) {
+        responseSummary[QStringLiteral("reason")] = QStringLiteral("query_service_unavailable");
+        return responseSummary;
+    }
+
+    QVariantMap item = m_results.at(resultIndex).toMap();
+    const qint64 itemId = item.value(QStringLiteral("itemId")).toLongLong();
+    const QString path = item.value(QStringLiteral("path")).toString();
+    const QString trimmedQuery = m_query.trimmed();
+    if (trimmedQuery.isEmpty() || (itemId <= 0 && path.isEmpty())) {
+        responseSummary[QStringLiteral("reason")] = QStringLiteral("missing_input");
+        return responseSummary;
+    }
+
+    item[QStringLiteral("answerStatus")] = QStringLiteral("loading");
+    item[QStringLiteral("answerSnippet")] = QString();
+    m_results[resultIndex] = item;
+    rebuildResultRows();
+    emit resultsChanged();
+    emit resultRowsChanged();
+    emit selectedIndexChanged();
+
+    QJsonObject params;
+    params[QStringLiteral("query")] = trimmedQuery;
+    params[QStringLiteral("itemId")] = itemId;
+    params[QStringLiteral("path")] = path;
+    params[QStringLiteral("timeoutMs")] = 350;
+    params[QStringLiteral("maxChars")] = 240;
+
+    const auto response = client->sendRequest(QStringLiteral("getAnswerSnippet"), params, 1200);
+    if (!response.has_value()) {
+        item[QStringLiteral("answerStatus")] = QStringLiteral("unavailable");
+        item[QStringLiteral("answerSnippet")] = QString();
+        item[QStringLiteral("answerReason")] = QStringLiteral("request_failed");
+        m_results[resultIndex] = item;
+        rebuildResultRows();
+        emit resultsChanged();
+        emit resultRowsChanged();
+        emit selectedIndexChanged();
+        responseSummary[QStringLiteral("reason")] = QStringLiteral("request_failed");
+        return responseSummary;
+    }
+
+    const QString type = response->value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("error")) {
+        const QString reason = response->value(QStringLiteral("error"))
+                                   .toObject()
+                                   .value(QStringLiteral("message"))
+                                   .toString(QStringLiteral("request_error"));
+        item[QStringLiteral("answerStatus")] = QStringLiteral("error");
+        item[QStringLiteral("answerSnippet")] = QString();
+        item[QStringLiteral("answerReason")] = reason;
+        m_results[resultIndex] = item;
+        rebuildResultRows();
+        emit resultsChanged();
+        emit resultRowsChanged();
+        emit selectedIndexChanged();
+        responseSummary[QStringLiteral("reason")] = reason;
+        return responseSummary;
+    }
+
+    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+    const bool available = result.value(QStringLiteral("available")).toBool(false);
+    const QString answer = result.value(QStringLiteral("answer")).toString();
+    const QString reason = result.value(QStringLiteral("reason")).toString();
+    item[QStringLiteral("answerSnippet")] = answer;
+    item[QStringLiteral("answerReason")] = reason;
+    item[QStringLiteral("answerConfidence")] = result.value(QStringLiteral("confidence")).toDouble();
+    item[QStringLiteral("answerSource")] = result.value(QStringLiteral("source")).toString();
+    item[QStringLiteral("answerStatus")] = available ? QStringLiteral("ready")
+                                                     : QStringLiteral("no_answer");
+
+    m_results[resultIndex] = item;
+    rebuildResultRows();
+    emit resultsChanged();
+    emit resultRowsChanged();
+    emit selectedIndexChanged();
+
+    responseSummary[QStringLiteral("ok")] = available;
+    responseSummary[QStringLiteral("reason")] = reason;
+    responseSummary[QStringLiteral("answer")] = answer;
+    responseSummary[QStringLiteral("confidence")] =
+        result.value(QStringLiteral("confidence")).toDouble();
+    return responseSummary;
+}
+
 void SearchController::clearResults()
 {
     m_query.clear();
@@ -469,6 +571,11 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
             obj.value(QStringLiteral("contentAvailable")).toBool(true);
         item[QStringLiteral("availabilityStatus")] =
             obj.value(QStringLiteral("availabilityStatus")).toString(QStringLiteral("available"));
+        item[QStringLiteral("answerSnippet")] = QString();
+        item[QStringLiteral("answerStatus")] = QStringLiteral("idle");
+        item[QStringLiteral("answerReason")] = QString();
+        item[QStringLiteral("answerConfidence")] = 0.0;
+        item[QStringLiteral("answerSource")] = QString();
 
         // Compute parent path for display
         QString path = item.value(QStringLiteral("path")).toString();

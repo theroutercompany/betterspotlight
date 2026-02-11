@@ -26,7 +26,11 @@ Window {
 
     function rowHeight(row) {
         if (!row) return resultItemHeight
-        return (row.rowType || "") === "header" ? headerItemHeight : resultItemHeight
+        if ((row.rowType || "") === "header") return headerItemHeight
+        var item = row.itemData || ({})
+        var hasAnswer = (item.answerSnippet || "").length > 0
+        var loadingAnswer = (item.answerStatus || "") === "loading"
+        return (hasAnswer || loadingAnswer) ? 86 : resultItemHeight
     }
 
     function computedResultsHeight() {
@@ -159,6 +163,15 @@ Window {
                              (event.modifiers & Qt.ShiftModifier)) {
                         if (searchController && searchController.selectedIndex >= 0) {
                             searchController.copyPath(searchController.selectedIndex)
+                        }
+                        event.accepted = true
+                    }
+                    // Cmd+Shift+A: generate answer preview for selected result.
+                    else if (event.key === Qt.Key_A &&
+                             (event.modifiers & Qt.ControlModifier) &&
+                             (event.modifiers & Qt.ShiftModifier)) {
+                        if (searchController && searchController.selectedIndex >= 0) {
+                            searchController.requestAnswerSnippet(searchController.selectedIndex)
                         }
                         event.accepted = true
                     }

@@ -43,6 +43,7 @@ protected:
 private:
     // ── M1 handlers ──
     QJsonObject handleSearch(uint64_t id, const QJsonObject& params);
+    QJsonObject handleGetAnswerSnippet(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetHealth(uint64_t id);
     QJsonObject handleGetHealthDetails(uint64_t id, const QJsonObject& params);
     QJsonObject handleRecordFeedback(uint64_t id, const QJsonObject& params);

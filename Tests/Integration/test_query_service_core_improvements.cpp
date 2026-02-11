@@ -369,6 +369,35 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(postSearchIndexHealth.value(QStringLiteral("m2ModulesInitialized")).toBool(false));
     }
 
+    // User-triggered answer snippet preview should run off the ranking path.
+    {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("breaking sound barrier");
+        params[QStringLiteral("path")] = pdfPath;
+        params[QStringLiteral("timeoutMs")] = 500;
+        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getAnswerSnippet"), params);
+        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+        QVERIFY(result.value(QStringLiteral("available")).toBool(false));
+        const QString answer = result.value(QStringLiteral("answer")).toString().toLower();
+        QVERIFY(answer.contains(QStringLiteral("breaking")));
+        QVERIFY(answer.contains(QStringLiteral("barrier")));
+        QCOMPARE(result.value(QStringLiteral("source")).toString(),
+                 QStringLiteral("extractive_preview"));
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("does not exist");
+        params[QStringLiteral("path")] = QStringLiteral("/tmp/not-found.txt");
+        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getAnswerSnippet"), params);
+        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+        QVERIFY(!result.value(QStringLiteral("available")).toBool(true));
+        QCOMPARE(result.value(QStringLiteral("reason")).toString(),
+                 QStringLiteral("item_not_found"));
+    }
+
     // Typo guardrail checks.
     {
         QJsonObject params;
