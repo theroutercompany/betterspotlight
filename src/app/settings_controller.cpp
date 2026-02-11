@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QVariantMap>
 
 #include <sqlite3.h>
@@ -126,10 +127,14 @@ SettingsController::SettingsController(QObject* parent)
     m_platformIntegration = PlatformIntegration::create();
 
     if (showInDock()) {
-        const PlatformOperationResult result = m_platformIntegration->setShowInDock(true);
-        if (!result.success) {
-            setPlatformStatus(QStringLiteral("showInDock"), false, result.message);
-        }
+        // Defer Dock policy mutation until the app event loop starts; on macOS,
+        // early activation-policy calls can be ignored during app bootstrap.
+        QTimer::singleShot(0, this, [this]() {
+            const PlatformOperationResult result = m_platformIntegration->setShowInDock(true);
+            if (!result.success) {
+                setPlatformStatus(QStringLiteral("showInDock"), false, result.message);
+            }
+        });
     }
 }
 

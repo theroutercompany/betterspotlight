@@ -274,20 +274,24 @@ void ServiceManager::startIndexing()
     }
 }
 
-void ServiceManager::pauseIndexing()
+bool ServiceManager::pauseIndexing()
 {
     if (sendIndexerRequest(QStringLiteral("pauseIndexing"))) {
         m_indexingActive = false;
         updateTrayState();
+        return true;
     }
+    return false;
 }
 
-void ServiceManager::resumeIndexing()
+bool ServiceManager::resumeIndexing()
 {
     if (sendIndexerRequest(QStringLiteral("resumeIndexing"))) {
         m_indexingActive = true;
         updateTrayState();
+        return true;
     }
+    return false;
 }
 
 void ServiceManager::setIndexingUserActive(bool active)
@@ -297,20 +301,22 @@ void ServiceManager::setIndexingUserActive(bool active)
     sendIndexerRequest(QStringLiteral("setUserActive"), params);
 }
 
-void ServiceManager::rebuildAll()
+bool ServiceManager::rebuildAll()
 {
     if (sendIndexerRequest(QStringLiteral("rebuildAll"))) {
         m_indexingActive = true;
         updateTrayState();
+        return true;
     }
+    return false;
 }
 
-void ServiceManager::rebuildVectorIndex()
+bool ServiceManager::rebuildVectorIndex()
 {
     SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
     if (!client || !client->isConnected()) {
         LOG_WARN(bsCore, "ServiceManager: query not connected, can't send 'rebuildVectorIndex'");
-        return;
+        return false;
     }
 
     QJsonObject params;
@@ -322,7 +328,7 @@ void ServiceManager::rebuildVectorIndex()
     auto response = client->sendRequest(QStringLiteral("rebuildVectorIndex"), params, 10000);
     if (!response) {
         LOG_ERROR(bsCore, "ServiceManager: query request failed: rebuildVectorIndex");
-        return;
+        return false;
     }
 
     const QString type = response->value(QStringLiteral("type")).toString();
@@ -332,7 +338,7 @@ void ServiceManager::rebuildVectorIndex()
         LOG_ERROR(bsCore, "ServiceManager: query 'rebuildVectorIndex' error: %s",
                   qPrintable(msg));
         emit serviceError(QStringLiteral("query"), msg);
-        return;
+        return false;
     }
 
     const QJsonObject result = response->value(QStringLiteral("result")).toObject();
@@ -346,14 +352,15 @@ void ServiceManager::rebuildVectorIndex()
         LOG_INFO(bsCore, "ServiceManager: vector rebuild started (runId=%lld)",
                  static_cast<long long>(runId));
     }
+    return true;
 }
 
-void ServiceManager::clearExtractionCache()
+bool ServiceManager::clearExtractionCache()
 {
-    sendServiceRequest(QStringLiteral("extractor"), QStringLiteral("clearExtractionCache"));
+    return sendServiceRequest(QStringLiteral("extractor"), QStringLiteral("clearExtractionCache"));
 }
 
-void ServiceManager::reindexPath(const QString& path)
+bool ServiceManager::reindexPath(const QString& path)
 {
     QString normalizedPath = path;
     if (normalizedPath.startsWith(QStringLiteral("file://"))) {
@@ -364,7 +371,9 @@ void ServiceManager::reindexPath(const QString& path)
     if (sendIndexerRequest(QStringLiteral("reindexPath"), params)) {
         m_indexingActive = true;
         updateTrayState();
+        return true;
     }
+    return false;
 }
 
 void ServiceManager::triggerInitialIndexing()

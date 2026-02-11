@@ -37,7 +37,7 @@ QIcon fallbackTrayStateIcon(TrayGlyphVariant variant)
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    const QColor ink(0, 0, 0, 235);
+    const QColor ink(255, 255, 255, 235);
 
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QPen(ink, 2.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));

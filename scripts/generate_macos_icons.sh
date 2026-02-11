@@ -61,12 +61,18 @@ draw_menubar_icon() {
   local out="$3"
 
   magick -size 64x64 xc:none \
-    -fill none -stroke "rgba(0,0,0,0.97)" -strokewidth 9 \
+    -fill none -stroke "rgba(0,0,0,0.90)" -strokewidth 11 \
     -draw "circle 24,24 24,8" \
     -draw "line 35,35 56,56" \
-    -fill "rgba(0,0,0,0.97)" -stroke none \
+    -fill none -stroke "rgba(255,255,255,0.98)" -strokewidth 7 \
+    -draw "circle 24,24 24,8" \
+    -draw "line 35,35 56,56" \
+    -fill "rgba(255,255,255,0.98)" -stroke "rgba(0,0,0,0.90)" -strokewidth 2 \
     -draw "${marker}" \
-    -draw "ellipse 53,${marker_y} 4.6,4.6 0,360" \
+    -stroke none -fill "rgba(0,0,0,0.90)" \
+    -draw "ellipse 53,${marker_y} 5.4,5.4 0,360" \
+    -fill "rgba(255,255,255,0.98)" \
+    -draw "ellipse 53,${marker_y} 3.8,3.8 0,360" \
     -colorspace sRGB -alpha on -type TrueColorAlpha \
     "${out}"
 }
@@ -74,12 +80,15 @@ draw_menubar_icon() {
 draw_menubar_error_icon() {
   local out="$1"
   magick -size 64x64 xc:none \
-    -fill none -stroke "rgba(0,0,0,0.97)" -strokewidth 9 \
+    -fill none -stroke "rgba(0,0,0,0.90)" -strokewidth 11 \
     -draw "circle 24,24 24,8" \
     -draw "line 35,35 56,56" \
-    -fill "rgba(0,0,0,0.97)" -stroke none \
+    -fill none -stroke "rgba(255,255,255,0.98)" -strokewidth 7 \
+    -draw "circle 24,24 24,8" \
+    -draw "line 35,35 56,56" \
+    -fill "rgba(255,255,255,0.98)" -stroke "rgba(0,0,0,0.90)" -strokewidth 2 \
     -draw "roundrectangle 50,7 57,31 2,2" \
-    -draw "ellipse 53,40 4,4 0,360" \
+    -draw "ellipse 53,40 4.6,4.6 0,360" \
     -colorspace sRGB -alpha on -type TrueColorAlpha \
     "${out}"
 }

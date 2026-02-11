@@ -42,13 +42,13 @@ public:
 
     Q_INVOKABLE void start();
     Q_INVOKABLE void stop();
-    Q_INVOKABLE void pauseIndexing();
-    Q_INVOKABLE void resumeIndexing();
+    Q_INVOKABLE bool pauseIndexing();
+    Q_INVOKABLE bool resumeIndexing();
     Q_INVOKABLE void setIndexingUserActive(bool active);
-    Q_INVOKABLE void rebuildAll();
-    Q_INVOKABLE void rebuildVectorIndex();
-    Q_INVOKABLE void clearExtractionCache();
-    Q_INVOKABLE void reindexPath(const QString& path);
+    Q_INVOKABLE bool rebuildAll();
+    Q_INVOKABLE bool rebuildVectorIndex();
+    Q_INVOKABLE bool clearExtractionCache();
+    Q_INVOKABLE bool reindexPath(const QString& path);
     Q_INVOKABLE QVariantList serviceDiagnostics() const;
     Q_INVOKABLE void triggerInitialIndexing();
 

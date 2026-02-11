@@ -874,9 +874,21 @@ Window {
                     property var healthData: ({})
                     property var diagnosticsData: []
                     property bool loaded: false
+                    property string actionStatusMessage: ""
+                    property bool actionStatusIsError: false
                     property bool vectorRebuildRunning: {
                         if (!healthData) return false
                         return (healthData["vectorRebuildStatus"] || "idle") === "running"
+                    }
+
+                    function setActionStatus(message, isError) {
+                        actionStatusMessage = message || ""
+                        actionStatusIsError = !!isError
+                        if (actionStatusMessage.length > 0) {
+                            actionStatusTimer.restart()
+                        } else {
+                            actionStatusTimer.stop()
+                        }
                     }
 
                     function refreshHealth() {
@@ -910,6 +922,13 @@ Window {
                         repeat: true
                         running: false
                         onTriggered: healthTab.refreshHealth()
+                    }
+
+                    Timer {
+                        id: actionStatusTimer
+                        interval: 5000
+                        repeat: false
+                        onTriggered: healthTab.actionStatusMessage = ""
                     }
 
                     Component.onCompleted: healthTab.refreshHealth()
@@ -1360,21 +1379,35 @@ Window {
                             Layout.fillWidth: true
                             title: qsTr("Actions")
 
-                            RowLayout {
+                            ColumnLayout {
                                 anchors.fill: parent
-                                spacing: 12
+                                spacing: 8
 
-                                Button { text: qsTr("Reindex Folder\u2026"); onClicked: reindexFolderDialog.open() }
-                                Button { text: qsTr("Rebuild All"); onClicked: rebuildAllDialog.open() }
-                                Button {
-                                    text: qsTr("Rebuild Vector Index")
-                                    enabled: settingsController
-                                             ? (settingsController.embeddingEnabled
-                                                && !healthTab.vectorRebuildRunning)
-                                             : false
-                                    onClicked: rebuildVectorDialog.open()
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+
+                                    Button { text: qsTr("Reindex Folder\u2026"); onClicked: reindexFolderDialog.open() }
+                                    Button { text: qsTr("Rebuild All"); onClicked: rebuildAllDialog.open() }
+                                    Button {
+                                        text: qsTr("Rebuild Vector Index")
+                                        enabled: settingsController
+                                                 ? (settingsController.embeddingEnabled
+                                                    && !healthTab.vectorRebuildRunning)
+                                                 : false
+                                        onClicked: rebuildVectorDialog.open()
+                                    }
+                                    Button { text: qsTr("Clear Cache"); onClicked: clearCacheDialog.open() }
                                 }
-                                Button { text: qsTr("Clear Cache"); onClicked: clearCacheDialog.open() }
+
+                                Label {
+                                    visible: healthTab.actionStatusMessage.length > 0
+                                    text: healthTab.actionStatusMessage
+                                    font.pixelSize: 11
+                                    color: healthTab.actionStatusIsError ? "#C62828" : "#2E7D32"
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
                             }
                         }
                     }
@@ -1398,7 +1431,25 @@ Window {
         title: qsTr("Rebuild Index")
         text: qsTr("Are you sure you want to rebuild the entire index? This may take a while depending on the number of files.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { if (settingsController) settingsController.rebuildIndex() }
+        onAccepted: {
+            var ok = false
+            if (serviceManager && serviceManager.rebuildAll) {
+                ok = serviceManager.rebuildAll()
+            } else if (settingsController) {
+                settingsController.rebuildIndex()
+                ok = true
+            }
+
+            if (ok) {
+                healthTab.setActionStatus(qsTr("Rebuild-all request sent."), false)
+                healthTab.refreshHealth()
+            } else {
+                healthTab.setActionStatus(
+                    qsTr("Failed to send rebuild-all request. Check service status."),
+                    true
+                )
+            }
+        }
     }
 
     MessageDialog {
@@ -1407,9 +1458,22 @@ Window {
         text: qsTr("Are you sure you want to rebuild the vector index? All embeddings will be regenerated.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
         onAccepted: {
-            if (settingsController) {
+            var ok = false
+            if (serviceManager && serviceManager.rebuildVectorIndex) {
+                ok = serviceManager.rebuildVectorIndex()
+            } else if (settingsController) {
                 settingsController.rebuildVectorIndex()
+                ok = true
+            }
+
+            if (ok) {
+                healthTab.setActionStatus(qsTr("Vector rebuild request sent."), false)
                 healthTab.refreshHealth()
+            } else {
+                healthTab.setActionStatus(
+                    qsTr("Failed to send vector rebuild request. Check service status."),
+                    true
+                )
             }
         }
     }
@@ -1419,13 +1483,49 @@ Window {
         title: qsTr("Clear Cache")
         text: qsTr("Are you sure you want to clear the extraction cache? Cached content will need to be re-extracted on next scan.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { if (settingsController) settingsController.clearExtractionCache() }
+        onAccepted: {
+            var ok = false
+            if (serviceManager && serviceManager.clearExtractionCache) {
+                ok = serviceManager.clearExtractionCache()
+            } else if (settingsController) {
+                settingsController.clearExtractionCache()
+                ok = true
+            }
+
+            if (ok) {
+                healthTab.setActionStatus(qsTr("Clear-cache request sent."), false)
+            } else {
+                healthTab.setActionStatus(
+                    qsTr("Failed to clear cache. Check service status."),
+                    true
+                )
+            }
+        }
     }
 
     FolderDialog {
         id: reindexFolderDialog
         title: qsTr("Select Folder to Reindex")
-        onAccepted: { if (settingsController) settingsController.reindexFolder(selectedFolder.toString()) }
+        onAccepted: {
+            var path = selectedFolder.toString()
+            var ok = false
+            if (serviceManager && serviceManager.reindexPath) {
+                ok = serviceManager.reindexPath(path)
+            } else if (settingsController) {
+                settingsController.reindexFolder(path)
+                ok = true
+            }
+
+            if (ok) {
+                healthTab.setActionStatus(qsTr("Reindex request sent."), false)
+                healthTab.refreshHealth()
+            } else {
+                healthTab.setActionStatus(
+                    qsTr("Failed to send reindex request. Check service status."),
+                    true
+                )
+            }
+        }
     }
 
     Connections {
@@ -1434,6 +1534,17 @@ Window {
         function onHotkeyConflictDetected(attemptedHotkey, error, suggestions) {
             settingsWindow.hotkeyConflictMessage = error || qsTr("Hotkey is unavailable.")
             settingsWindow.hotkeySuggestions = suggestions || []
+        }
+    }
+
+    Connections {
+        target: serviceManager
+        enabled: serviceManager !== null
+        function onServiceError(serviceName, error) {
+            healthTab.setActionStatus(
+                qsTr("%1 error: %2").arg(serviceName || qsTr("Service")).arg(error || qsTr("Unknown error")),
+                true
+            )
         }
     }
 
