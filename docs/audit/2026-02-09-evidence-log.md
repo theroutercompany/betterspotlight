@@ -1,8 +1,8 @@
-# BetterSpotlight Evidence Log (Collected 2026-02-10)
+# BetterSpotlight Evidence Log (Collected 2026-02-11)
 
 ## Environment
 - Repository: `/Users/rexliu/betterspotlight`
-- Host date: 2026-02-10
+- Host date: 2026-02-11
 - Primary verification build dir: `/Users/rexliu/betterspotlight/build-local`
 - Note: existing `/Users/rexliu/betterspotlight/build` was stale/inconsistent for this audit pass; a fresh `build-local` was used for decision-grade verification.
 
@@ -45,6 +45,9 @@
   - `/Users/rexliu/betterspotlight/src/app/platform_integration_mac.mm:21`
   - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp:247`
   - `/Users/rexliu/betterspotlight/src/app/qml/SettingsPanel.qml:176`
+- Settings/platform side-effect regression coverage:
+  - `/Users/rexliu/betterspotlight/Tests/Unit/test_settings_controller_platform.cpp`
+  - `/Users/rexliu/betterspotlight/Tests/CMakeLists.txt`
 - Clipboard relevance signals (privacy-gated):
   - `/Users/rexliu/betterspotlight/src/app/settings_controller.h`
   - `/Users/rexliu/betterspotlight/src/app/settings_controller.cpp`
@@ -94,24 +97,32 @@ Result:
 ctest --test-dir build-local --output-on-failure -R "^test-ui-sim-query-suite$|^test-ui-sim-query-suite-stress$" --timeout 45
 ```
 Result:
-- `test-ui-sim-query-suite` passed in `28.41 sec` (latest run).
-- `test-ui-sim-query-suite-stress` passed in `21.45 sec` (latest run).
+- `test-ui-sim-query-suite` passed in `32.47 sec` (latest run).
+- `test-ui-sim-query-suite-stress` passed in `22.20 sec` (latest run).
 
 ### 5) Full suite verification
 ```bash
 ctest --test-dir build-local --output-on-failure --timeout 120
 ```
 Result:
-- `100% tests passed, 0 tests failed out of 53`.
-- Total runtime: `57.17 sec` (latest rerun after app lifecycle test addition).
+- `100% tests passed, 0 tests failed out of 54`.
+- Total runtime: `67.03 sec` (latest rerun after settings/platform test addition).
 
 ### 6) Inventory check
 ```bash
 ctest --test-dir build-local -N | tail -n 6
 ```
 Result:
-- Shows tests `#50` through `#53`.
-- `Total Tests: 53`.
+- Shows tests `#49` through `#54`.
+- `Total Tests: 54`.
+
+### 6b) Settings/platform side-effect coverage
+```bash
+ctest --test-dir build-local --output-on-failure -R test-settings-controller-platform --timeout 120
+```
+Result:
+- `test-settings-controller-platform` passed in `0.07 sec`.
+- Confirms success/failure behavior and persistence semantics for `launchAtLogin` and `showInDock`.
 
 ## Additional Verification Snippets
 - Ensure old broken BM25 control statement is gone:
@@ -169,9 +180,10 @@ Result:
 - Adaptive merge debug contract mismatch is remediated and integration-verified.
 - Clipboard-aware relevance signal path is implemented and integration-verified.
 - App lifecycle targeted coverage is now landed with deterministic integration assertions for tray-state transitions and onboarding/indexing first-run gating.
+- Settings/platform side-effect behavior now has deterministic regression coverage.
 - Prior timeout-prone UI-sim tests continue to complete under the same 45s timeout budget.
 - Long-run and notarization gates are now automated/scripted and smoke-validated locally.
 - Workflow dispatch evidence recorded for self-hosted operational gates:
-  - Long-Run Gates: [run 21847178417](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178417) (queued).
-  - Notarization Verify: [run 21847178969](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178969) (queued).
-- Current source state in `build-local` meets full-suite pass gate (53/53).
+  - Long-Run Gates: [run 21847178417](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178417) (dispatched; current status not re-queried in this snapshot).
+  - Notarization Verify: [run 21847178969](https://github.com/theroutercompany/betterspotlight/actions/runs/21847178969) (dispatched; current status not re-queried in this snapshot).
+- Current source state in `build-local` meets full-suite pass gate (54/54).
