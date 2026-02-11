@@ -1,4 +1,6 @@
 #include "service_manager.h"
+#include "core/models/model_manifest.h"
+#include "core/models/model_registry.h"
 #include "core/shared/logging.h"
 
 #include <QCoreApplication>
@@ -8,8 +10,13 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaObject>
+#include <QProcess>
+#include <QSet>
 #include <QStandardPaths>
 #include <QUrl>
+
+#include <algorithm>
 
 namespace bs {
 
@@ -138,6 +145,134 @@ QJsonObject readAppSettings()
     return doc.object();
 }
 
+QStringList modelDownloadUrlsForRole(const QString& role)
+{
+    if (role == QLatin1String("bi-encoder")) {
+        return {
+            QStringLiteral("https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx"),
+        };
+    }
+    if (role == QLatin1String("bi-encoder-legacy")) {
+        return {
+            QStringLiteral("https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx"),
+        };
+    }
+    if (role == QLatin1String("bi-encoder-fast")) {
+        return {
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main/onnx/model.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-embed-xsmall-v1/resolve/main/model.onnx"),
+        };
+    }
+    if (role == QLatin1String("cross-encoder")) {
+        return {
+            QStringLiteral("https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model.onnx"),
+        };
+    }
+    if (role == QLatin1String("cross-encoder-fast")) {
+        return {
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/onnx/model.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/model.onnx"),
+        };
+    }
+    if (role == QLatin1String("qa-extractive")) {
+        return {
+            QStringLiteral("https://huggingface.co/Xenova/distilbert-base-cased-distilled-squad/resolve/main/onnx/model_quantized.onnx"),
+            QStringLiteral("https://huggingface.co/Xenova/distilbert-base-cased-distilled-squad/resolve/main/onnx/model.onnx"),
+            QStringLiteral("https://huggingface.co/distilbert/distilbert-base-cased-distilled-squad/resolve/main/onnx/model.onnx"),
+        };
+    }
+
+    // query-router and unknown roles intentionally require manual provisioning.
+    return {};
+}
+
+QStringList vocabDownloadUrls()
+{
+    return {
+        QStringLiteral("https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt"),
+    };
+}
+
+QString trimSingleLine(const QString& text, int maxChars = 220)
+{
+    QString normalized = text.simplified();
+    if (normalized.size() <= maxChars) {
+        return normalized;
+    }
+    return normalized.left(std::max(0, maxChars - 3)) + QStringLiteral("...");
+}
+
+bool downloadFileWithCurl(const QString& url, const QString& outputPath, QString* errorOut)
+{
+    if (errorOut) {
+        *errorOut = QString();
+    }
+
+    QDir().mkpath(QFileInfo(outputPath).absolutePath());
+    const QString tmpPath = outputPath + QStringLiteral(".tmp");
+    QFile::remove(tmpPath);
+
+    QProcess process;
+    const QStringList args = {
+        QStringLiteral("-fL"),
+        QStringLiteral("--retry"), QStringLiteral("3"),
+        QStringLiteral("--retry-delay"), QStringLiteral("2"),
+        QStringLiteral("--connect-timeout"), QStringLiteral("20"),
+        QStringLiteral("--max-time"), QStringLiteral("1800"),
+        url,
+        QStringLiteral("-o"),
+        tmpPath,
+    };
+
+    process.start(QStringLiteral("/usr/bin/curl"), args);
+    if (!process.waitForStarted(5000)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("failed to start curl");
+        }
+        QFile::remove(tmpPath);
+        return false;
+    }
+    process.waitForFinished(-1);
+
+    const QString stdErr = QString::fromUtf8(process.readAllStandardError());
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (errorOut) {
+            *errorOut = trimSingleLine(stdErr.isEmpty()
+                                           ? QStringLiteral("curl exited with code %1")
+                                                 .arg(process.exitCode())
+                                           : stdErr);
+        }
+        QFile::remove(tmpPath);
+        return false;
+    }
+
+    const QFileInfo tmpInfo(tmpPath);
+    if (!tmpInfo.exists() || tmpInfo.size() <= 0) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("downloaded file is empty");
+        }
+        QFile::remove(tmpPath);
+        return false;
+    }
+
+    QFile::remove(outputPath);
+    if (!QFile::rename(tmpPath, outputPath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("failed to move downloaded file into place");
+        }
+        QFile::remove(tmpPath);
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 ServiceManager::ServiceManager(QObject* parent)
@@ -191,6 +326,24 @@ QString ServiceManager::trayState() const
     return trayStateToString(m_trayState);
 }
 
+bool ServiceManager::modelDownloadRunning() const
+{
+    std::lock_guard<std::mutex> lock(m_modelDownloadMutex);
+    return m_modelDownloadRunning;
+}
+
+QString ServiceManager::modelDownloadStatus() const
+{
+    std::lock_guard<std::mutex> lock(m_modelDownloadMutex);
+    return m_modelDownloadStatus;
+}
+
+bool ServiceManager::modelDownloadHasError() const
+{
+    std::lock_guard<std::mutex> lock(m_modelDownloadMutex);
+    return m_modelDownloadHasError;
+}
+
 Supervisor* ServiceManager::supervisor() const
 {
     return m_supervisor.get();
@@ -205,6 +358,7 @@ void ServiceManager::start()
     m_lastQueueRebuildFinishedAtMs = 0;
     m_pendingPostRebuildVectorRefresh = false;
     m_pendingPostRebuildVectorRefreshAttempts = 0;
+    setModelDownloadState(/*running=*/false, QString(), /*hasError=*/false);
 
     // Register all three service binaries
     const QStringList serviceNames = {
@@ -237,6 +391,7 @@ void ServiceManager::start()
 
 void ServiceManager::stop()
 {
+    joinModelDownloadThreadIfNeeded();
     LOG_INFO(bsCore, "ServiceManager: stopping services");
     m_supervisor->stopAll();
 
@@ -247,6 +402,7 @@ void ServiceManager::stop()
     m_lastQueueRebuildFinishedAtMs = 0;
     m_pendingPostRebuildVectorRefresh = false;
     m_pendingPostRebuildVectorRefreshAttempts = 0;
+    setModelDownloadState(/*running=*/false, modelDownloadStatus(), /*hasError=*/false);
     m_indexingStatusTimer.stop();
     m_indexerStatus = QStringLiteral("stopped");
     m_extractorStatus = QStringLiteral("stopped");
@@ -412,6 +568,201 @@ bool ServiceManager::reindexPath(const QString& path)
         return true;
     }
     return false;
+}
+
+bool ServiceManager::downloadModels(const QStringList& roles, bool includeExisting)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_modelDownloadMutex);
+        if (m_modelDownloadRunning) {
+            return false;
+        }
+    }
+
+    setModelDownloadState(/*running=*/true,
+                          QStringLiteral("Preparing model download plan..."),
+                          /*hasError=*/false);
+
+    joinModelDownloadThreadIfNeeded();
+    m_modelDownloadThread = std::thread(
+        &ServiceManager::runModelDownloadWorker, this, roles, includeExisting);
+    return true;
+}
+
+void ServiceManager::runModelDownloadWorker(const QStringList& roles, bool includeExisting)
+{
+    const auto publish = [this](bool running,
+                                const QString& status,
+                                bool hasError) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, running, status, hasError]() {
+                setModelDownloadState(running, status, hasError);
+            },
+            Qt::QueuedConnection);
+    };
+
+    const QString modelsDir = ModelRegistry::resolveModelsDir();
+    const QString manifestPath = modelsDir + QStringLiteral("/manifest.json");
+    const std::optional<ModelManifest> manifestOpt = ModelManifest::loadFromFile(manifestPath);
+    if (!manifestOpt.has_value()) {
+        publish(/*running=*/false,
+                QStringLiteral("Model download failed: could not load manifest at %1")
+                    .arg(manifestPath),
+                /*hasError=*/true);
+        return;
+    }
+
+    QStringList targetRoles;
+    QSet<QString> requestedRoles;
+    for (const QString& roleRaw : roles) {
+        const QString role = roleRaw.trimmed();
+        if (!role.isEmpty()) {
+            requestedRoles.insert(role);
+        }
+    }
+    if (requestedRoles.isEmpty()) {
+        for (const auto& pair : manifestOpt->models) {
+            targetRoles.append(QString::fromStdString(pair.first));
+        }
+    } else {
+        targetRoles = requestedRoles.values();
+    }
+    std::sort(targetRoles.begin(), targetRoles.end(),
+              [](const QString& lhs, const QString& rhs) {
+                  return lhs.toLower() < rhs.toLower();
+              });
+
+    if (targetRoles.isEmpty()) {
+        publish(/*running=*/false,
+                QStringLiteral("No model roles selected."),
+                /*hasError=*/true);
+        return;
+    }
+
+    int downloadedCount = 0;
+    int skippedCount = 0;
+    QStringList failures;
+    bool vocabChecked = false;
+    bool vocabReady = false;
+
+    for (int idx = 0; idx < targetRoles.size(); ++idx) {
+        const QString role = targetRoles.at(idx);
+        const auto manifestIt = manifestOpt->models.find(role.toStdString());
+        if (manifestIt == manifestOpt->models.end()) {
+            failures.append(QStringLiteral("%1: role not found in manifest").arg(role));
+            continue;
+        }
+
+        const ModelManifestEntry& entry = manifestIt->second;
+        const QString modelPath = modelsDir + QStringLiteral("/") + entry.file;
+        const QFileInfo modelInfo(modelPath);
+        if (!includeExisting && modelInfo.exists() && modelInfo.isReadable()
+            && modelInfo.size() > 0) {
+            ++skippedCount;
+            continue;
+        }
+
+        publish(/*running=*/true,
+                QStringLiteral("Downloading %1 (%2/%3)...")
+                    .arg(role)
+                    .arg(idx + 1)
+                    .arg(targetRoles.size()),
+                /*hasError=*/false);
+
+        const QStringList urls = modelDownloadUrlsForRole(role);
+        if (urls.isEmpty()) {
+            failures.append(QStringLiteral("%1: no download source configured").arg(role));
+            continue;
+        }
+
+        bool downloaded = false;
+        QString lastError;
+        for (const QString& url : urls) {
+            QString attemptError;
+            if (downloadFileWithCurl(url, modelPath, &attemptError)) {
+                downloaded = true;
+                break;
+            }
+            lastError = QStringLiteral("%1 (%2)").arg(attemptError, url);
+        }
+        if (downloaded) {
+            ++downloadedCount;
+        } else {
+            failures.append(QStringLiteral("%1: %2")
+                                .arg(role,
+                                     lastError.isEmpty()
+                                         ? QStringLiteral("download failed")
+                                         : trimSingleLine(lastError)));
+        }
+
+        if (!vocabChecked && !entry.vocab.isEmpty()) {
+            vocabChecked = true;
+            const QString vocabPath = modelsDir + QStringLiteral("/") + entry.vocab;
+            const QFileInfo vocabInfo(vocabPath);
+            if (vocabInfo.exists() && vocabInfo.isReadable() && vocabInfo.size() > 0) {
+                vocabReady = true;
+            } else {
+                publish(/*running=*/true,
+                        QStringLiteral("Downloading tokenizer vocab..."),
+                        /*hasError=*/false);
+                for (const QString& url : vocabDownloadUrls()) {
+                    QString attemptError;
+                    if (downloadFileWithCurl(url, vocabPath, &attemptError)) {
+                        vocabReady = true;
+                        break;
+                    }
+                }
+                if (!vocabReady) {
+                    failures.append(QStringLiteral("vocab: failed to download %1")
+                                        .arg(entry.vocab));
+                }
+            }
+        }
+    }
+
+    const bool hasError = !failures.isEmpty();
+    QString summary = QStringLiteral("Model download complete: %1 downloaded, %2 skipped")
+                          .arg(downloadedCount)
+                          .arg(skippedCount);
+    if (hasError) {
+        summary += QStringLiteral(", %1 failed (%2)")
+                       .arg(failures.size())
+                       .arg(trimSingleLine(failures.first()));
+    }
+    publish(/*running=*/false, summary, hasError);
+}
+
+void ServiceManager::joinModelDownloadThreadIfNeeded()
+{
+    if (!m_modelDownloadThread.joinable()) {
+        return;
+    }
+    if (m_modelDownloadThread.get_id() == std::this_thread::get_id()) {
+        return;
+    }
+    m_modelDownloadThread.join();
+}
+
+void ServiceManager::setModelDownloadState(bool running,
+                                           const QString& status,
+                                           bool hasError)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(m_modelDownloadMutex);
+        if (m_modelDownloadRunning != running
+            || m_modelDownloadStatus != status
+            || m_modelDownloadHasError != hasError) {
+            m_modelDownloadRunning = running;
+            m_modelDownloadStatus = status;
+            m_modelDownloadHasError = hasError;
+            changed = true;
+        }
+    }
+    if (changed) {
+        emit modelDownloadStateChanged();
+    }
 }
 
 void ServiceManager::triggerInitialIndexing()

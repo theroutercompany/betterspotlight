@@ -1339,6 +1339,8 @@ Window {
                     property bool loaded: false
                     property string actionStatusMessage: ""
                     property bool actionStatusIsError: false
+                    property var modelDownloadSelection: ({})
+                    property bool includeExistingModelDownloads: false
                     property bool vectorRebuildRunning: {
                         if (!healthData) return false
                         return (healthData["vectorRebuildStatus"] || "idle") === "running"
@@ -1351,6 +1353,70 @@ Window {
                         var writing = Number(healthData["queueWriting"] || 0)
                         var rebuildAll = healthData["queueRebuildRunning"] === true
                         return pending > 0 || inProgress > 0 || preparing > 0 || writing > 0 || rebuildAll
+                    }
+
+                    function copySelectionMap(source) {
+                        var out = ({})
+                        if (!source) return out
+                        for (var key in source) {
+                            if (source.hasOwnProperty(key)) {
+                                out[key] = !!source[key]
+                            }
+                        }
+                        return out
+                    }
+
+                    function syncModelDownloadSelection() {
+                        var manifest = healthTab.healthData["modelManifest"] || []
+                        var current = healthTab.modelDownloadSelection || ({})
+                        var next = ({})
+                        for (var i = 0; i < manifest.length; ++i) {
+                            var entry = manifest[i] || ({})
+                            var role = String(entry.role || "")
+                            if (!role.length) continue
+                            if (current.hasOwnProperty(role)) {
+                                next[role] = !!current[role]
+                            } else {
+                                next[role] = !(entry.modelExists === true)
+                            }
+                        }
+                        healthTab.modelDownloadSelection = next
+                    }
+
+                    function setAllModelSelections(value) {
+                        var manifest = healthTab.healthData["modelManifest"] || []
+                        var next = ({})
+                        for (var i = 0; i < manifest.length; ++i) {
+                            var entry = manifest[i] || ({})
+                            var role = String(entry.role || "")
+                            if (!role.length) continue
+                            next[role] = !!value
+                        }
+                        healthTab.modelDownloadSelection = next
+                    }
+
+                    function setMissingModelSelections() {
+                        var manifest = healthTab.healthData["modelManifest"] || []
+                        var next = ({})
+                        for (var i = 0; i < manifest.length; ++i) {
+                            var entry = manifest[i] || ({})
+                            var role = String(entry.role || "")
+                            if (!role.length) continue
+                            next[role] = !(entry.modelExists === true)
+                        }
+                        healthTab.modelDownloadSelection = next
+                    }
+
+                    function selectedModelRoles() {
+                        var selection = healthTab.modelDownloadSelection || ({})
+                        var roles = []
+                        for (var role in selection) {
+                            if (selection.hasOwnProperty(role) && selection[role] === true) {
+                                roles.push(role)
+                            }
+                        }
+                        roles.sort()
+                        return roles
                     }
 
                     function setActionStatus(message, isError) {
@@ -1372,6 +1438,7 @@ Window {
                         if (next && Object.keys(next).length > 0) {
                             healthTab.healthData = next
                             healthTab.loaded = true
+                            healthTab.syncModelDownloadSelection()
                         } else if (!healthTab.loaded) {
                             healthTab.healthData = ({})
                         }
@@ -1379,7 +1446,9 @@ Window {
                             healthTab.diagnosticsData = serviceManager.serviceDiagnostics()
                         }
 
-                        if (healthTab.vectorRebuildRunning || healthTab.indexWorkRunning) {
+                        if (healthTab.vectorRebuildRunning
+                                || healthTab.indexWorkRunning
+                                || (serviceManager && serviceManager.modelDownloadRunning)) {
                             if (!healthRefreshTimer.running) {
                                 healthRefreshTimer.start()
                             }
@@ -1965,6 +2034,86 @@ Window {
                                     color: (healthTab.healthData["manifestPresent"] === true) ? "#2E7D32" : "#C62828"
                                 }
 
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Button {
+                                        text: qsTr("Select Missing")
+                                        enabled: !serviceManager || !serviceManager.modelDownloadRunning
+                                        onClicked: healthTab.setMissingModelSelections()
+                                    }
+                                    Button {
+                                        text: qsTr("Select All")
+                                        enabled: !serviceManager || !serviceManager.modelDownloadRunning
+                                        onClicked: healthTab.setAllModelSelections(true)
+                                    }
+                                    Button {
+                                        text: qsTr("Select None")
+                                        enabled: !serviceManager || !serviceManager.modelDownloadRunning
+                                        onClicked: healthTab.setAllModelSelections(false)
+                                    }
+                                    CheckBox {
+                                        text: qsTr("Include Existing Files")
+                                        checked: healthTab.includeExistingModelDownloads
+                                        enabled: !serviceManager || !serviceManager.modelDownloadRunning
+                                        onToggled: healthTab.includeExistingModelDownloads = checked
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Button {
+                                        text: (serviceManager && serviceManager.modelDownloadRunning)
+                                              ? qsTr("Downloading...")
+                                              : qsTr("Download Selected")
+                                        enabled: (!serviceManager || !serviceManager.modelDownloadRunning)
+                                                 && healthTab.selectedModelRoles().length > 0
+                                        onClicked: {
+                                            if (!serviceManager || !serviceManager.downloadModels) {
+                                                healthTab.setActionStatus(qsTr("Model download action is unavailable."), true)
+                                                return
+                                            }
+                                            var roles = healthTab.selectedModelRoles()
+                                            if (!roles.length) {
+                                                healthTab.setActionStatus(qsTr("No model roles selected."), true)
+                                                return
+                                            }
+                                            var ok = serviceManager.downloadModels(
+                                                        roles,
+                                                        healthTab.includeExistingModelDownloads)
+                                            if (ok) {
+                                                healthTab.setActionStatus(
+                                                            qsTr("Model download started for %1 role(s).")
+                                                                .arg(roles.length),
+                                                            false)
+                                                if (!healthRefreshTimer.running) {
+                                                    healthRefreshTimer.start()
+                                                }
+                                            } else {
+                                                healthTab.setActionStatus(
+                                                            qsTr("Model download is already running."),
+                                                            true)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    visible: serviceManager
+                                             && (serviceManager.modelDownloadRunning
+                                                 || (serviceManager.modelDownloadStatus || "").length > 0)
+                                    text: qsTr("Model Download: ")
+                                          + (serviceManager && serviceManager.modelDownloadStatus
+                                             ? serviceManager.modelDownloadStatus
+                                             : "--")
+                                    font.pixelSize: 11
+                                    color: (serviceManager && serviceManager.modelDownloadHasError)
+                                           ? "#C62828"
+                                           : ((serviceManager && serviceManager.modelDownloadRunning)
+                                               ? "#1565C0"
+                                               : "#2E7D32")
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+
                                 Repeater {
                                     model: healthTab.healthData["modelManifest"] || []
 
@@ -1988,6 +2137,34 @@ Window {
                                             anchors.fill: parent
                                             anchors.margins: 6
                                             spacing: 4
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+
+                                                CheckBox {
+                                                    checked: {
+                                                        var role = modelData.role || ""
+                                                        return !!healthTab.modelDownloadSelection[role]
+                                                    }
+                                                    enabled: !serviceManager || !serviceManager.modelDownloadRunning
+                                                    onToggled: {
+                                                        var role = modelData.role || ""
+                                                        if (!role.length) return
+                                                        var next = healthTab.copySelectionMap(healthTab.modelDownloadSelection)
+                                                        next[role] = checked
+                                                        healthTab.modelDownloadSelection = next
+                                                    }
+                                                }
+                                                Label {
+                                                    text: (modelData.modelExists === true)
+                                                          ? qsTr("Installed")
+                                                          : qsTr("Missing")
+                                                    font.pixelSize: 10
+                                                    color: (modelData.modelExists === true) ? "#2E7D32" : "#C62828"
+                                                }
+                                                Item { Layout.fillWidth: true }
+                                            }
 
                                             RowLayout {
                                                 Layout.fillWidth: true

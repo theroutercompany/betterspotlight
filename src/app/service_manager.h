@@ -7,7 +7,9 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QVariantList>
+#include <mutex>
 #include <memory>
+#include <thread>
 
 namespace bs {
 
@@ -19,6 +21,9 @@ class ServiceManager : public QObject {
     Q_PROPERTY(QString extractorStatus READ extractorStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString queryStatus READ queryStatus NOTIFY serviceStatusChanged)
     Q_PROPERTY(QString trayState READ trayState NOTIFY trayStateChanged)
+    Q_PROPERTY(bool modelDownloadRunning READ modelDownloadRunning NOTIFY modelDownloadStateChanged)
+    Q_PROPERTY(QString modelDownloadStatus READ modelDownloadStatus NOTIFY modelDownloadStateChanged)
+    Q_PROPERTY(bool modelDownloadHasError READ modelDownloadHasError NOTIFY modelDownloadStateChanged)
 
 public:
     enum class TrayState {
@@ -36,6 +41,9 @@ public:
     QString extractorStatus() const;
     QString queryStatus() const;
     QString trayState() const;
+    bool modelDownloadRunning() const;
+    QString modelDownloadStatus() const;
+    bool modelDownloadHasError() const;
 
     // Access to the underlying supervisor (e.g., for SearchController to get clients)
     Supervisor* supervisor() const;
@@ -49,6 +57,7 @@ public:
     Q_INVOKABLE bool rebuildVectorIndex();
     Q_INVOKABLE bool clearExtractionCache();
     Q_INVOKABLE bool reindexPath(const QString& path);
+    Q_INVOKABLE bool downloadModels(const QStringList& roles, bool includeExisting = false);
     Q_INVOKABLE QVariantList serviceDiagnostics() const;
     Q_INVOKABLE void triggerInitialIndexing();
 
@@ -57,6 +66,7 @@ signals:
     void allServicesReady();
     void serviceError(const QString& serviceName, const QString& error);
     void trayStateChanged();
+    void modelDownloadStateChanged();
 
 private slots:
     void onServiceStarted(const QString& name);
@@ -69,6 +79,11 @@ private:
     void updateServiceStatus(const QString& name, const QString& status);
     void updateTrayState();
     void refreshIndexerQueueStatus();
+    void runModelDownloadWorker(const QStringList& roles, bool includeExisting);
+    void joinModelDownloadThreadIfNeeded();
+    void setModelDownloadState(bool running,
+                               const QString& status,
+                               bool hasError);
     static QString trayStateToString(TrayState state);
     void startIndexing();
     bool sendServiceRequest(const QString& serviceName,
@@ -92,6 +107,11 @@ private:
     qint64 m_lastQueueRebuildFinishedAtMs = 0;
     bool m_pendingPostRebuildVectorRefresh = false;
     int m_pendingPostRebuildVectorRefreshAttempts = 0;
+    std::thread m_modelDownloadThread;
+    mutable std::mutex m_modelDownloadMutex;
+    bool m_modelDownloadRunning = false;
+    QString m_modelDownloadStatus;
+    bool m_modelDownloadHasError = false;
 };
 
 } // namespace bs
