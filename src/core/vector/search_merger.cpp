@@ -45,6 +45,47 @@ float SearchMerger::normalizeSemanticScore(float cosineSim, float threshold)
     return std::clamp(normalized, 0.0f, 1.0f);
 }
 
+float SearchMerger::aggregateSemanticScore(const std::vector<float>& similarities,
+                                           const MergeConfig& config)
+{
+    if (similarities.empty()) {
+        return 0.0f;
+    }
+    if (similarities.size() == 1) {
+        return std::clamp(similarities.front(), 0.0f, 1.0f);
+    }
+
+    std::vector<float> topSimilarities = similarities;
+    std::sort(topSimilarities.begin(), topSimilarities.end(), std::greater<float>());
+    const int cap = std::max(1, config.semanticPassageCap);
+    if (static_cast<int>(topSimilarities.size()) > cap) {
+        topSimilarities.resize(static_cast<size_t>(cap));
+    }
+
+    const float maxSimilarity = std::clamp(topSimilarities.front(), 0.0f, 1.0f);
+    if (topSimilarities.size() == 1) {
+        return maxSimilarity;
+    }
+
+    const double temperature = std::max(0.1, static_cast<double>(config.semanticSoftmaxTemperature));
+    const double anchor = static_cast<double>(topSimilarities.front());
+    double sumExp = 0.0;
+    double weightedSum = 0.0;
+    for (float value : topSimilarities) {
+        const double exponent = std::exp((static_cast<double>(value) - anchor) * temperature);
+        sumExp += exponent;
+        weightedSum += exponent * static_cast<double>(value);
+    }
+    const float softmaxMean = sumExp > 0.0
+        ? static_cast<float>(weightedSum / sumExp)
+        : maxSimilarity;
+
+    const float supportSignal = std::clamp((softmaxMean - 0.5f) / 0.5f, 0.0f, 1.0f);
+    const float supportBonus = std::min(0.10f, 0.03f * static_cast<float>(topSimilarities.size() - 1));
+    const float combined = maxSimilarity + ((1.0f - maxSimilarity) * supportBonus * supportSignal);
+    return std::clamp(combined, 0.0f, 1.0f);
+}
+
 std::vector<SearchResult> SearchMerger::merge(
     const std::vector<SearchResult>& lexicalResults,
     const std::vector<SemanticResult>& semanticResults,
@@ -52,10 +93,12 @@ std::vector<SearchResult> SearchMerger::merge(
 {
     std::unordered_map<int64_t, const SearchResult*> lexicalById;
     std::unordered_map<int64_t, float> semanticById;
+    std::unordered_map<int64_t, std::vector<float>> semanticSamplesById;
     std::unordered_map<int64_t, int> lexicalRankById;
     std::unordered_map<int64_t, int> semanticRankById;
     lexicalById.reserve(lexicalResults.size());
     semanticById.reserve(semanticResults.size());
+    semanticSamplesById.reserve(semanticResults.size());
     lexicalRankById.reserve(lexicalResults.size());
     semanticRankById.reserve(semanticResults.size());
 
@@ -67,8 +110,14 @@ std::vector<SearchResult> SearchMerger::merge(
 
     for (size_t i = 0; i < semanticResults.size(); ++i) {
         const SemanticResult& result = semanticResults[i];
-        semanticById[result.itemId] = result.cosineSimilarity;
-        semanticRankById[result.itemId] = static_cast<int>(i) + 1;
+        semanticSamplesById[result.itemId].push_back(result.cosineSimilarity);
+        if (!semanticRankById.count(result.itemId)) {
+            semanticRankById[result.itemId] = static_cast<int>(i) + 1;
+        }
+    }
+
+    for (const auto& [itemId, samples] : semanticSamplesById) {
+        semanticById[itemId] = aggregateSemanticScore(samples, config);
     }
 
     std::unordered_map<int64_t, MergeCategory> categories;

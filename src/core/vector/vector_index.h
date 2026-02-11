@@ -22,18 +22,27 @@ public:
         float distance = 0.0f;
     };
 
-    static constexpr int kDimensions = 384;
+    struct IndexMetadata {
+        int schemaVersion = 2;
+        int dimensions = 0;
+        std::string modelId = "unknown";
+        std::string generationId = "v1";
+        std::string provider = "cpu";
+    };
+
     static constexpr int kM = 16;
     static constexpr int kEfConstruction = 200;
     static constexpr int kEfSearch = 50;
     static constexpr int kInitialCapacity = 100000;
 
     VectorIndex();
+    explicit VectorIndex(const IndexMetadata& metadata);
     ~VectorIndex();
 
     VectorIndex(const VectorIndex&) = delete;
     VectorIndex& operator=(const VectorIndex&) = delete;
 
+    bool configure(const IndexMetadata& metadata);
     bool create(int initialCapacity = kInitialCapacity);
     bool load(const std::string& indexPath, const std::string& metaPath);
     bool save(const std::string& indexPath, const std::string& metaPath);
@@ -48,10 +57,13 @@ public:
     bool needsRebuild() const;
     bool isAvailable() const;
     uint64_t nextLabel() const;
+    int dimensions() const;
+    const IndexMetadata& metadata() const;
 
 private:
     bool ensureCapacityForOneMore();
 
+    IndexMetadata m_metadata;
     std::unique_ptr<hnswlib::InnerProductSpace> m_space;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> m_index;
     uint64_t m_nextLabel = 0;

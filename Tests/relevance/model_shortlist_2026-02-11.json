@@ -1,0 +1,24 @@
+{
+  "generatedAt": "2026-02-11T00:00:00Z",
+  "defaultRole": "bi-encoder",
+  "candidates": [
+    {
+      "role": "bi-encoder",
+      "modelId": "bge-large-en-v1.5-f32",
+      "generationId": "v2",
+      "dimensions": 1024,
+      "providerPolicy": "coreml_first"
+    },
+    {
+      "role": "bi-encoder-legacy",
+      "modelId": "bge-small-en-v1.5-int8",
+      "generationId": "v1",
+      "dimensions": 384,
+      "providerPolicy": "fallback"
+    }
+  ],
+  "selection": {
+    "status": "frozen_with_fallback",
+    "notes": "v2 is primary when model asset is present; runtime falls back to legacy v1 when unavailable."
+  }
+}

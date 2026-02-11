@@ -10,10 +10,20 @@
 
 namespace bs {
 
+struct ModelProviderPolicy {
+    QString preferredProvider = QStringLiteral("coreml");
+    bool preferCoreMl = true;
+    bool allowCpuFallback = true;
+    QString disableCoreMlEnvVar = QStringLiteral("BETTERSPOTLIGHT_DISABLE_COREML");
+};
+
 struct ModelManifestEntry {
     QString name;
     QString file;
     QString vocab;
+    QString modelId;
+    QString generationId = QStringLiteral("v1");
+    QString fallbackRole;
     int dimensions = 0;
     int maxSeqLength = 512;
     QString queryPrefix;
@@ -21,7 +31,10 @@ struct ModelManifestEntry {
     std::vector<QString> inputs;
     std::vector<QString> outputs;
     QString extractionStrategy;
+    QString poolingStrategy;
+    QString semanticAggregationMode = QStringLiteral("max_softmax_cap");
     QString outputTransform;
+    ModelProviderPolicy providerPolicy;
 };
 
 struct ModelManifest {

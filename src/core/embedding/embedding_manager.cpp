@@ -99,6 +99,9 @@ bool EmbeddingManager::initialize()
     }
 
     m_queryPrefix = entry.queryPrefix;
+    m_activeModelId = entry.modelId.isEmpty() ? entry.name : entry.modelId;
+    m_activeGenerationId = entry.generationId.isEmpty() ? QStringLiteral("v1") : entry.generationId;
+    m_semanticAggregationMode = entry.semanticAggregationMode;
 
     m_impl->session = static_cast<Ort::Session*>(modelSession->rawSession());
     if (!m_impl->session) {
@@ -106,6 +109,7 @@ bool EmbeddingManager::initialize()
         m_available = false;
         return false;
     }
+    m_providerName = QString::fromStdString(modelSession->selectedProvider());
 
     const auto& outputNames = modelSession->outputNames();
     if (outputNames.empty()) {
@@ -127,6 +131,31 @@ bool EmbeddingManager::initialize()
 bool EmbeddingManager::isAvailable() const
 {
     return m_available;
+}
+
+int EmbeddingManager::embeddingDimensions() const
+{
+    return m_embeddingSize;
+}
+
+QString EmbeddingManager::activeModelId() const
+{
+    return m_activeModelId;
+}
+
+QString EmbeddingManager::activeGenerationId() const
+{
+    return m_activeGenerationId;
+}
+
+QString EmbeddingManager::providerName() const
+{
+    return m_providerName;
+}
+
+QString EmbeddingManager::semanticAggregationMode() const
+{
+    return m_semanticAggregationMode;
 }
 
 std::vector<float> EmbeddingManager::normalizeEmbedding(std::vector<float> embedding) const

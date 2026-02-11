@@ -19,13 +19,14 @@ private slots:
     void testSearchMergerWithVectorStore();
 
 private:
+    static constexpr int kTestDimensions = 384;
     static std::vector<float> makeVector(int seed);
 };
 
 std::vector<float> TestSemanticSearch::makeVector(int seed)
 {
-    std::vector<float> vector(static_cast<size_t>(bs::VectorIndex::kDimensions), 0.0F);
-    vector[static_cast<size_t>(seed % bs::VectorIndex::kDimensions)] = 1.0F;
+    std::vector<float> vector(static_cast<size_t>(kTestDimensions), 0.0F);
+    vector[static_cast<size_t>(seed % kTestDimensions)] = 1.0F;
     return vector;
 }
 
@@ -74,19 +75,36 @@ void TestSemanticSearch::testVectorStoreIntegration()
             parent_path TEXT
         );
         CREATE TABLE IF NOT EXISTS vector_map (
-            item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-            hnsw_label INTEGER NOT NULL UNIQUE,
-            model_version TEXT NOT NULL,
-            embedded_at REAL NOT NULL
+            item_id INTEGER NOT NULL,
+            hnsw_label INTEGER NOT NULL,
+            generation_id TEXT NOT NULL DEFAULT 'v1',
+            model_id TEXT NOT NULL,
+            dimensions INTEGER NOT NULL DEFAULT 0,
+            provider TEXT NOT NULL DEFAULT 'cpu',
+            passage_ordinal INTEGER NOT NULL DEFAULT 0,
+            embedded_at REAL NOT NULL,
+            migration_state TEXT NOT NULL DEFAULT 'active',
+            PRIMARY KEY (item_id, generation_id, passage_ordinal),
+            UNIQUE (generation_id, hnsw_label)
         );
-        CREATE INDEX IF NOT EXISTS idx_vector_map_label ON vector_map(hnsw_label);
+        CREATE INDEX IF NOT EXISTS idx_vector_map_label ON vector_map(generation_id, hnsw_label);
+        CREATE TABLE IF NOT EXISTS vector_generation_state (
+            generation_id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            state TEXT NOT NULL,
+            progress_pct REAL NOT NULL,
+            is_active INTEGER NOT NULL,
+            updated_at REAL NOT NULL
+        );
         INSERT INTO items (id, path, name, kind, size, created_at, modified_at, indexed_at)
             VALUES (42, '/tmp/test.cpp', 'test.cpp', 'file', 1024, 0.0, 0.0, 0.0);
     )";
     QCOMPARE(sqlite3_exec(db, sql, nullptr, nullptr, nullptr), SQLITE_OK);
 
     bs::VectorStore store(db);
-    QVERIFY(store.addMapping(42, 7, "v1"));
+    QVERIFY(store.addMapping(42, 7, "test-model", "v1", kTestDimensions, "cpu", 0, "active"));
 
     const auto label = store.getLabel(42);
     QVERIFY(label.has_value());
@@ -122,10 +140,27 @@ void TestSemanticSearch::testSearchMergerWithVectorStore()
             parent_path TEXT
         );
         CREATE TABLE IF NOT EXISTS vector_map (
-            item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-            hnsw_label INTEGER NOT NULL UNIQUE,
-            model_version TEXT NOT NULL,
-            embedded_at REAL NOT NULL
+            item_id INTEGER NOT NULL,
+            hnsw_label INTEGER NOT NULL,
+            generation_id TEXT NOT NULL DEFAULT 'v1',
+            model_id TEXT NOT NULL,
+            dimensions INTEGER NOT NULL DEFAULT 0,
+            provider TEXT NOT NULL DEFAULT 'cpu',
+            passage_ordinal INTEGER NOT NULL DEFAULT 0,
+            embedded_at REAL NOT NULL,
+            migration_state TEXT NOT NULL DEFAULT 'active',
+            PRIMARY KEY (item_id, generation_id, passage_ordinal),
+            UNIQUE (generation_id, hnsw_label)
+        );
+        CREATE TABLE IF NOT EXISTS vector_generation_state (
+            generation_id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            state TEXT NOT NULL,
+            progress_pct REAL NOT NULL,
+            is_active INTEGER NOT NULL,
+            updated_at REAL NOT NULL
         );
         INSERT INTO items (id, path, name, kind, size, created_at, modified_at, indexed_at)
             VALUES (10, '/src/main.cpp', 'main.cpp', 'file', 512, 0.0, 0.0, 0.0);
@@ -135,8 +170,8 @@ void TestSemanticSearch::testSearchMergerWithVectorStore()
     QCOMPARE(sqlite3_exec(db, sql, nullptr, nullptr, nullptr), SQLITE_OK);
 
     bs::VectorStore store(db);
-    QVERIFY(store.addMapping(10, 0, "v1"));
-    QVERIFY(store.addMapping(20, 1, "v1"));
+    QVERIFY(store.addMapping(10, 0, "test-model", "v1", kTestDimensions, "cpu", 0, "active"));
+    QVERIFY(store.addMapping(20, 1, "test-model", "v1", kTestDimensions, "cpu", 0, "active"));
 
     std::vector<bs::SearchResult> lexical;
     bs::SearchResult lex;

@@ -50,22 +50,53 @@ option(BETTERSPOTLIGHT_ENABLE_SPARKLE "Enable Sparkle update framework integrati
 option(BETTERSPOTLIGHT_FETCH_MODELS
        "Fetch embedding model assets into data/models when missing"
        ON)
+option(BETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL
+       "Fetch the 1024d max-quality embedding model as part of model asset bootstrap"
+       ON)
+if(APPLE)
+    option(BETTERSPOTLIGHT_PREFER_COREML
+           "Prefer CoreML execution provider on Apple Silicon when available"
+           ON)
+else()
+    option(BETTERSPOTLIGHT_PREFER_COREML
+           "Prefer CoreML execution provider on Apple Silicon when available"
+           OFF)
+endif()
 
 set(BETTERSPOTLIGHT_MODELS_DIR "${CMAKE_SOURCE_DIR}/data/models")
 set(BETTERSPOTLIGHT_MODEL_ONNX "${BETTERSPOTLIGHT_MODELS_DIR}/bge-small-en-v1.5-int8.onnx")
+set(BETTERSPOTLIGHT_MODEL_ONNX_MAX_QUALITY "${BETTERSPOTLIGHT_MODELS_DIR}/bge-large-en-v1.5-f32.onnx")
 set(BETTERSPOTLIGHT_MODEL_VOCAB "${BETTERSPOTLIGHT_MODELS_DIR}/vocab.txt")
 
 if(BETTERSPOTLIGHT_FETCH_MODELS)
+    set(_betterspotlight_model_fetch_args)
+    set(_betterspotlight_model_fetch_byproducts
+        ${BETTERSPOTLIGHT_MODEL_ONNX}
+        ${BETTERSPOTLIGHT_MODEL_VOCAB}
+    )
+    if(NOT BETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL)
+        list(APPEND _betterspotlight_model_fetch_args --no-max-quality)
+    else()
+        list(APPEND _betterspotlight_model_fetch_byproducts
+            ${BETTERSPOTLIGHT_MODEL_ONNX_MAX_QUALITY}
+        )
+    endif()
+
     add_custom_target(betterspotlight-fetch-models
-        COMMAND ${CMAKE_SOURCE_DIR}/tools/fetch_embedding_models.sh
-        BYPRODUCTS
-            ${BETTERSPOTLIGHT_MODEL_ONNX}
-            ${BETTERSPOTLIGHT_MODEL_VOCAB}
+        COMMAND ${CMAKE_SOURCE_DIR}/tools/fetch_embedding_models.sh ${_betterspotlight_model_fetch_args}
+        BYPRODUCTS ${_betterspotlight_model_fetch_byproducts}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Ensuring embedding model assets are available in data/models"
         VERBATIM
     )
 endif()
+
+add_custom_target(betterspotlight-benchmark-semantic-shortlist
+    COMMAND ${CMAKE_SOURCE_DIR}/tools/benchmark_semantic_shortlist.sh
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Run semantic shortlist benchmark harness"
+    VERBATIM
+)
 
 find_package(Tesseract QUIET)
 find_package(PkgConfig QUIET)

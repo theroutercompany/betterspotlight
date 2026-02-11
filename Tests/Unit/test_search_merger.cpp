@@ -19,6 +19,8 @@ private slots:
     void testNormalizeLexicalScore();
     void testNormalizeSemanticScore();
     void testCategoryBoth();
+    void testAggregateSemanticScoreMonotonic();
+    void testDuplicateSemanticPassagesAggregatePerItem();
 
 private:
     static bs::SearchResult makeLexicalResult(int64_t itemId, double score);
@@ -188,6 +190,44 @@ void TestSearchMerger::testCategoryBoth()
     QCOMPARE(static_cast<int>(merged.size()), 1);
     QCOMPARE(merged[0].itemId, static_cast<int64_t>(42));
     QVERIFY(merged[0].score > 0.0);
+}
+
+void TestSearchMerger::testAggregateSemanticScoreMonotonic()
+{
+    bs::MergeConfig config;
+    config.semanticPassageCap = 3;
+    config.semanticSoftmaxTemperature = 8.0F;
+
+    const float single = bs::SearchMerger::aggregateSemanticScore({0.83F}, config);
+    const float withSupport = bs::SearchMerger::aggregateSemanticScore({0.83F, 0.81F}, config);
+    const float withMoreSupport =
+        bs::SearchMerger::aggregateSemanticScore({0.83F, 0.81F, 0.80F}, config);
+
+    QVERIFY(withSupport >= single);
+    QVERIFY(withMoreSupport >= withSupport);
+    QVERIFY(withMoreSupport <= 1.0F);
+}
+
+void TestSearchMerger::testDuplicateSemanticPassagesAggregatePerItem()
+{
+    const std::vector<bs::SearchResult> lexical = {
+        makeLexicalResult(7, 100.0),
+    };
+    const std::vector<bs::SemanticResult> semantic = {
+        {7, 0.78F},
+        {7, 0.84F},
+        {9, 0.82F},
+    };
+
+    const std::vector<bs::SearchResult> merged = bs::SearchMerger::merge(lexical, semantic);
+    QCOMPARE(static_cast<int>(merged.size()), 2);
+
+    const bool hasItem7 = std::any_of(merged.begin(), merged.end(),
+        [](const bs::SearchResult& result) { return result.itemId == 7; });
+    const bool hasItem9 = std::any_of(merged.begin(), merged.end(),
+        [](const bs::SearchResult& result) { return result.itemId == 9; });
+    QVERIFY(hasItem7);
+    QVERIFY(hasItem9);
 }
 
 QTEST_MAIN(TestSearchMerger)

@@ -6,15 +6,55 @@
 
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QByteArray>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 namespace bs {
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+int readEnvInt(const char* key, int fallback, int minValue, int maxValue)
+{
+    const QByteArray value = qgetenv(key);
+    if (value.isEmpty()) {
+        return fallback;
+    }
+
+    bool ok = false;
+    const int parsed = QString::fromUtf8(value).toInt(&ok);
+    if (!ok) {
+        return fallback;
+    }
+    return std::clamp(parsed, minValue, maxValue);
+}
+
+int currentProcessRssMb()
+{
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    const kern_return_t kr = task_info(mach_task_self(),
+                                       MACH_TASK_BASIC_INFO,
+                                       reinterpret_cast<task_info_t>(&info),
+                                       &count);
+    if (kr != KERN_SUCCESS) {
+        return -1;
+    }
+
+    return static_cast<int>(info.resident_size / (1024 * 1024));
+#else
+    return -1;
+#endif
+}
 
 bool isTransientExtractionFailure(const PreparedWork& prepared)
 {
@@ -58,6 +98,17 @@ Pipeline::Pipeline(SQLiteStore& store, ExtractionManager& extractor,
     , m_monitor(std::make_unique<FileMonitorMacOS>())
 {
     m_idlePrepWorkers = computeIdlePrepWorkers();
+    m_memoryPressurePrepWorkers = static_cast<size_t>(readEnvInt(
+        "BETTERSPOTLIGHT_INDEXER_PREP_WORKERS_PRESSURE",
+        1,
+        1,
+        static_cast<int>(std::max<size_t>(1, m_idlePrepWorkers))));
+    m_memorySoftLimitMb = readEnvInt("BETTERSPOTLIGHT_INDEXER_RSS_SOFT_MB", 900, 256, 32768);
+    m_memoryHardLimitMb = readEnvInt("BETTERSPOTLIGHT_INDEXER_RSS_HARD_MB", 1200, 320, 32768);
+    if (m_memoryHardLimitMb <= m_memorySoftLimitMb) {
+        m_memoryHardLimitMb = m_memorySoftLimitMb + 128;
+    }
+
     m_allowedPrepWorkers.store(m_idlePrepWorkers);
     LOG_INFO(bsIndex, "Pipeline created (idle prep workers=%d)",
              static_cast<int>(m_idlePrepWorkers));
@@ -187,12 +238,36 @@ void Pipeline::setUserActive(bool active)
 void Pipeline::updatePrepConcurrencyPolicy()
 {
     const size_t allowed = m_userActive.load() ? 1 : m_idlePrepWorkers;
-    const size_t clamped = std::max<size_t>(1, std::min(allowed, m_idlePrepWorkers));
+    const size_t memoryAware = applyMemoryAwarePrepWorkerLimit(allowed);
+    const size_t clamped = std::max<size_t>(1, std::min(memoryAware, m_idlePrepWorkers));
 
     m_allowedPrepWorkers.store(clamped);
     m_extractor.setMaxConcurrent(static_cast<int>(clamped));
 
     wakeAllStages();
+}
+
+size_t Pipeline::applyMemoryAwarePrepWorkerLimit(size_t requestedWorkers) const
+{
+    const int rssMb = processRssMb();
+    if (rssMb < 0) {
+        return requestedWorkers;
+    }
+
+    if (rssMb >= m_memoryHardLimitMb) {
+        return 1;
+    }
+
+    if (rssMb >= m_memorySoftLimitMb) {
+        return std::min(requestedWorkers, m_memoryPressurePrepWorkers);
+    }
+
+    return requestedWorkers;
+}
+
+int Pipeline::processRssMb() const
+{
+    return currentProcessRssMb();
 }
 
 size_t Pipeline::computeIdlePrepWorkers()
@@ -274,13 +349,19 @@ size_t Pipeline::totalPendingDepth() const
 bool Pipeline::waitForScanBackpressureWindow() const
 {
     while (m_running.load() && !m_stopping.load()) {
-        if (totalPendingDepth() <= kScanHighWatermark) {
+        const size_t depth = totalPendingDepth();
+        const int rssMb = processRssMb();
+        const bool hardMemoryPressure = rssMb >= m_memoryHardLimitMb;
+        if (depth <= kScanHighWatermark && !hardMemoryPressure) {
             return true;
         }
 
         while (m_running.load() && !m_stopping.load()
-               && totalPendingDepth() > kScanResumeWatermark) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(kEnqueueRetrySleepMs));
+               && (totalPendingDepth() > kScanResumeWatermark
+                   || processRssMb() >= m_memoryHardLimitMb)) {
+            const int pressureSleepMs =
+                processRssMb() >= m_memorySoftLimitMb ? 50 : kEnqueueRetrySleepMs;
+            std::this_thread::sleep_for(std::chrono::milliseconds(pressureSleepMs));
         }
     }
 
@@ -535,8 +616,12 @@ bool Pipeline::isStalePreparedWork(const PreparedWork& prepared) const
 void Pipeline::prepDispatcherLoop()
 {
     LOG_INFO(bsIndex, "Prep dispatcher loop started");
+    size_t policyTick = 0;
 
     while (!m_stopping.load()) {
+        if ((policyTick++ % 32) == 0) {
+            updatePrepConcurrencyPolicy();
+        }
         auto item = m_workQueue.dequeue();
         if (!item.has_value()) {
             if (m_stopping.load() || !m_running.load()) {

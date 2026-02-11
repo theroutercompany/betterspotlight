@@ -3,13 +3,85 @@
 #include "core/shared/logging.h"
 
 #include <QDateTime>
+#include <QByteArray>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QStandardPaths>
 #include <cinttypes>
+#include <algorithm>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 namespace bs {
+
+namespace {
+
+int readEnvInt(const char* key, int fallback, int minValue, int maxValue)
+{
+    const QByteArray value = qgetenv(key);
+    if (value.isEmpty()) {
+        return fallback;
+    }
+
+    bool ok = false;
+    const int parsed = QString::fromUtf8(value).toInt(&ok);
+    if (!ok) {
+        return fallback;
+    }
+
+    return std::clamp(parsed, minValue, maxValue);
+}
+
+int currentProcessRssMb()
+{
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    const kern_return_t kr = task_info(mach_task_self(),
+                                       MACH_TASK_BASIC_INFO,
+                                       reinterpret_cast<task_info_t>(&info),
+                                       &count);
+    if (kr != KERN_SUCCESS) {
+        return -1;
+    }
+    return static_cast<int>(info.resident_size / (1024 * 1024));
+#else
+    return -1;
+#endif
+}
+
+QJsonObject memoryTelemetry()
+{
+    const int rssMb = currentProcessRssMb();
+    const int softLimitMb = readEnvInt("BETTERSPOTLIGHT_INDEXER_RSS_SOFT_MB", 900, 256, 32768);
+    int hardLimitMb = readEnvInt("BETTERSPOTLIGHT_INDEXER_RSS_HARD_MB", 1200, 320, 32768);
+    if (hardLimitMb <= softLimitMb) {
+        hardLimitMb = softLimitMb + 128;
+    }
+
+    QString pressure = QStringLiteral("unknown");
+    if (rssMb >= 0) {
+        if (rssMb >= hardLimitMb) {
+            pressure = QStringLiteral("hard");
+        } else if (rssMb >= softLimitMb) {
+            pressure = QStringLiteral("soft");
+        } else {
+            pressure = QStringLiteral("normal");
+        }
+    }
+
+    QJsonObject memory;
+    memory[QStringLiteral("rssMb")] = rssMb;
+    memory[QStringLiteral("pressure")] = pressure;
+    memory[QStringLiteral("softLimitMb")] = softLimitMb;
+    memory[QStringLiteral("hardLimitMb")] = hardLimitMb;
+    return memory;
+}
+
+} // namespace
 
 IndexerService::IndexerService(QObject* parent)
     : ServiceBase(QStringLiteral("indexer"), parent)
@@ -281,6 +353,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
             bsignore.value(QStringLiteral("patternCount")).toInt(0);
         result[QStringLiteral("bsignoreLastLoadedAtMs")] =
             bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
+        result[QStringLiteral("memory")] = memoryTelemetry();
         return IpcMessage::makeResponse(id, result);
     }
 
@@ -312,6 +385,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         bsignore.value(QStringLiteral("patternCount")).toInt(0);
     result[QStringLiteral("bsignoreLastLoadedAtMs")] =
         bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
+    result[QStringLiteral("memory")] = memoryTelemetry();
     return IpcMessage::makeResponse(id, result);
 }
 

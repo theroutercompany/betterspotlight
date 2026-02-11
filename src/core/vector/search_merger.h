@@ -20,6 +20,8 @@ struct MergeConfig {
     float similarityThreshold = 0.7f;
     int rrfK = 60;
     int maxResults = 20;
+    float semanticSoftmaxTemperature = 8.0f;
+    int semanticPassageCap = 3;
 };
 
 enum class MergeCategory {
@@ -37,6 +39,8 @@ public:
 
     static float normalizeLexicalScore(float score, float maxScore);
     static float normalizeSemanticScore(float cosineSim, float threshold);
+    static float aggregateSemanticScore(const std::vector<float>& similarities,
+                                        const MergeConfig& config);
 };
 
 } // namespace bs

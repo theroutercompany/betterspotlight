@@ -14,7 +14,6 @@ namespace bs {
 
 class SQLiteStore;
 class EmbeddingManager;
-class Quantizer;
 class VectorIndex;
 class VectorStore;
 
@@ -24,7 +23,6 @@ class EmbeddingPipeline : public QObject {
 public:
     explicit EmbeddingPipeline(SQLiteStore* store,
                                EmbeddingManager* embeddingManager,
-                               Quantizer* quantizer,
                                VectorIndex* vectorIndex,
                                VectorStore* vectorStore,
                                QObject* parent = nullptr);
@@ -61,10 +59,11 @@ private:
     bool processSingleEmbedding(int64_t itemId, const std::vector<float>& embedding);
     bool shouldSave() const;
     void saveIndex();
+    int currentBatchSize() const;
+    int processRssMb() const;
 
     SQLiteStore* m_store = nullptr;
     EmbeddingManager* m_embeddingManager = nullptr;
-    Quantizer* m_quantizer = nullptr;
     VectorIndex* m_vectorIndex = nullptr;
     VectorStore* m_vectorStore = nullptr;
 
@@ -78,6 +77,7 @@ private:
     QElapsedTimer m_lastSaveTime;
 
     static constexpr int kBatchSize = 32;
+    static constexpr int kMinBatchSize = 4;
     static constexpr int kIdleSleepMs = 500;
     static constexpr int kSaveItemThreshold = 1000;
     static constexpr qint64 kSaveTimeThresholdMs = 60000;

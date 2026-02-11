@@ -17,13 +17,14 @@ private slots:
     void testVectorIndexPersistence();
 
 private:
+    static constexpr int kTestDimensions = 384;
     static std::vector<float> makeVector(int seed);
 };
 
 std::vector<float> TestEmbeddingRecovery::makeVector(int seed)
 {
-    std::vector<float> vec(static_cast<size_t>(bs::VectorIndex::kDimensions), 0.0F);
-    vec[static_cast<size_t>(seed % bs::VectorIndex::kDimensions)] = 1.0F;
+    std::vector<float> vec(static_cast<size_t>(kTestDimensions), 0.0F);
+    vec[static_cast<size_t>(seed % kTestDimensions)] = 1.0F;
     return vec;
 }
 
@@ -71,7 +72,11 @@ void TestEmbeddingRecovery::testVectorIndexPersistence()
     auto queryVec = makeVector(5);
 
     {
-        bs::VectorIndex index;
+        bs::VectorIndex::IndexMetadata meta;
+        meta.dimensions = kTestDimensions;
+        meta.modelId = "unit-test-model";
+        meta.generationId = "v1";
+        bs::VectorIndex index(meta);
         QVERIFY(index.create(1000));
 
         for (int i = 0; i < 10; ++i) {
@@ -82,7 +87,11 @@ void TestEmbeddingRecovery::testVectorIndexPersistence()
     }
 
     {
-        bs::VectorIndex loaded;
+        bs::VectorIndex::IndexMetadata meta;
+        meta.dimensions = kTestDimensions;
+        meta.modelId = "unit-test-model";
+        meta.generationId = "v1";
+        bs::VectorIndex loaded(meta);
         QVERIFY(loaded.load(indexPath, metaPath));
         QVERIFY(loaded.isAvailable());
         QCOMPARE(loaded.totalElements(), 10);

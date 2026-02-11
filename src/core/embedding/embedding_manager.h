@@ -35,6 +35,11 @@ public:
 
     bool initialize();
     bool isAvailable() const;
+    int embeddingDimensions() const;
+    QString activeModelId() const;
+    QString activeGenerationId() const;
+    QString providerName() const;
+    QString semanticAggregationMode() const;
 
     std::vector<float> embed(const QString& text);
     std::vector<float> embedQuery(const QString& text);
@@ -53,6 +58,10 @@ private:
     std::unique_ptr<WordPieceTokenizer> m_tokenizer;
     int m_embeddingSize = 0;
     QString m_queryPrefix;
+    QString m_activeModelId;
+    QString m_activeGenerationId;
+    QString m_providerName;
+    QString m_semanticAggregationMode;
     bool m_available = false;
     EmbeddingCircuitBreaker m_circuitBreaker;
 };

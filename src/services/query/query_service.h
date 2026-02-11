@@ -57,6 +57,7 @@ private:
     void runVectorRebuildWorker(uint64_t runId, QString dbPath, QString dataDir,
                                 QString modelsDir,
                                 QString indexPath, QString metaPath,
+                                QString targetGeneration,
                                 QStringList includePaths);
 
     // ── Store + services ──
@@ -113,6 +114,18 @@ private:
     QString m_dbPath;
     QString m_vectorIndexPath;
     QString m_vectorMetaPath;
+    QString m_activeVectorGeneration = QStringLiteral("v1");
+    QString m_targetVectorGeneration = QStringLiteral("v2");
+    QString m_vectorMigrationState = QStringLiteral("idle");
+    double m_vectorMigrationProgressPct = 0.0;
+    QString m_activeVectorModelId = QStringLiteral("legacy");
+    QString m_activeVectorProvider = QStringLiteral("cpu");
+    int m_activeVectorDimensions = 384;
+
+    QString vectorIndexPathForGeneration(const QString& generation) const;
+    QString vectorMetaPathForGeneration(const QString& generation) const;
+    void refreshVectorGenerationState();
+    void maybeStartBackgroundVectorMigration();
 
     // Opens the store if not already open. Returns true on success.
     bool ensureStoreOpen();

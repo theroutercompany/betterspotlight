@@ -80,6 +80,49 @@ bool applyMigrations(sqlite3* db, int targetVersion)
         current = 2;
     }
 
+    if (current < 3 && targetVersion >= 3) {
+        LOG_INFO(bsIndex, "Applying schema migration 2 -> 3");
+
+        if (!exec(R"(
+            CREATE TABLE IF NOT EXISTS vector_generation_state (
+                generation_id TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'cpu',
+                state TEXT NOT NULL DEFAULT 'building',
+                progress_pct REAL NOT NULL DEFAULT 0.0,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL
+            );
+        )")) {
+            return false;
+        }
+        if (!exec("CREATE INDEX IF NOT EXISTS idx_vector_generation_active ON vector_generation_state(is_active);")) {
+            return false;
+        }
+
+        if (!exec(R"(
+            INSERT OR IGNORE INTO vector_generation_state (
+                generation_id, model_id, dimensions, provider, state, progress_pct, is_active, updated_at
+            ) VALUES ('v1', 'legacy', 384, 'cpu', 'active', 100.0, 1, strftime('%s','now'));
+        )")) {
+            return false;
+        }
+
+        if (!exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('activeVectorGeneration', 'v1');")
+            || !exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('targetVectorGeneration', 'v2');")
+            || !exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('vectorMigrationState', 'idle');")
+            || !exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('vectorMigrationProgressPct', '0');")) {
+            return false;
+        }
+
+        if (!exec("INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', '3');")) {
+            return false;
+        }
+
+        current = 3;
+    }
+
     if (current != targetVersion) {
         LOG_ERROR(bsIndex, "Schema migration incomplete: current=%d target=%d",
                   current, targetVersion);

@@ -1,4 +1,6 @@
-# M2: Embedding module — ONNX Runtime inference, WordPiece tokenizer, quantization
+# Embedding module — ONNX Runtime inference + tokenizer.
+# Note: quantizer.cpp remains for legacy/offline compatibility utilities,
+# but online retrieval paths now persist float32 embeddings.
 
 add_library(betterspotlight-core-embedding STATIC
     tokenizer.cpp

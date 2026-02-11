@@ -24,6 +24,8 @@ void TestModelRegistry::testManifestParsing()
         "models": {
             "bi-encoder": {
                 "name": "bge-small-en-v1.5",
+                "modelId": "bge-small-en-v1.5-int8",
+                "generationId": "v1",
                 "file": "bge-small-en-v1.5-int8.onnx",
                 "vocab": "vocab.txt",
                 "dimensions": 384,
@@ -32,10 +34,18 @@ void TestModelRegistry::testManifestParsing()
                 "tokenizer": "wordpiece",
                 "inputs": ["input_ids", "attention_mask", "token_type_ids"],
                 "outputs": ["last_hidden_state"],
-                "extractionStrategy": "cls_token"
+                "extractionStrategy": "cls_token",
+                "semanticAggregationMode": "max_softmax_cap",
+                "providerPolicy": {
+                    "preferredProvider": "coreml",
+                    "preferCoreMl": true,
+                    "allowCpuFallback": true
+                }
             },
             "cross-encoder": {
                 "name": "ms-marco-MiniLM-L-6-v2",
+                "modelId": "ms-marco-mini",
+                "generationId": "v2",
                 "file": "ms-marco-minilm.onnx",
                 "vocab": "vocab.txt",
                 "dimensions": 1,
@@ -63,6 +73,8 @@ void TestModelRegistry::testManifestParsing()
     QCOMPARE(biEncoder.name, QStringLiteral("bge-small-en-v1.5"));
     QCOMPARE(biEncoder.file, QStringLiteral("bge-small-en-v1.5-int8.onnx"));
     QCOMPARE(biEncoder.vocab, QStringLiteral("vocab.txt"));
+    QCOMPARE(biEncoder.modelId, QStringLiteral("bge-small-en-v1.5-int8"));
+    QCOMPARE(biEncoder.generationId, QStringLiteral("v1"));
     QCOMPARE(biEncoder.dimensions, 384);
     QCOMPARE(biEncoder.maxSeqLength, 512);
     QCOMPARE(biEncoder.tokenizer, QStringLiteral("wordpiece"));
@@ -73,6 +85,9 @@ void TestModelRegistry::testManifestParsing()
     QCOMPARE(biEncoder.inputs[2], QStringLiteral("token_type_ids"));
     QCOMPARE(biEncoder.outputs.size(), 1UL);
     QCOMPARE(biEncoder.outputs[0], QStringLiteral("last_hidden_state"));
+    QCOMPARE(biEncoder.providerPolicy.preferredProvider, QStringLiteral("coreml"));
+    QCOMPARE(biEncoder.providerPolicy.preferCoreMl, true);
+    QCOMPARE(biEncoder.providerPolicy.allowCpuFallback, true);
 
     // Verify cross-encoder entry
     auto ceIt = manifest->models.find("cross-encoder");

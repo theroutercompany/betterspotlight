@@ -20,6 +20,7 @@
 #include <QStandardPaths>
 #include <QJsonArray>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -28,7 +29,6 @@
 namespace bs {
 
 namespace {
-constexpr const char* kVectorModelVersion = "bge-small-en-v1.5";
 constexpr int kVectorRebuildProgressUpdateStride = 128;
 constexpr int kVectorRebuildChunksPerItem = 3;
 } // namespace
@@ -230,6 +230,16 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
         }
     }
 
+    const QString requestedGeneration = params.value(QStringLiteral("targetGeneration"))
+        .toString()
+        .trimmed();
+    const QString targetGeneration = requestedGeneration.isEmpty()
+        ? (m_targetVectorGeneration.isEmpty() ? QStringLiteral("v2") : m_targetVectorGeneration)
+        : requestedGeneration;
+    m_targetVectorGeneration = targetGeneration;
+    const QString targetIndexPath = vectorIndexPathForGeneration(targetGeneration);
+    const QString targetMetaPath = vectorMetaPathForGeneration(targetGeneration);
+
     uint64_t runId = 0;
     {
         std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
@@ -250,17 +260,27 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
         m_vectorRebuildState.startedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         m_vectorRebuildState.scopeRoots = includePaths;
     }
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        m_vectorMigrationState = QStringLiteral("building");
+        m_vectorMigrationProgressPct = 0.0;
+    }
+    m_store->setSetting(QStringLiteral("targetVectorGeneration"), targetGeneration);
+    m_store->setSetting(QStringLiteral("vectorMigrationState"), QStringLiteral("building"));
+    m_store->setSetting(QStringLiteral("vectorMigrationProgressPct"), QStringLiteral("0"));
 
     joinVectorRebuildThread();
     m_vectorRebuildThread = std::thread(
         &QueryService::runVectorRebuildWorker, this, runId, m_dbPath, m_dataDir,
-        m_modelRegistry->modelsDir(), m_vectorIndexPath, m_vectorMetaPath,
+        m_modelRegistry->modelsDir(), targetIndexPath, targetMetaPath,
+        targetGeneration,
         includePaths);
 
     QJsonObject result;
     result[QStringLiteral("started")] = true;
     result[QStringLiteral("alreadyRunning")] = false;
     result[QStringLiteral("runId")] = static_cast<qint64>(runId);
+    result[QStringLiteral("targetGeneration")] = targetGeneration;
     result[QStringLiteral("status")] = QStringLiteral("running");
     return IpcMessage::makeResponse(id, result);
 }
@@ -271,6 +291,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
                                           QString modelsDir,
                                           QString indexPath,
                                           QString metaPath,
+                                          QString targetGeneration,
                                           QStringList includePaths)
 {
     sqlite3* db = nullptr;
@@ -285,6 +306,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         m_vectorRebuildState.status = VectorRebuildState::Status::Failed;
         m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         m_vectorRebuildState.lastError = error;
+        m_vectorMigrationState = QStringLiteral("failed");
     };
 
     auto updateSucceededState = [&](int totalCandidates, int processed,
@@ -305,6 +327,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         m_vectorRebuildState.scopeCandidates = totalCandidates;
         m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
         m_vectorRebuildState.lastError = lastError;
+        m_vectorMigrationState = lastError.isEmpty()
+            ? QStringLiteral("cutover-complete")
+            : QStringLiteral("failed");
+        m_vectorMigrationProgressPct = lastError.isEmpty() ? 100.0 : m_vectorMigrationProgressPct;
     };
 
     auto closeResources = [&]() {
@@ -356,7 +382,14 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         return;
     }
 
-    auto rebuiltIndex = std::make_unique<VectorIndex>();
+    const int embeddingDimensions = std::max(workerEmbeddingManager.embeddingDimensions(), 1);
+    VectorIndex::IndexMetadata rebuiltMeta;
+    rebuiltMeta.dimensions = embeddingDimensions;
+    rebuiltMeta.modelId = workerEmbeddingManager.activeModelId().toStdString();
+    rebuiltMeta.generationId = targetGeneration.toStdString();
+    rebuiltMeta.provider = workerEmbeddingManager.providerName().toStdString();
+
+    auto rebuiltIndex = std::make_unique<VectorIndex>(rebuiltMeta);
     if (!rebuiltIndex->create()) {
         updateFailedState(QStringLiteral("Failed to initialize vector index"));
         closeResources();
@@ -364,6 +397,15 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     }
 
     VectorStore workerVectorStore(db);
+    VectorStore::GenerationState buildingState;
+    buildingState.generationId = targetGeneration.toStdString();
+    buildingState.modelId = rebuiltMeta.modelId;
+    buildingState.dimensions = embeddingDimensions;
+    buildingState.provider = rebuiltMeta.provider;
+    buildingState.state = "building";
+    buildingState.progressPct = 0.0;
+    buildingState.active = false;
+    workerVectorStore.upsertGenerationState(buildingState);
 
     QString whereClause = QStringLiteral("length(trim(c.chunk_text)) > 0");
     if (!includePaths.isEmpty()) {
@@ -466,7 +508,12 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     int embeddedCount = 0;
     int skippedCount = 0;
     int failedCount = 0;
-    std::vector<std::pair<int64_t, uint64_t>> pendingMappings;
+    struct PendingMapping {
+        int64_t itemId = 0;
+        uint64_t label = 0;
+        int passageOrdinal = 0;
+    };
+    std::vector<PendingMapping> pendingMappings;
     if (totalCandidates > 0) {
         pendingMappings.reserve(static_cast<size_t>(totalCandidates));
     }
@@ -508,15 +555,32 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             }
         }
 
-        std::vector<float> pooled(static_cast<size_t>(VectorIndex::kDimensions), 0.0f);
         int usableEmbeddings = 0;
         for (const auto& embedding : embeddings) {
-            if (embedding.size() != static_cast<size_t>(VectorIndex::kDimensions)) {
+            if (embedding.size() != static_cast<size_t>(embeddingDimensions)) {
                 continue;
             }
-            for (size_t i = 0; i < embedding.size(); ++i) {
-                pooled[i] += embedding[i];
+            std::vector<float> normalized = embedding;
+            double normSquared = 0.0;
+            for (float value : normalized) {
+                normSquared += static_cast<double>(value) * static_cast<double>(value);
             }
+            const double norm = std::sqrt(normSquared);
+            if (norm > 0.0) {
+                for (float& value : normalized) {
+                    value = static_cast<float>(static_cast<double>(value) / norm);
+                }
+            }
+
+            const uint64_t label = rebuiltIndex->addVector(normalized.data());
+            if (label == std::numeric_limits<uint64_t>::max()) {
+                continue;
+            }
+            pendingMappings.push_back(PendingMapping{
+                currentItemId,
+                label,
+                usableEmbeddings,
+            });
             ++usableEmbeddings;
         }
 
@@ -524,28 +588,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             ++failedCount;
             return;
         }
-
-        for (float& value : pooled) {
-            value /= static_cast<float>(usableEmbeddings);
-        }
-        double normSquared = 0.0;
-        for (const float value : pooled) {
-            normSquared += static_cast<double>(value) * static_cast<double>(value);
-        }
-        const double norm = std::sqrt(normSquared);
-        if (norm > 0.0) {
-            for (float& value : pooled) {
-                value = static_cast<float>(static_cast<double>(value) / norm);
-            }
-        }
-
-        const uint64_t label = rebuiltIndex->addVector(pooled.data());
-        if (label == std::numeric_limits<uint64_t>::max()) {
-            ++failedCount;
-            return;
-        }
-        pendingMappings.emplace_back(currentItemId, label);
-        ++embeddedCount;
+        embeddedCount += usableEmbeddings;
     };
 
     while (true) {
@@ -581,6 +624,16 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             if (processed % kVectorRebuildProgressUpdateStride == 0) {
                 updateVectorRebuildProgress(runId, totalCandidates, processed,
                                             embeddedCount, skippedCount, failedCount);
+                const double progressPct = totalCandidates > 0
+                    ? (100.0 * static_cast<double>(processed)
+                       / static_cast<double>(totalCandidates))
+                    : 0.0;
+                {
+                    std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+                    m_vectorMigrationProgressPct = progressPct;
+                }
+                buildingState.progressPct = progressPct;
+                workerVectorStore.upsertGenerationState(buildingState);
             }
             currentItemId = itemId;
             currentChunks.clear();
@@ -599,6 +652,16 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     stmt = nullptr;
     updateVectorRebuildProgress(runId, totalCandidates, processed,
                                 embeddedCount, skippedCount, failedCount);
+    const double finalProgressPct = totalCandidates > 0
+        ? (100.0 * static_cast<double>(processed)
+           / static_cast<double>(totalCandidates))
+        : 100.0;
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        m_vectorMigrationProgressPct = finalProgressPct;
+    }
+    buildingState.progressPct = finalProgressPct;
+    workerVectorStore.upsertGenerationState(buildingState);
 
     if (m_stopRebuildRequested.load()) {
         rollbackIfNeeded();
@@ -628,15 +691,21 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     }
     inTransaction = true;
 
-    if (!workerVectorStore.clearAll()) {
+    if (!workerVectorStore.removeGeneration(targetGeneration.toStdString())) {
         rollbackIfNeeded();
-        updateFailedState(QStringLiteral("Failed to clear vector mappings"));
+        updateFailedState(QStringLiteral("Failed to clear target generation mappings"));
         closeResources();
         return;
     }
 
     for (const auto& mapping : pendingMappings) {
-        if (!workerVectorStore.addMapping(mapping.first, mapping.second, kVectorModelVersion)) {
+        if (!workerVectorStore.addMapping(mapping.itemId, mapping.label,
+                                          rebuiltMeta.modelId,
+                                          targetGeneration.toStdString(),
+                                          embeddingDimensions,
+                                          rebuiltMeta.provider,
+                                          mapping.passageOrdinal,
+                                          std::string("active"))) {
             rollbackIfNeeded();
             updateFailedState(QStringLiteral("Failed to persist vector mappings"));
             closeResources();
@@ -665,9 +734,27 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
     if (!setSettingWorker(QStringLiteral("nextHnswLabel"),
                           QString::number(rebuiltIndex->nextLabel()))
-        || !setSettingWorker(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))) {
+        || !setSettingWorker(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))
+        || !setSettingWorker(QStringLiteral("activeVectorGeneration"), targetGeneration)
+        || !setSettingWorker(QStringLiteral("vectorMigrationState"), QStringLiteral("cutover-complete"))
+        || !setSettingWorker(QStringLiteral("vectorMigrationProgressPct"), QStringLiteral("100"))) {
         rollbackIfNeeded();
         updateFailedState(QStringLiteral("Failed to persist vector index settings"));
+        closeResources();
+        return;
+    }
+
+    VectorStore::GenerationState activeState;
+    activeState.generationId = targetGeneration.toStdString();
+    activeState.modelId = rebuiltMeta.modelId;
+    activeState.dimensions = embeddingDimensions;
+    activeState.provider = rebuiltMeta.provider;
+    activeState.state = "active";
+    activeState.progressPct = 100.0;
+    activeState.active = true;
+    if (!workerVectorStore.upsertGenerationState(activeState)) {
+        rollbackIfNeeded();
+        updateFailedState(QStringLiteral("Failed to commit generation state"));
         closeResources();
         return;
     }
@@ -681,6 +768,17 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             return;
         }
         inTransaction = false;
+        m_activeVectorGeneration = targetGeneration;
+        m_activeVectorModelId = QString::fromStdString(rebuiltMeta.modelId);
+        m_activeVectorProvider = QString::fromStdString(rebuiltMeta.provider);
+        m_activeVectorDimensions = embeddingDimensions;
+        {
+            std::lock_guard<std::mutex> stateLock(m_vectorRebuildMutex);
+            m_vectorMigrationState = QStringLiteral("cutover-complete");
+            m_vectorMigrationProgressPct = 100.0;
+        }
+        m_vectorIndexPath = indexPath;
+        m_vectorMetaPath = metaPath;
         m_vectorIndex = std::move(rebuiltIndex);
     }
 

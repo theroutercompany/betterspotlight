@@ -15,8 +15,7 @@ namespace bs {
 
 namespace {
 
-constexpr int kMetaVersion = 1;
-constexpr const char* kModelVersion = "bge-small-en-v1.5";
+constexpr int kMetaVersion = 2;
 
 } // namespace
 
@@ -24,15 +23,39 @@ VectorIndex::VectorIndex()
 {
 }
 
+VectorIndex::VectorIndex(const IndexMetadata& metadata)
+    : m_metadata(metadata)
+{
+}
+
 VectorIndex::~VectorIndex()
 {
 }
 
+bool VectorIndex::configure(const IndexMetadata& metadata)
+{
+    if (m_index) {
+        qWarning() << "VectorIndex::configure ignored: index already initialized";
+        return false;
+    }
+    if (metadata.dimensions <= 0) {
+        qWarning() << "VectorIndex::configure rejected invalid dimensions:" << metadata.dimensions;
+        return false;
+    }
+    m_metadata = metadata;
+    return true;
+}
+
 bool VectorIndex::create(int initialCapacity)
 {
+    if (m_metadata.dimensions <= 0) {
+        qCritical() << "VectorIndex::create requires a positive runtime dimension";
+        return false;
+    }
+
     try {
         const int capacity = std::max(initialCapacity, 1);
-        m_space = std::make_unique<hnswlib::InnerProductSpace>(kDimensions);
+        m_space = std::make_unique<hnswlib::InnerProductSpace>(m_metadata.dimensions);
         m_index = std::make_unique<hnswlib::HierarchicalNSW<float>>(
             m_space.get(),
             static_cast<size_t>(capacity),
@@ -68,10 +91,27 @@ bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath
 
     const QJsonObject meta = metaDoc.object();
     const int dimensions = meta.value(QStringLiteral("dimensions")).toInt(-1);
-    if (dimensions != kDimensions) {
-        qCritical() << "VectorIndex::load dimension mismatch:" << dimensions << "expected" << kDimensions;
+    if (dimensions <= 0) {
+        qCritical() << "VectorIndex::load missing/invalid dimensions in metadata";
         return false;
     }
+    if (m_metadata.dimensions > 0 && dimensions != m_metadata.dimensions) {
+        qCritical() << "VectorIndex::load dimension mismatch:" << dimensions
+                    << "expected" << m_metadata.dimensions;
+        return false;
+    }
+
+    m_metadata.dimensions = dimensions;
+    m_metadata.schemaVersion = meta.value(QStringLiteral("version")).toInt(kMetaVersion);
+    m_metadata.modelId = meta.value(QStringLiteral("model_id"))
+                             .toString(meta.value(QStringLiteral("model")).toString(QStringLiteral("unknown")))
+                             .toStdString();
+    m_metadata.generationId = meta.value(QStringLiteral("generation_id"))
+                                  .toString(QStringLiteral("v1"))
+                                  .toStdString();
+    m_metadata.provider = meta.value(QStringLiteral("provider"))
+                              .toString(QStringLiteral("cpu"))
+                              .toStdString();
 
     const int efConstruction = meta.value(QStringLiteral("ef_construction")).toInt(kEfConstruction);
     const int m = meta.value(QStringLiteral("m")).toInt(kM);
@@ -96,7 +136,7 @@ bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath
     }
 
     try {
-        m_space = std::make_unique<hnswlib::InnerProductSpace>(kDimensions);
+        m_space = std::make_unique<hnswlib::InnerProductSpace>(m_metadata.dimensions);
         m_index = std::make_unique<hnswlib::HierarchicalNSW<float>>(m_space.get());
         m_index->loadIndex(indexPath, m_space.get(), static_cast<size_t>(targetCapacity));
         m_index->setEf(static_cast<size_t>(kEfSearch));
@@ -127,8 +167,10 @@ bool VectorIndex::save(const std::string& indexPath, const std::string& metaPath
 
     QJsonObject meta;
     meta.insert(QStringLiteral("version"), kMetaVersion);
-    meta.insert(QStringLiteral("model"), QString::fromUtf8(kModelVersion));
-    meta.insert(QStringLiteral("dimensions"), kDimensions);
+    meta.insert(QStringLiteral("model_id"), QString::fromStdString(m_metadata.modelId));
+    meta.insert(QStringLiteral("generation_id"), QString::fromStdString(m_metadata.generationId));
+    meta.insert(QStringLiteral("provider"), QString::fromStdString(m_metadata.provider));
+    meta.insert(QStringLiteral("dimensions"), m_metadata.dimensions);
     meta.insert(QStringLiteral("total_elements"), totalElements());
     meta.insert(QStringLiteral("deleted_elements"), deletedElements());
     meta.insert(QStringLiteral("next_label"), static_cast<qint64>(m_nextLabel));
@@ -252,6 +294,16 @@ bool VectorIndex::isAvailable() const
 uint64_t VectorIndex::nextLabel() const
 {
     return m_nextLabel;
+}
+
+int VectorIndex::dimensions() const
+{
+    return m_metadata.dimensions;
+}
+
+const VectorIndex::IndexMetadata& VectorIndex::metadata() const
+{
+    return m_metadata;
 }
 
 bool VectorIndex::ensureCapacityForOneMore()

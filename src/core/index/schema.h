@@ -117,13 +117,35 @@ CREATE INDEX IF NOT EXISTS idx_frequencies_open_count ON frequencies(open_count 
 CREATE INDEX IF NOT EXISTS idx_frequencies_last_opened_at ON frequencies(last_opened_at DESC);
 
 CREATE TABLE IF NOT EXISTS vector_map (
-    item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-    hnsw_label INTEGER NOT NULL UNIQUE,
-    model_version TEXT NOT NULL,
-    embedded_at REAL NOT NULL
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    hnsw_label INTEGER NOT NULL,
+    generation_id TEXT NOT NULL DEFAULT 'v1',
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL DEFAULT 0,
+    provider TEXT NOT NULL DEFAULT 'cpu',
+    passage_ordinal INTEGER NOT NULL DEFAULT 0,
+    embedded_at REAL NOT NULL,
+    migration_state TEXT NOT NULL DEFAULT 'active',
+    PRIMARY KEY (item_id, generation_id, passage_ordinal),
+    UNIQUE (generation_id, hnsw_label)
 );
 
-CREATE INDEX IF NOT EXISTS idx_vector_map_label ON vector_map(hnsw_label);
+CREATE INDEX IF NOT EXISTS idx_vector_map_label ON vector_map(generation_id, hnsw_label);
+CREATE INDEX IF NOT EXISTS idx_vector_map_item_generation ON vector_map(item_id, generation_id);
+CREATE INDEX IF NOT EXISTS idx_vector_map_generation_state ON vector_map(generation_id, migration_state);
+
+CREATE TABLE IF NOT EXISTS vector_generation_state (
+    generation_id TEXT PRIMARY KEY,
+    model_id TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'cpu',
+    state TEXT NOT NULL DEFAULT 'building',
+    progress_pct REAL NOT NULL DEFAULT 0.0,
+    is_active INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vector_generation_active ON vector_generation_state(is_active);
 
 CREATE TABLE IF NOT EXISTS interactions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +179,7 @@ constexpr const char* kFts5WeightConfig =
 
 // Default settings rows (doc 04 Section 10.1)
 constexpr const char* kDefaultSettings = R"(
-INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '3');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_full_index_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_vacuum_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('max_file_size', '104857600');
@@ -196,11 +218,15 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('feedbackRetentionDays', '90
 INSERT OR IGNORE INTO settings (key, value) VALUES ('interactionRetentionDays', '180');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('nextHnswLabel', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('hnswDeletedCount', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('activeVectorGeneration', 'v1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('targetVectorGeneration', 'v2');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationState', 'idle');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationProgressPct', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingEnabled', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onboardingCompleted', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('lastFeedbackAggregation', '0');
 )";
 
-constexpr int kCurrentSchemaVersion = 2;
+constexpr int kCurrentSchemaVersion = 3;
 
 } // namespace bs

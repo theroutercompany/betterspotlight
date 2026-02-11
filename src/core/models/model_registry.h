@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -48,6 +49,9 @@ public:
     const QString& modelsDir() const;
 
 private:
+    ModelSession* getSessionUnlocked(const std::string& role,
+                                     std::unordered_set<std::string>& visited);
+
     QString m_modelsDir;
     ModelManifest m_manifest;
     std::unordered_map<std::string, std::unique_ptr<ModelSession>> m_sessions;

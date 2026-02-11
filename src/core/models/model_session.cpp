@@ -3,6 +3,7 @@
 #include "core/shared/logging.h"
 
 #include <QFile>
+#include <QProcessEnvironment>
 
 #if defined(ONNXRUNTIME_FOUND) && __has_include(<onnxruntime_cxx_api.h>)
 #define BS_WITH_ONNX 1
@@ -15,6 +16,21 @@
 namespace bs {
 
 namespace {
+
+#ifdef BETTERSPOTLIGHT_PREFER_COREML_DEFAULT
+constexpr bool kPreferCoreMlByDefault = BETTERSPOTLIGHT_PREFER_COREML_DEFAULT != 0;
+#else
+constexpr bool kPreferCoreMlByDefault = true;
+#endif
+
+bool envFlagEnabled(const QString& value)
+{
+    const QString normalized = value.trimmed().toLower();
+    return normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes")
+        || normalized == QStringLiteral("on");
+}
 
 #if BS_WITH_ONNX
 constexpr uint32_t kCoreMlFlagUseCpuAndGpu = 0U;
@@ -64,25 +80,57 @@ bool ModelSession::initialize(const QString& modelPath)
     }
 
     try {
+        m_selectedProvider = "cpu";
+        m_coreMlRequested = false;
+        m_coreMlAttached = false;
+
         m_impl->sessionOptions.SetIntraOpNumThreads(2);
         m_impl->sessionOptions.SetInterOpNumThreads(1);
         m_impl->sessionOptions.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
         m_impl->sessionOptions.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        const uint32_t coremlFlags = kCoreMlFlagUseCpuAndGpu | kCoreMlFlagCreateMlProgram;
-        auto appendCoreMlProvider = reinterpret_cast<AppendCoreMlProviderFn>(
-            dlsym(RTLD_DEFAULT, "OrtSessionOptionsAppendExecutionProvider_CoreML"));
-        if (appendCoreMlProvider != nullptr) {
-            OrtSessionOptions* rawOptions = m_impl->sessionOptions;
-            OrtStatus* coremlStatus = appendCoreMlProvider(rawOptions, coremlFlags);
-            if (coremlStatus != nullptr) {
-                const OrtApi& api = Ort::GetApi();
-                LOG_WARN(bsCore, "ModelSession: CoreML EP unavailable, falling back to CPU: %s",
-                         api.GetErrorMessage(coremlStatus));
-                api.ReleaseStatus(coremlStatus);
+        const bool rolePrefersCoreMl = m_manifest.providerPolicy.preferredProvider
+            .trimmed()
+            .compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0;
+        const bool preferCoreMl = (rolePrefersCoreMl && m_manifest.providerPolicy.preferCoreMl)
+            || kPreferCoreMlByDefault;
+
+        const QString disableCoreMlEnvName = m_manifest.providerPolicy.disableCoreMlEnvVar.isEmpty()
+            ? QStringLiteral("BETTERSPOTLIGHT_DISABLE_COREML")
+            : m_manifest.providerPolicy.disableCoreMlEnvVar;
+        const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        const bool coreMlDisabledByEnv = env.contains(disableCoreMlEnvName)
+            && envFlagEnabled(env.value(disableCoreMlEnvName));
+
+        if (preferCoreMl && !coreMlDisabledByEnv) {
+            m_coreMlRequested = true;
+            const uint32_t coremlFlags = kCoreMlFlagUseCpuAndGpu | kCoreMlFlagCreateMlProgram;
+            auto appendCoreMlProvider = reinterpret_cast<AppendCoreMlProviderFn>(
+                dlsym(RTLD_DEFAULT, "OrtSessionOptionsAppendExecutionProvider_CoreML"));
+            if (appendCoreMlProvider != nullptr) {
+                OrtSessionOptions* rawOptions = m_impl->sessionOptions;
+                OrtStatus* coremlStatus = appendCoreMlProvider(rawOptions, coremlFlags);
+                if (coremlStatus != nullptr) {
+                    const OrtApi& api = Ort::GetApi();
+                    LOG_WARN(bsCore,
+                             "ModelSession: CoreML EP unavailable for '%s', falling back to CPU: %s",
+                             qPrintable(m_manifest.name),
+                             api.GetErrorMessage(coremlStatus));
+                    api.ReleaseStatus(coremlStatus);
+                } else {
+                    m_coreMlAttached = true;
+                    m_selectedProvider = "coreml";
+                }
+            } else {
+                LOG_INFO(bsCore,
+                         "ModelSession: CoreML EP symbol not found for '%s', using CPU provider",
+                         qPrintable(m_manifest.name));
             }
         } else {
-            LOG_INFO(bsCore, "ModelSession: CoreML EP symbol not found, using CPU provider");
+            if (coreMlDisabledByEnv) {
+                LOG_INFO(bsCore, "ModelSession: CoreML disabled by %s for '%s'",
+                         qPrintable(disableCoreMlEnvName), qPrintable(m_manifest.name));
+            }
         }
 
         m_impl->session = std::make_unique<Ort::Session>(
@@ -137,8 +185,9 @@ bool ModelSession::initialize(const QString& modelPath)
             return false;
         }
 
-        LOG_INFO(bsCore, "ModelSession: initialized '%s' with %zu inputs, %zu outputs",
+        LOG_INFO(bsCore, "ModelSession: initialized '%s' with provider=%s, %zu inputs, %zu outputs",
                  qPrintable(m_manifest.name),
+                 m_selectedProvider.c_str(),
                  modelInputs.size(), m_outputNames.size());
 
         m_available = true;
@@ -170,6 +219,21 @@ const ModelManifestEntry& ModelSession::manifest() const
 const std::vector<std::string>& ModelSession::outputNames() const
 {
     return m_outputNames;
+}
+
+const std::string& ModelSession::selectedProvider() const
+{
+    return m_selectedProvider;
+}
+
+bool ModelSession::coreMlRequested() const
+{
+    return m_coreMlRequested;
+}
+
+bool ModelSession::coreMlAttached() const
+{
+    return m_coreMlAttached;
 }
 
 void* ModelSession::rawSession() const

@@ -118,6 +118,8 @@ private:
     // Concurrency policy helpers.
     void updatePrepConcurrencyPolicy();
     static size_t computeIdlePrepWorkers();
+    size_t applyMemoryAwarePrepWorkerLimit(size_t requestedWorkers) const;
+    int processRssMb() const;
 
     SQLiteStore& m_store;
     ExtractionManager& m_extractor;
@@ -169,6 +171,9 @@ private:
     std::atomic<bool> m_userActive{false};
     std::atomic<size_t> m_allowedPrepWorkers{1};
     size_t m_idlePrepWorkers = 2;
+    size_t m_memoryPressurePrepWorkers = 1;
+    int m_memorySoftLimitMb = 900;
+    int m_memoryHardLimitMb = 1200;
 
     std::vector<std::string> m_scanRoots;
 

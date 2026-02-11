@@ -21,6 +21,16 @@ target_link_libraries(betterspotlight-core-models PUBLIC
     Qt6::Core
 )
 
+if(BETTERSPOTLIGHT_PREFER_COREML)
+    target_compile_definitions(betterspotlight-core-models PRIVATE
+        BETTERSPOTLIGHT_PREFER_COREML_DEFAULT=1
+    )
+else()
+    target_compile_definitions(betterspotlight-core-models PRIVATE
+        BETTERSPOTLIGHT_PREFER_COREML_DEFAULT=0
+    )
+endif()
+
 if(BETTERSPOTLIGHT_WITH_ONNX)
     target_link_libraries(betterspotlight-core-models PUBLIC
         betterspotlight-core-embedding

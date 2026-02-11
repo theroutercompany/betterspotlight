@@ -19,28 +19,38 @@ private slots:
     void testTotalElements();
     void testNeedsRebuild();
     void testSaveAndLoad();
+    void testLoadRejectsDimensionMismatch();
 
 private:
+    static constexpr int kTestDimensions = 384;
     static std::vector<float> makeVector(int seed);
 };
 
 std::vector<float> TestVectorIndex::makeVector(int seed)
 {
-    std::vector<float> vector(static_cast<size_t>(bs::VectorIndex::kDimensions), 0.0F);
-    vector[static_cast<size_t>(seed % bs::VectorIndex::kDimensions)] = 1.0F;
+    std::vector<float> vector(static_cast<size_t>(kTestDimensions), 0.0F);
+    vector[static_cast<size_t>(seed % kTestDimensions)] = 1.0F;
     return vector;
 }
 
 void TestVectorIndex::testCreateIndex()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
     QVERIFY(index.isAvailable());
 }
 
 void TestVectorIndex::testAddAndSearch()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     for (int i = 0; i < 5; ++i) {
@@ -57,7 +67,11 @@ void TestVectorIndex::testAddAndSearch()
 
 void TestVectorIndex::testAddMultipleVectors()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     for (int i = 0; i < 100; ++i) {
@@ -69,7 +83,11 @@ void TestVectorIndex::testAddMultipleVectors()
 
 void TestVectorIndex::testSearchKParameter()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     for (int i = 0; i < 20; ++i) {
@@ -84,7 +102,11 @@ void TestVectorIndex::testSearchKParameter()
 
 void TestVectorIndex::testDeleteVector()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     std::vector<uint64_t> labels;
@@ -99,7 +121,11 @@ void TestVectorIndex::testDeleteVector()
 
 void TestVectorIndex::testSearchEmptyIndex()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     const std::vector<float> query = makeVector(0);
@@ -109,7 +135,11 @@ void TestVectorIndex::testSearchEmptyIndex()
 
 void TestVectorIndex::testTotalElements()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     for (int i = 0; i < 10; ++i) {
@@ -122,7 +152,11 @@ void TestVectorIndex::testTotalElements()
 
 void TestVectorIndex::testNeedsRebuild()
 {
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     std::vector<uint64_t> labels;
@@ -144,7 +178,11 @@ void TestVectorIndex::testSaveAndLoad()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
 
-    bs::VectorIndex index;
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
     QVERIFY(index.create());
 
     for (int i = 0; i < 8; ++i) {
@@ -156,9 +194,37 @@ void TestVectorIndex::testSaveAndLoad()
     const QString metaPath = tempDir.path() + QStringLiteral("/index.meta.json");
     QVERIFY(index.save(indexPath.toStdString(), metaPath.toStdString()));
 
-    bs::VectorIndex loaded;
+    bs::VectorIndex loaded(meta);
     QVERIFY(loaded.load(indexPath.toStdString(), metaPath.toStdString()));
     QCOMPARE(loaded.totalElements(), index.totalElements());
+}
+
+void TestVectorIndex::testLoadRejectsDimensionMismatch()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    bs::VectorIndex::IndexMetadata sourceMeta;
+    sourceMeta.dimensions = kTestDimensions;
+    sourceMeta.modelId = "source-model";
+    sourceMeta.generationId = "v1";
+
+    bs::VectorIndex source(sourceMeta);
+    QVERIFY(source.create());
+    for (int i = 0; i < 4; ++i) {
+        source.addVector(makeVector(i).data());
+    }
+
+    const QString indexPath = tempDir.path() + QStringLiteral("/mismatch.bin");
+    const QString metaPath = tempDir.path() + QStringLiteral("/mismatch.meta.json");
+    QVERIFY(source.save(indexPath.toStdString(), metaPath.toStdString()));
+
+    bs::VectorIndex::IndexMetadata targetMeta;
+    targetMeta.dimensions = 1024;
+    targetMeta.modelId = "target-model";
+    targetMeta.generationId = "v2";
+    bs::VectorIndex target(targetMeta);
+    QVERIFY(!target.load(indexPath.toStdString(), metaPath.toStdString()));
 }
 
 QTEST_MAIN(TestVectorIndex)

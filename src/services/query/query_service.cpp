@@ -437,6 +437,81 @@ void QueryService::updateVectorRebuildProgress(uint64_t runId, int totalCandidat
     m_vectorRebuildState.failed = failed;
 }
 
+QString QueryService::vectorIndexPathForGeneration(const QString& generation) const
+{
+    if (m_dataDir.isEmpty()) {
+        return QString();
+    }
+    const QString normalized = generation.trimmed().isEmpty()
+        ? QStringLiteral("v1")
+        : generation.trimmed();
+    if (normalized == QLatin1String("v1")) {
+        const QString legacyPath = m_dataDir + QStringLiteral("/vectors.hnsw");
+        const QString versionedPath = m_dataDir + QStringLiteral("/vectors-v1.hnsw");
+        if (QFile::exists(versionedPath) || !QFile::exists(legacyPath)) {
+            return versionedPath;
+        }
+        return legacyPath;
+    }
+    return m_dataDir + QStringLiteral("/vectors-") + normalized + QStringLiteral(".hnsw");
+}
+
+QString QueryService::vectorMetaPathForGeneration(const QString& generation) const
+{
+    if (m_dataDir.isEmpty()) {
+        return QString();
+    }
+    const QString normalized = generation.trimmed().isEmpty()
+        ? QStringLiteral("v1")
+        : generation.trimmed();
+    if (normalized == QLatin1String("v1")) {
+        const QString legacyPath = m_dataDir + QStringLiteral("/vectors.meta");
+        const QString versionedPath = m_dataDir + QStringLiteral("/vectors-v1.meta");
+        if (QFile::exists(versionedPath) || !QFile::exists(legacyPath)) {
+            return versionedPath;
+        }
+        return legacyPath;
+    }
+    return m_dataDir + QStringLiteral("/vectors-") + normalized + QStringLiteral(".meta");
+}
+
+void QueryService::refreshVectorGenerationState()
+{
+    if (!m_vectorStore) {
+        return;
+    }
+
+    if (auto activeState = m_vectorStore->activeGenerationState(); activeState.has_value()) {
+        m_activeVectorGeneration = QString::fromStdString(activeState->generationId);
+        m_activeVectorModelId = QString::fromStdString(activeState->modelId);
+        m_activeVectorProvider = QString::fromStdString(activeState->provider);
+        m_activeVectorDimensions = std::max(activeState->dimensions, 1);
+        m_vectorMigrationState = QString::fromStdString(activeState->state);
+        m_vectorMigrationProgressPct = activeState->progressPct;
+    }
+    if (auto setting = m_store->getSetting(QStringLiteral("activeVectorGeneration"));
+        setting.has_value() && !setting->trimmed().isEmpty()) {
+        m_activeVectorGeneration = setting->trimmed();
+    }
+
+    if (auto setting = m_store->getSetting(QStringLiteral("targetVectorGeneration"));
+        setting.has_value() && !setting->trimmed().isEmpty()) {
+        m_targetVectorGeneration = setting->trimmed();
+    }
+    if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationState"));
+        setting.has_value() && !setting->trimmed().isEmpty()) {
+        m_vectorMigrationState = setting->trimmed();
+    }
+    if (auto setting = m_store->getSetting(QStringLiteral("vectorMigrationProgressPct"));
+        setting.has_value()) {
+        bool ok = false;
+        const double parsed = setting->toDouble(&ok);
+        if (ok) {
+            m_vectorMigrationProgressPct = parsed;
+        }
+    }
+}
+
 QJsonObject QueryService::handleRequest(const QJsonObject& request)
 {
     QString method = request.value(QStringLiteral("method")).toString();
@@ -477,8 +552,8 @@ bool QueryService::ensureStoreOpen()
                     + QStringLiteral("/betterspotlight");
     }
     m_dbPath = m_dataDir + QStringLiteral("/index.db");
-    m_vectorIndexPath = m_dataDir + QStringLiteral("/vectors.hnsw");
-    m_vectorMetaPath = m_dataDir + QStringLiteral("/vectors.meta");
+    m_vectorIndexPath = vectorIndexPathForGeneration(m_activeVectorGeneration);
+    m_vectorMetaPath = vectorMetaPathForGeneration(m_activeVectorGeneration);
 
     auto store = SQLiteStore::open(m_dbPath);
     if (!store.has_value()) {
@@ -540,18 +615,78 @@ void QueryService::initM2Modules()
     m_typeAffinity = std::make_unique<TypeAffinity>(db);
 
     m_vectorStore = std::make_unique<VectorStore>(db);
+    refreshVectorGenerationState();
 
-    auto loadedVectorIndex = std::make_unique<VectorIndex>();
+    const QString modelsDir = ModelRegistry::resolveModelsDir();
+    m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
+
+    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get());
+    bool embeddingAvailable = false;
+    if (!m_embeddingManager->initialize()) {
+        LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
+    } else {
+        embeddingAvailable = true;
+        m_targetVectorGeneration = m_embeddingManager->activeGenerationId().isEmpty()
+            ? QStringLiteral("v2")
+            : m_embeddingManager->activeGenerationId();
+        m_activeVectorModelId = m_embeddingManager->activeModelId();
+        m_activeVectorProvider = m_embeddingManager->providerName();
+        m_activeVectorDimensions = std::max(m_embeddingManager->embeddingDimensions(), 1);
+        LOG_INFO(bsIpc, "EmbeddingManager initialized");
+    }
+
+    if (embeddingAvailable) {
+        VectorStore::GenerationState targetState;
+        targetState.generationId = m_targetVectorGeneration.toStdString();
+        targetState.modelId = m_embeddingManager->activeModelId().toStdString();
+        targetState.dimensions = std::max(m_embeddingManager->embeddingDimensions(), 1);
+        targetState.provider = m_embeddingManager->providerName().toStdString();
+        targetState.state = (m_activeVectorGeneration == m_targetVectorGeneration)
+            ? "active"
+            : "building";
+        targetState.progressPct = (m_activeVectorGeneration == m_targetVectorGeneration) ? 100.0 : 0.0;
+        targetState.active = (m_activeVectorGeneration == m_targetVectorGeneration);
+        m_vectorStore->upsertGenerationState(targetState);
+        m_store->setSetting(QStringLiteral("targetVectorGeneration"), m_targetVectorGeneration);
+
+        const bool hasActiveMappings =
+            m_vectorStore->countMappingsForGeneration(m_activeVectorGeneration.toStdString()) > 0;
+        const bool hasActiveIndexFiles =
+            QFile::exists(vectorIndexPathForGeneration(m_activeVectorGeneration))
+            && QFile::exists(vectorMetaPathForGeneration(m_activeVectorGeneration));
+        if (!hasActiveMappings && !hasActiveIndexFiles
+            && m_activeVectorGeneration != m_targetVectorGeneration) {
+            m_vectorStore->setActiveGeneration(m_targetVectorGeneration.toStdString());
+            m_store->setSetting(QStringLiteral("activeVectorGeneration"), m_targetVectorGeneration);
+        }
+    }
+
+    refreshVectorGenerationState();
+    m_vectorIndexPath = vectorIndexPathForGeneration(m_activeVectorGeneration);
+    m_vectorMetaPath = vectorMetaPathForGeneration(m_activeVectorGeneration);
+
+    VectorIndex::IndexMetadata indexMeta;
+    indexMeta.dimensions = std::max(m_activeVectorDimensions, 1);
+    indexMeta.modelId = m_activeVectorModelId.toStdString();
+    indexMeta.generationId = m_activeVectorGeneration.toStdString();
+    indexMeta.provider = m_activeVectorProvider.toStdString();
+
+    auto loadedVectorIndex = std::make_unique<VectorIndex>(indexMeta);
     if (QFile::exists(m_vectorIndexPath) && QFile::exists(m_vectorMetaPath)) {
         if (!loadedVectorIndex->load(m_vectorIndexPath.toStdString(), m_vectorMetaPath.toStdString())) {
-            LOG_WARN(bsIpc, "Failed to load vector index, semantic search disabled");
+            LOG_WARN(bsIpc, "Failed to load vector index generation '%s' from %s",
+                     qUtf8Printable(m_activeVectorGeneration),
+                     qUtf8Printable(m_vectorIndexPath));
             loadedVectorIndex.reset();
         } else {
-            LOG_INFO(bsIpc, "Vector index loaded: %d vectors", loadedVectorIndex->totalElements());
+            LOG_INFO(bsIpc, "Vector index loaded: generation=%s vectors=%d",
+                     qUtf8Printable(m_activeVectorGeneration),
+                     loadedVectorIndex->totalElements());
         }
     } else {
         if (!loadedVectorIndex->create()) {
-            LOG_WARN(bsIpc, "Failed to create vector index, semantic search disabled");
+            LOG_WARN(bsIpc, "Failed to create vector index generation '%s' with dimensions=%d",
+                     qUtf8Printable(m_activeVectorGeneration), indexMeta.dimensions);
             loadedVectorIndex.reset();
         }
     }
@@ -561,21 +696,57 @@ void QueryService::initM2Modules()
         m_vectorIndex = std::move(loadedVectorIndex);
     }
 
-    const QString modelsDir = ModelRegistry::resolveModelsDir();
-    m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
-
-    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get());
-    if (!m_embeddingManager->initialize()) {
-        LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
-    } else {
-        LOG_INFO(bsIpc, "EmbeddingManager initialized");
-    }
-
     m_crossEncoderReranker = std::make_unique<CrossEncoderReranker>(m_modelRegistry.get());
     if (m_crossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Cross-encoder reranker initialized");
     } else {
         LOG_WARN(bsIpc, "Cross-encoder reranker not available — skipping reranking");
+    }
+
+    maybeStartBackgroundVectorMigration();
+}
+
+void QueryService::maybeStartBackgroundVectorMigration()
+{
+    if (!m_embeddingManager || !m_embeddingManager->isAvailable() || !m_store.has_value()) {
+        return;
+    }
+
+    if (m_targetVectorGeneration.isEmpty()
+        || m_activeVectorGeneration == m_targetVectorGeneration) {
+        return;
+    }
+
+    const QString autoMigrationSetting = m_store->getSetting(
+        QStringLiteral("autoVectorMigration")).value_or(QStringLiteral("true"));
+    if (autoMigrationSetting.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0
+        || autoMigrationSetting.compare(QStringLiteral("0"), Qt::CaseInsensitive) == 0
+        || autoMigrationSetting.compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0) {
+        LOG_INFO(bsIpc, "Automatic vector migration disabled via autoVectorMigration setting");
+        return;
+    }
+
+    QJsonObject params;
+    params[QStringLiteral("targetGeneration")] = m_targetVectorGeneration;
+    const QJsonObject response = handleRebuildVectorIndex(/*id=*/0, params);
+    const QString type = response.value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("error")) {
+        const QString errorMsg = response.value(QStringLiteral("error"))
+                                     .toObject()
+                                     .value(QStringLiteral("message"))
+                                     .toString();
+        LOG_WARN(bsIpc, "Automatic vector migration start failed: %s", qPrintable(errorMsg));
+        return;
+    }
+
+    const QJsonObject result = response.value(QStringLiteral("result")).toObject();
+    if (result.value(QStringLiteral("started")).toBool(false)) {
+        const qint64 runId = result.value(QStringLiteral("runId")).toInteger();
+        LOG_INFO(bsIpc, "Automatic vector migration started (runId=%lld target=%s)",
+                 static_cast<long long>(runId),
+                 qUtf8Printable(m_targetVectorGeneration));
+    } else if (result.value(QStringLiteral("alreadyRunning")).toBool(false)) {
+        LOG_INFO(bsIpc, "Automatic vector migration already running");
     }
 }
 
@@ -1492,6 +1663,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             if (m_vectorIndex && m_vectorIndex->isAvailable() && m_vectorStore) {
                 auto knnHits = m_vectorIndex->search(queryVec.data());
                 semanticResults.reserve(knnHits.size());
+                const std::string activeGeneration =
+                    m_activeVectorGeneration.isEmpty()
+                        ? m_vectorStore->activeGenerationId()
+                        : m_activeVectorGeneration.toStdString();
 
                 for (const auto& hit : knnHits) {
                     float cosineSim = 1.0f - hit.distance;
@@ -1503,7 +1678,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                     if (normalizedSemantic <= semanticOnlyFloor) {
                         continue;
                     }
-                    auto itemIdOpt = m_vectorStore->getItemId(hit.label);
+                    auto itemIdOpt = m_vectorStore->getItemId(hit.label, activeGeneration);
                     if (!itemIdOpt.has_value()) {
                         continue;
                     }
@@ -1536,6 +1711,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         mergeConfig.lexicalWeight = mergeLexicalWeight;
         mergeConfig.semanticWeight = mergeSemanticWeight;
         mergeConfig.maxResults = std::max(limit * 2, limit);
+        mergeConfig.semanticPassageCap = naturalLanguageQuery ? 3 : 2;
+        mergeConfig.semanticSoftmaxTemperature = naturalLanguageQuery ? 8.0f : 6.0f;
         results = SearchMerger::merge(results, semanticResults, mergeConfig);
 
         int semanticOnlyAdded = 0;
@@ -1630,11 +1807,30 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
     }
 
+    int rerankDepthApplied = 0;
+    const bool coremlProviderUsed = m_embeddingManager
+        && m_embeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0;
+
     // Cross-encoder reranking (soft boost, before M2 boosts)
     if (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
         RerankerConfig rerankerConfig;
         rerankerConfig.weight = m_scorer.weights().crossEncoderWeight;
-        rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), 40);
+        const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
+        const int latencyBudgetMs = 250;
+        int rerankCap = 40;
+        if (elapsedBeforeRerankMs >= 180) {
+            rerankCap = 12;
+        } else if (elapsedBeforeRerankMs >= 130) {
+            rerankCap = 24;
+        } else if (elapsedBeforeRerankMs >= 80) {
+            rerankCap = 32;
+        }
+        rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), rerankCap);
+        rerankDepthApplied = rerankerConfig.maxCandidates;
+        if (elapsedBeforeRerankMs >= latencyBudgetMs) {
+            rerankDepthApplied = std::min(rerankDepthApplied, 8);
+            rerankerConfig.maxCandidates = rerankDepthApplied;
+        }
         m_crossEncoderReranker->rerank(originalRawQuery, results, rerankerConfig);
     }
 
@@ -1941,6 +2137,17 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("lexicalRelaxedHits")] = relaxedHitsCount;
         debugInfo[QStringLiteral("semanticCandidates")] =
             static_cast<int>(semanticResults.size());
+        QJsonObject candidateCountsBySource;
+        candidateCountsBySource[QStringLiteral("lexical")] = totalMatches;
+        candidateCountsBySource[QStringLiteral("passageAnn")] = static_cast<int>(semanticResults.size());
+        candidateCountsBySource[QStringLiteral("rerankInput")] = rerankDepthApplied;
+        debugInfo[QStringLiteral("candidateCountsBySource")] = candidateCountsBySource;
+        debugInfo[QStringLiteral("activeVectorGeneration")] = m_activeVectorGeneration;
+        debugInfo[QStringLiteral("coremlProviderUsed")] = coremlProviderUsed;
+        debugInfo[QStringLiteral("rerankDepthApplied")] = rerankDepthApplied;
+        debugInfo[QStringLiteral("semanticAggregationMode")] =
+            (m_embeddingManager ? m_embeddingManager->semanticAggregationMode()
+                                : QStringLiteral("max_softmax_cap"));
         debugInfo[QStringLiteral("fusionMode")] = QStringLiteral("weighted_rrf");
         debugInfo[QStringLiteral("queryClass")] = queryClassToString(queryClass);
         debugInfo[QStringLiteral("semanticThresholdApplied")] = semanticThreshold;
@@ -2094,13 +2301,14 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                                      QStringLiteral("Database is not available"));
     }
 
+    refreshVectorGenerationState();
+
     IndexHealth health = m_store->getHealth();
-    const QString dataDir = m_dataDir.isEmpty()
-                                ? QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                                      + QStringLiteral("/betterspotlight")
-                                : m_dataDir;
-    const int totalEmbeddedVectors = m_vectorStore ? m_vectorStore->countMappings() : 0;
-    const qint64 vectorIndexSize = QFileInfo(dataDir + QStringLiteral("/vectors.hnsw")).size();
+    const int totalEmbeddedVectors = m_vectorStore
+        ? m_vectorStore->countMappingsForGeneration(m_activeVectorGeneration.toStdString())
+        : 0;
+    const qint64 vectorIndexSize =
+        QFileInfo(vectorIndexPathForGeneration(m_activeVectorGeneration)).size();
     const double contentCoveragePct = health.totalIndexedItems > 0
                                           ? 100.0 * static_cast<double>(
                                                         health.totalIndexedItems - health.itemsWithoutContent)
@@ -2157,10 +2365,27 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         sqlite3_finalize(stmt);
     }
 
+    QJsonObject memoryByService;
+    qint64 aggregateRssKb = 0;
+    for (const QString& serviceName : {QStringLiteral("query"),
+                                       QStringLiteral("indexer"),
+                                       QStringLiteral("extractor")}) {
+        const QJsonObject serviceStats = processStatsForService(serviceName);
+        memoryByService[serviceName] = serviceStats;
+        if (serviceStats.value(QStringLiteral("available")).toBool(false)) {
+            aggregateRssKb += serviceStats.value(QStringLiteral("rssKb")).toInteger();
+        }
+    }
+    const double aggregateRssMb = static_cast<double>(aggregateRssKb) / 1024.0;
+
     VectorRebuildState rebuildStateCopy;
+    QString migrationStateCopy;
+    double migrationProgressCopy = 0.0;
     {
         std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
         rebuildStateCopy = m_vectorRebuildState;
+        migrationStateCopy = m_vectorMigrationState;
+        migrationProgressCopy = m_vectorMigrationProgressPct;
     }
 
     const double progressPct = rebuildStateCopy.totalCandidates > 0
@@ -2252,6 +2477,14 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
     indexHealth[QStringLiteral("queryRewriteEnabled")] = true;
     indexHealth[QStringLiteral("m2ModulesInitialized")] = m_m2Initialized;
+    indexHealth[QStringLiteral("memoryAggregateRssMb")] = aggregateRssMb;
+    indexHealth[QStringLiteral("memoryByService")] = memoryByService;
+    indexHealth[QStringLiteral("vectorMigrationState")] = migrationStateCopy;
+    indexHealth[QStringLiteral("vectorMigrationProgressPct")] = migrationProgressCopy;
+    indexHealth[QStringLiteral("vectorGenerationActive")] = m_activeVectorGeneration;
+    indexHealth[QStringLiteral("activeVectorModelId")] = m_activeVectorModelId;
+    indexHealth[QStringLiteral("activeVectorProvider")] = m_activeVectorProvider;
+    indexHealth[QStringLiteral("activeVectorDimensions")] = m_activeVectorDimensions;
     indexHealth[QStringLiteral("recentErrors")] = recentErrors;
     indexHealth[QStringLiteral("indexRoots")] = queueRoots;
     indexHealth[QStringLiteral("vectorRebuildStatus")] =
@@ -2271,6 +2504,22 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         QJsonArray::fromStringList(rebuildStateCopy.scopeRoots);
     indexHealth[QStringLiteral("vectorRebuildScopeCandidates")] =
         rebuildStateCopy.scopeCandidates;
+    QJsonObject memorySummary;
+    memorySummary[QStringLiteral("aggregateRssMb")] = aggregateRssMb;
+    memorySummary[QStringLiteral("byService")] = memoryByService;
+    indexHealth[QStringLiteral("memory")] = memorySummary;
+    QJsonObject vectorMigration;
+    vectorMigration[QStringLiteral("state")] = migrationStateCopy;
+    vectorMigration[QStringLiteral("progressPct")] = migrationProgressCopy;
+    vectorMigration[QStringLiteral("activeGeneration")] = m_activeVectorGeneration;
+    vectorMigration[QStringLiteral("targetGeneration")] = m_targetVectorGeneration;
+    indexHealth[QStringLiteral("vectorMigration")] = vectorMigration;
+    QJsonObject vectorGeneration;
+    vectorGeneration[QStringLiteral("active")] = m_activeVectorGeneration;
+    vectorGeneration[QStringLiteral("modelId")] = m_activeVectorModelId;
+    vectorGeneration[QStringLiteral("provider")] = m_activeVectorProvider;
+    vectorGeneration[QStringLiteral("dimensions")] = m_activeVectorDimensions;
+    indexHealth[QStringLiteral("vectorGeneration")] = vectorGeneration;
     const QJsonObject bsignoreStatus = bsignoreStatusJson();
     indexHealth[QStringLiteral("bsignorePath")] = bsignoreStatus.value(QStringLiteral("path")).toString();
     indexHealth[QStringLiteral("bsignoreLoaded")] = bsignoreStatus.value(QStringLiteral("loaded")).toBool(false);

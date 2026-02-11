@@ -28,7 +28,14 @@ ModelRegistry::~ModelRegistry() = default;
 ModelSession* ModelRegistry::getSession(const std::string& role)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    std::unordered_set<std::string> visited;
+    visited.insert(role);
+    return getSessionUnlocked(role, visited);
+}
 
+ModelSession* ModelRegistry::getSessionUnlocked(const std::string& role,
+                                                std::unordered_set<std::string>& visited)
+{
     auto sessionIt = m_sessions.find(role);
     if (sessionIt != m_sessions.end()) {
         return sessionIt->second.get();
@@ -45,7 +52,18 @@ ModelSession* ModelRegistry::getSession(const std::string& role)
 
     auto session = std::make_unique<ModelSession>(entry);
     if (!session->initialize(modelPath)) {
-        LOG_WARN(bsCore, "ModelRegistry: failed to initialize session for role '%s'", role.c_str());
+        if (!entry.fallbackRole.isEmpty()) {
+            const std::string fallbackRole = entry.fallbackRole.toStdString();
+            if (!visited.count(fallbackRole)) {
+                visited.insert(fallbackRole);
+                LOG_WARN(bsCore,
+                         "ModelRegistry: failed to initialize role '%s', trying fallback role '%s'",
+                         role.c_str(), fallbackRole.c_str());
+                return getSessionUnlocked(fallbackRole, visited);
+            }
+        }
+        LOG_WARN(bsCore, "ModelRegistry: failed to initialize session for role '%s'",
+                 role.c_str());
         return nullptr;
     }
 

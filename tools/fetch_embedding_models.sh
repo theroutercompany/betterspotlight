@@ -3,16 +3,29 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODELS_DIR="${ROOT_DIR}/data/models"
-ONNX_OUT="${MODELS_DIR}/bge-small-en-v1.5-int8.onnx"
+LEGACY_ONNX_OUT="${MODELS_DIR}/bge-small-en-v1.5-int8.onnx"
+HQ_ONNX_OUT="${MODELS_DIR}/bge-large-en-v1.5-f32.onnx"
 VOCAB_OUT="${MODELS_DIR}/vocab.txt"
 
-ONNX_URL="https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx"
+LEGACY_ONNX_URL="https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx"
+HQ_ONNX_URL="https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx"
 VOCAB_URL="https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt"
 
 FORCE=0
-if [[ "${1:-}" == "--force" ]]; then
-    FORCE=1
-fi
+FETCH_MAX_QUALITY="${BETTERSPOTLIGHT_FETCH_MAX_QUALITY:-1}"
+for arg in "$@"; do
+    case "${arg}" in
+        --force)
+            FORCE=1
+            ;;
+        --max-quality)
+            FETCH_MAX_QUALITY=1
+            ;;
+        --no-max-quality)
+            FETCH_MAX_QUALITY=0
+            ;;
+    esac
+done
 
 download_file() {
     local url="$1"
@@ -47,9 +60,18 @@ download_file() {
 }
 
 mkdir -p "${MODELS_DIR}"
-download_file "${ONNX_URL}" "${ONNX_OUT}" 1000000
+download_file "${LEGACY_ONNX_URL}" "${LEGACY_ONNX_OUT}" 1000000
 download_file "${VOCAB_URL}" "${VOCAB_OUT}" 10000
+if [[ "${FETCH_MAX_QUALITY}" == "1" ]]; then
+    download_file "${HQ_ONNX_URL}" "${HQ_ONNX_OUT}" 100000000
+else
+    echo "Skipping 1024d model download (--max-quality to enable or --no-max-quality to force skip)"
+fi
 
 echo
 echo "Embedding assets ready:"
-ls -lh "${ONNX_OUT}" "${VOCAB_OUT}"
+if [[ -f "${HQ_ONNX_OUT}" ]]; then
+    ls -lh "${LEGACY_ONNX_OUT}" "${HQ_ONNX_OUT}" "${VOCAB_OUT}"
+else
+    ls -lh "${LEGACY_ONNX_OUT}" "${VOCAB_OUT}"
+fi

@@ -19,12 +19,34 @@ static std::optional<ModelManifestEntry> parseEntry(const QJsonObject& obj)
     entry.name = obj.value(QStringLiteral("name")).toString();
     entry.file = obj.value(QStringLiteral("file")).toString();
     entry.vocab = obj.value(QStringLiteral("vocab")).toString();
+    entry.modelId = obj.value(QStringLiteral("modelId")).toString(entry.name);
+    entry.generationId = obj.value(QStringLiteral("generationId")).toString(QStringLiteral("v1"));
+    entry.fallbackRole = obj.value(QStringLiteral("fallbackRole")).toString();
     entry.dimensions = obj.value(QStringLiteral("dimensions")).toInt(0);
     entry.maxSeqLength = obj.value(QStringLiteral("maxSeqLength")).toInt(512);
     entry.queryPrefix = obj.value(QStringLiteral("queryPrefix")).toString();
     entry.tokenizer = obj.value(QStringLiteral("tokenizer")).toString();
     entry.extractionStrategy = obj.value(QStringLiteral("extractionStrategy")).toString();
+    entry.poolingStrategy = obj.value(QStringLiteral("poolingStrategy"))
+                                .toString(entry.extractionStrategy);
+    entry.semanticAggregationMode = obj.value(QStringLiteral("semanticAggregationMode"))
+                                        .toString(QStringLiteral("max_softmax_cap"));
     entry.outputTransform = obj.value(QStringLiteral("outputTransform")).toString();
+
+    if (obj.contains(QStringLiteral("providerPolicy"))
+        && obj.value(QStringLiteral("providerPolicy")).isObject()) {
+        const QJsonObject providerPolicy = obj.value(QStringLiteral("providerPolicy")).toObject();
+        entry.providerPolicy.preferredProvider =
+            providerPolicy.value(QStringLiteral("preferredProvider"))
+                .toString(QStringLiteral("coreml"));
+        entry.providerPolicy.preferCoreMl =
+            providerPolicy.value(QStringLiteral("preferCoreMl")).toBool(true);
+        entry.providerPolicy.allowCpuFallback =
+            providerPolicy.value(QStringLiteral("allowCpuFallback")).toBool(true);
+        entry.providerPolicy.disableCoreMlEnvVar =
+            providerPolicy.value(QStringLiteral("disableCoreMlEnvVar"))
+                .toString(QStringLiteral("BETTERSPOTLIGHT_DISABLE_COREML"));
+    }
 
     const QJsonArray inputsArray = obj.value(QStringLiteral("inputs")).toArray();
     entry.inputs.reserve(static_cast<size_t>(inputsArray.size()));
