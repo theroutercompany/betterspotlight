@@ -665,6 +665,174 @@ bool QueryService::ensureTypoLexiconReady()
     return true;
 }
 
+bool QueryService::ensureInferenceClientConnected()
+{
+    if (m_inferenceClient && m_inferenceClient->isConnected()) {
+        recordInferenceConnected(true);
+        return true;
+    }
+
+    if (!m_inferenceClient) {
+        m_inferenceClient = std::make_unique<SocketClient>();
+    }
+
+    const QString inferenceSocketPath = ServiceBase::socketPath(QStringLiteral("inference"));
+    const bool connected = m_inferenceClient->connectToServer(inferenceSocketPath, 200);
+    recordInferenceConnected(connected);
+    if (!connected) {
+        LOG_WARN(bsIpc, "Inference client connect failed: %s",
+                 qUtf8Printable(inferenceSocketPath));
+    }
+    return connected;
+}
+
+std::optional<QJsonObject> QueryService::sendInferenceRequest(const QString& method,
+                                                              const QJsonObject& params,
+                                                              int timeoutMs,
+                                                              const QString& roleForMetrics,
+                                                              const QString& fallbackReasonKey,
+                                                              const QString& cancelToken)
+{
+    std::lock_guard<std::mutex> lock(m_inferenceRpcMutex);
+    if (!ensureInferenceClientConnected() || !m_inferenceClient) {
+        recordInferenceFallback(roleForMetrics);
+        return std::nullopt;
+    }
+
+    QJsonObject requestParams = params;
+    if (!requestParams.contains(QStringLiteral("requestId"))) {
+        requestParams[QStringLiteral("requestId")] = QStringLiteral("%1-%2")
+            .arg(method)
+            .arg(QDateTime::currentMSecsSinceEpoch());
+    }
+    if (!cancelToken.trimmed().isEmpty()) {
+        requestParams[QStringLiteral("cancelToken")] = cancelToken;
+    }
+
+    auto response = m_inferenceClient->sendRequest(method, requestParams, timeoutMs);
+    if (!response.has_value()) {
+        recordInferenceConnected(false);
+        recordInferenceTimeout(roleForMetrics);
+        recordInferenceFallback(roleForMetrics);
+        m_inferenceClient->disconnect();
+        return std::nullopt;
+    }
+
+    const QString responseType = response->value(QStringLiteral("type")).toString();
+    if (responseType == QLatin1String("error")) {
+        recordInferenceConnected(false);
+        recordInferenceFallback(roleForMetrics);
+        m_inferenceClient->disconnect();
+        return std::nullopt;
+    }
+
+    QJsonObject payload = response->value(QStringLiteral("result")).toObject();
+    if (payload.isEmpty()) {
+        recordInferenceFallback(roleForMetrics);
+        return std::nullopt;
+    }
+
+    const QString status = payload.value(QStringLiteral("status")).toString();
+    if (status == QLatin1String("timeout")) {
+        recordInferenceTimeout(roleForMetrics);
+        recordInferenceFallback(roleForMetrics);
+        if (payload.value(QStringLiteral("fallbackReason")).toString().isEmpty()) {
+            payload[QStringLiteral("fallbackReason")] = fallbackReasonKey;
+        }
+    } else if (status != QLatin1String("ok")) {
+        recordInferenceFallback(roleForMetrics);
+        if (payload.value(QStringLiteral("fallbackReason")).toString().isEmpty()) {
+            payload[QStringLiteral("fallbackReason")] = fallbackReasonKey;
+        }
+    }
+
+    recordInferenceConnected(true);
+    return payload;
+}
+
+void QueryService::recordInferenceTimeout(const QString& role)
+{
+    if (role.trimmed().isEmpty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
+    m_inferenceTimeoutCountByRole[role] = m_inferenceTimeoutCountByRole.value(role) + 1;
+}
+
+void QueryService::recordInferenceFallback(const QString& role)
+{
+    if (role.trimmed().isEmpty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
+    m_inferenceFallbackCountByRole[role] = m_inferenceFallbackCountByRole.value(role) + 1;
+}
+
+void QueryService::recordInferenceConnected(bool connected)
+{
+    std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
+    m_inferenceServiceConnected = connected;
+}
+
+QJsonObject QueryService::inferenceHealthSnapshot()
+{
+    QJsonObject snapshot;
+    snapshot[QStringLiteral("inferenceServiceConnected")] = false;
+    snapshot[QStringLiteral("inferenceRoleStatusByModel")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceQueueDepthByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceServiceTimeoutCountByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceServiceFailureCountByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceServiceRestartCountByRole")] = QJsonObject{};
+
+    QJsonObject timeoutCounts;
+    QJsonObject fallbackCounts;
+    {
+        std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
+        snapshot[QStringLiteral("inferenceServiceConnected")] = m_inferenceServiceConnected;
+        for (auto it = m_inferenceTimeoutCountByRole.constBegin();
+             it != m_inferenceTimeoutCountByRole.constEnd(); ++it) {
+            timeoutCounts[it.key()] = it.value();
+        }
+        for (auto it = m_inferenceFallbackCountByRole.constBegin();
+             it != m_inferenceFallbackCountByRole.constEnd(); ++it) {
+            fallbackCounts[it.key()] = it.value();
+        }
+    }
+    snapshot[QStringLiteral("inferenceTimeoutCountByRole")] = timeoutCounts;
+    snapshot[QStringLiteral("inferenceFallbackCountByRole")] = fallbackCounts;
+
+    std::lock_guard<std::mutex> lock(m_inferenceRpcMutex);
+    if (!ensureInferenceClientConnected() || !m_inferenceClient) {
+        return snapshot;
+    }
+
+    auto response = m_inferenceClient->sendRequest(QStringLiteral("get_inference_health"), {}, 250);
+    if (!response.has_value() || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        recordInferenceConnected(false);
+        return snapshot;
+    }
+
+    const QJsonObject payload = response->value(QStringLiteral("result")).toObject();
+    if (payload.isEmpty()) {
+        return snapshot;
+    }
+
+    snapshot[QStringLiteral("inferenceServiceConnected")] =
+        payload.value(QStringLiteral("connected")).toBool(true);
+    snapshot[QStringLiteral("inferenceRoleStatusByModel")] =
+        payload.value(QStringLiteral("roleStatusByModel")).toObject();
+    snapshot[QStringLiteral("inferenceQueueDepthByRole")] =
+        payload.value(QStringLiteral("queueDepthByRole")).toObject();
+    snapshot[QStringLiteral("inferenceServiceTimeoutCountByRole")] =
+        payload.value(QStringLiteral("timeoutCountByRole")).toObject();
+    snapshot[QStringLiteral("inferenceServiceFailureCountByRole")] =
+        payload.value(QStringLiteral("failureCountByRole")).toObject();
+    snapshot[QStringLiteral("inferenceServiceRestartCountByRole")] =
+        payload.value(QStringLiteral("restartCountByRole")).toObject();
+    recordInferenceConnected(snapshot.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
+    return snapshot;
+}
+
 void QueryService::initM2Modules()
 {
     if (m_m2Initialized) {
@@ -1240,6 +1408,16 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     };
 
     const bool embeddingEnabled = readBoolSetting(QStringLiteral("embeddingEnabled"), true);
+    const bool inferenceServiceEnabled =
+        readBoolSetting(QStringLiteral("inferenceServiceEnabled"), true);
+    const bool inferenceEmbedOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    const bool inferenceRerankOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    const bool inferenceQaOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceQaOffloadEnabled"), true);
+    const bool inferenceShadowModeEnabled =
+        readBoolSetting(QStringLiteral("inferenceShadowModeEnabled"), false);
     const bool queryRouterEnabled = readBoolSetting(QStringLiteral("queryRouterEnabled"), true);
     const double queryRouterMinConfidence =
         std::clamp(readDoubleSetting(QStringLiteral("queryRouterMinConfidence"), 0.45), 0.0, 1.0);
@@ -2028,25 +2206,67 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     int strongSemanticCandidates = 0;
     int fastSemanticCandidates = 0;
     bool dualIndexUsed = false;
-    if (embeddingEnabled
-        && m_embeddingManager && m_embeddingManager->isAvailable() && m_vectorStore) {
+    const bool inferenceEmbedOffloadActive =
+        embeddingEnabled && inferenceServiceEnabled && inferenceEmbedOffloadEnabled;
+    if (embeddingEnabled && m_vectorStore) {
         QElapsedTimer semanticTimer;
         semanticTimer.start();
         std::unordered_map<int64_t, double> combinedSemanticByItemId;
         combinedSemanticByItemId.reserve(128);
 
-        auto accumulateSemantic = [&](EmbeddingManager* manager,
+        const auto parseEmbeddingVector = [](const QJsonArray& values) {
+            std::vector<float> out;
+            out.reserve(static_cast<size_t>(values.size()));
+            for (const QJsonValue& value : values) {
+                out.push_back(static_cast<float>(value.toDouble(0.0)));
+            }
+            return out;
+        };
+
+        auto accumulateSemantic = [&](const QString& role,
+                                      EmbeddingManager* manager,
                                       VectorIndex* index,
                                       const QString& generation,
                                       int topK,
                                       double generationWeight,
                                       int& candidateCounter) {
-            if (!manager || !manager->isAvailable()
-                || !index || !index->isAvailable()
-                || generationWeight <= 0.0) {
+            if (!index || !index->isAvailable() || generationWeight <= 0.0) {
                 return;
             }
-            std::vector<float> queryVec = manager->embedQuery(query);
+            std::vector<float> queryVec;
+            if (inferenceEmbedOffloadActive) {
+                const qint64 remainingBudget = std::max(
+                    1, semanticBudgetMs - static_cast<int>(semanticTimer.elapsed()));
+                const QString cancelToken = QStringLiteral("search-%1-embed-%2")
+                    .arg(id)
+                    .arg(role);
+                QJsonObject embedParams;
+                embedParams[QStringLiteral("query")] = query;
+                embedParams[QStringLiteral("role")] = role;
+                embedParams[QStringLiteral("priority")] = QStringLiteral("live");
+                embedParams[QStringLiteral("deadlineMs")] =
+                    QDateTime::currentMSecsSinceEpoch() + remainingBudget;
+                embedParams[QStringLiteral("requestId")] = QStringLiteral("search-%1-%2")
+                    .arg(id)
+                    .arg(role);
+                auto payload = sendInferenceRequest(
+                    QStringLiteral("embed_query"),
+                    embedParams,
+                    static_cast<int>(std::min<qint64>(remainingBudget + 25, 2000)),
+                    role,
+                    QStringLiteral("embed_query_failed"),
+                    cancelToken);
+                if (payload.has_value()
+                    && payload->value(QStringLiteral("status")).toString() == QLatin1String("ok")) {
+                    const QJsonArray embeddingArray = payload->value(QStringLiteral("result"))
+                        .toObject()
+                        .value(QStringLiteral("embedding"))
+                        .toArray();
+                    queryVec = parseEmbeddingVector(embeddingArray);
+                }
+            } else if (manager && manager->isAvailable()) {
+                queryVec = manager->embedQuery(query);
+            }
             if (queryVec.empty()) {
                 return;
             }
@@ -2098,9 +2318,12 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         };
 
         std::shared_lock<std::shared_mutex> lock(m_vectorIndexMutex);
-        if (m_vectorIndex && m_vectorIndex->isAvailable()) {
+        if (m_vectorIndex && m_vectorIndex->isAvailable()
+            && (inferenceEmbedOffloadActive
+                || (m_embeddingManager && m_embeddingManager->isAvailable()))) {
             const double strongWeight = dualEmbeddingFusionEnabled ? 0.60 : 1.0;
-            accumulateSemantic(m_embeddingManager.get(),
+            accumulateSemantic(QStringLiteral("bi-encoder"),
+                               m_embeddingManager.get(),
                                m_vectorIndex.get(),
                                m_activeVectorGeneration,
                                strongEmbeddingTopK,
@@ -2109,13 +2332,14 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         if (dualEmbeddingFusionEnabled
             && fastEmbeddingEnabled
-            && m_fastEmbeddingManager
-            && m_fastEmbeddingManager->isAvailable()
             && m_fastVectorIndex
             && m_fastVectorIndex->isAvailable()
+            && (inferenceEmbedOffloadActive
+                || (m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable()))
             && semanticTimer.elapsed() <= semanticBudgetMs) {
             dualIndexUsed = true;
-            accumulateSemantic(m_fastEmbeddingManager.get(),
+            accumulateSemantic(QStringLiteral("bi-encoder-fast"),
+                               m_fastEmbeddingManager.get(),
                                m_fastVectorIndex.get(),
                                m_fastVectorGeneration,
                                fastEmbeddingTopK,
@@ -2250,14 +2474,179 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     bool rerankerStage1Applied = false;
     bool rerankerStage2Applied = false;
     bool rerankerAmbiguous = false;
+    const bool inferenceRerankOffloadActive =
+        embeddingEnabled && inferenceServiceEnabled && inferenceRerankOffloadEnabled;
     const bool coremlProviderUsed = (m_embeddingManager
             && m_embeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0)
         || (m_fastEmbeddingManager
             && m_fastEmbeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0);
 
+    auto applyRerankScoresFromInference = [&](const QString& method,
+                                              const QString& roleForMetrics,
+                                              int maxCandidates,
+                                              float weight,
+                                              float minScoreThreshold,
+                                              int budgetRemainingMs,
+                                              const QString& cancelToken,
+                                              bool& stageAppliedOut,
+                                              int& stageDepthOut) {
+        stageAppliedOut = false;
+        stageDepthOut = std::min(maxCandidates, static_cast<int>(results.size()));
+        if (stageDepthOut <= 0 || budgetRemainingMs <= 0) {
+            return;
+        }
+
+        QJsonArray candidates;
+        for (int i = 0; i < stageDepthOut; ++i) {
+            const SearchResult& result = results[static_cast<size_t>(i)];
+            QJsonObject candidate;
+            candidate[QStringLiteral("itemId")] = static_cast<qint64>(result.itemId);
+            candidate[QStringLiteral("path")] = result.path;
+            candidate[QStringLiteral("name")] = result.name;
+            candidate[QStringLiteral("snippet")] = result.snippet;
+            candidate[QStringLiteral("score")] = result.score;
+            candidates.append(candidate);
+        }
+
+        QJsonObject rerankParams;
+        rerankParams[QStringLiteral("query")] = originalRawQuery;
+        rerankParams[QStringLiteral("candidates")] = candidates;
+        rerankParams[QStringLiteral("priority")] = QStringLiteral("live");
+        rerankParams[QStringLiteral("deadlineMs")] =
+            QDateTime::currentMSecsSinceEpoch() + budgetRemainingMs;
+        rerankParams[QStringLiteral("requestId")] = QStringLiteral("search-%1-%2")
+            .arg(id)
+            .arg(method);
+
+        auto payload = sendInferenceRequest(
+            method,
+            rerankParams,
+            std::min(budgetRemainingMs + 25, 2000),
+            roleForMetrics,
+            QStringLiteral("rerank_offload_failed"),
+            cancelToken);
+        if (!payload.has_value()
+            || payload->value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
+            return;
+        }
+
+        const QJsonArray scores = payload->value(QStringLiteral("result"))
+            .toObject()
+            .value(QStringLiteral("scores"))
+            .toArray();
+        QHash<qint64, float> scoreByItemId;
+        for (const QJsonValue& scoreValue : scores) {
+            const QJsonObject scoreObject = scoreValue.toObject();
+            scoreByItemId.insert(
+                scoreObject.value(QStringLiteral("itemId")).toInteger(),
+                static_cast<float>(scoreObject.value(QStringLiteral("score")).toDouble(0.0)));
+        }
+
+        int boosted = 0;
+        for (int i = 0; i < stageDepthOut; ++i) {
+            SearchResult& result = results[static_cast<size_t>(i)];
+            if (!scoreByItemId.contains(result.itemId)) {
+                continue;
+            }
+
+            const float score = scoreByItemId.value(result.itemId);
+            result.crossEncoderScore = score;
+            if (score >= minScoreThreshold) {
+                const double boost = static_cast<double>(weight) * static_cast<double>(score);
+                result.score += boost;
+                result.scoreBreakdown.crossEncoderBoost += boost;
+                ++boosted;
+            }
+        }
+        stageAppliedOut = boosted > 0;
+    };
+
+    const auto isRerankerTopKAmbiguous = [&](const std::vector<SearchResult>& ranked) {
+        if (ranked.size() < 2) {
+            return false;
+        }
+        const double margin = ranked[0].score - ranked[1].score;
+        if (margin < rerankerAmbiguityMarginThreshold) {
+            return true;
+        }
+        const int topK = std::min(static_cast<int>(ranked.size()), 10);
+        int highSemantic = 0;
+        int lowSemantic = 0;
+        for (int i = 0; i < topK; ++i) {
+            const double semantic = ranked[static_cast<size_t>(i)].semanticNormalized;
+            if (semantic >= 0.55) {
+                ++highSemantic;
+            } else if (semantic <= 0.12) {
+                ++lowSemantic;
+            }
+        }
+        return highSemantic >= 3 && lowSemantic >= 3;
+    };
+
     // Cross-encoder reranking (soft boost, before M2 boosts)
     const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
-    if (embeddingEnabled
+    if (inferenceRerankOffloadActive && rerankerCascadeEnabled) {
+        const float stage1Weight = static_cast<float>(std::max(
+            rerankerStage1MinWeight,
+            static_cast<double>(m_scorer.weights().crossEncoderWeight) * rerankerStage1WeightScale));
+        const float stage2Weight = static_cast<float>(
+            static_cast<double>(m_scorer.weights().crossEncoderWeight) * rerankerStage2WeightScale);
+        QElapsedTimer rerankTimer;
+        rerankTimer.start();
+
+        if (elapsedBeforeRerankMs < rerankBudgetMs) {
+            applyRerankScoresFromInference(
+                QStringLiteral("rerank_fast"),
+                QStringLiteral("cross-encoder-fast"),
+                rerankerStage1Max,
+                stage1Weight,
+                0.05f,
+                rerankBudgetMs - elapsedBeforeRerankMs,
+                QStringLiteral("search-%1-rerank-fast").arg(id),
+                rerankerStage1Applied,
+                rerankerStage1Depth);
+        }
+
+        rerankerAmbiguous = isRerankerTopKAmbiguous(results);
+        const int elapsedAfterStage1Ms =
+            elapsedBeforeRerankMs + static_cast<int>(rerankTimer.elapsed());
+        if (rerankerAmbiguous && elapsedAfterStage1Ms < rerankBudgetMs) {
+            applyRerankScoresFromInference(
+                QStringLiteral("rerank_strong"),
+                QStringLiteral("cross-encoder"),
+                rerankerStage2Max,
+                stage2Weight,
+                0.10f,
+                rerankBudgetMs - elapsedAfterStage1Ms,
+                QStringLiteral("search-%1-rerank-strong").arg(id),
+                rerankerStage2Applied,
+                rerankerStage2Depth);
+        }
+        rerankDepthApplied = std::max(rerankerStage1Depth, rerankerStage2Depth);
+    } else if (inferenceRerankOffloadActive && embeddingEnabled) {
+        int rerankCap = rerankerFallbackCapDefault;
+        if (elapsedBeforeRerankMs >= rerankerFallbackElapsed180Ms) {
+            rerankCap = rerankerFallbackCapElapsed180;
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed130Ms) {
+            rerankCap = rerankerFallbackCapElapsed130;
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed80Ms) {
+            rerankCap = rerankerFallbackCapElapsed80;
+        }
+        rerankDepthApplied = std::min(static_cast<int>(results.size()), rerankCap);
+        if (elapsedBeforeRerankMs >= rerankBudgetMs) {
+            rerankDepthApplied = std::min(rerankDepthApplied, rerankerFallbackBudgetCap);
+        }
+        applyRerankScoresFromInference(
+            QStringLiteral("rerank_strong"),
+            QStringLiteral("cross-encoder"),
+            rerankDepthApplied,
+            m_scorer.weights().crossEncoderWeight,
+            0.10f,
+            std::max(1, rerankBudgetMs - elapsedBeforeRerankMs),
+            QStringLiteral("search-%1-rerank-fallback").arg(id),
+            rerankerStage2Applied,
+            rerankerStage2Depth);
+    } else if (embeddingEnabled
         && rerankerCascadeEnabled
         && ((m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable())
             || (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()))) {
@@ -2653,6 +3042,11 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("routerConfidence")] = static_cast<double>(routerConfidence);
         debugInfo[QStringLiteral("routerClass")] = queryClassToString(structured.queryClass);
         debugInfo[QStringLiteral("routerDomain")] = queryDomainToString(queryDomain);
+        debugInfo[QStringLiteral("inferenceServiceEnabled")] = inferenceServiceEnabled;
+        debugInfo[QStringLiteral("inferenceEmbedOffloadEnabled")] = inferenceEmbedOffloadEnabled;
+        debugInfo[QStringLiteral("inferenceRerankOffloadEnabled")] = inferenceRerankOffloadEnabled;
+        debugInfo[QStringLiteral("inferenceQaOffloadEnabled")] = inferenceQaOffloadEnabled;
+        debugInfo[QStringLiteral("inferenceShadowModeEnabled")] = inferenceShadowModeEnabled;
         debugInfo[QStringLiteral("semanticNeedScore")] =
             static_cast<double>(structured.semanticNeedScore);
         debugInfo[QStringLiteral("semanticThresholdApplied")] = semanticThreshold;
@@ -2931,12 +3325,23 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
         std::clamp(params.value(QStringLiteral("maxChunks")).toInt(24), 1, 80);
 
     bool qaSnippetEnabled = true;
+    bool inferenceServiceEnabled = true;
+    bool inferenceQaOffloadEnabled = true;
     if (m_store.has_value()) {
         if (const auto raw = m_store->getSetting(QStringLiteral("qaSnippetEnabled"));
             raw.has_value()) {
             qaSnippetEnabled = envFlagEnabled(raw.value());
         }
+        if (const auto raw = m_store->getSetting(QStringLiteral("inferenceServiceEnabled"));
+            raw.has_value()) {
+            inferenceServiceEnabled = envFlagEnabled(raw.value());
+        }
+        if (const auto raw = m_store->getSetting(QStringLiteral("inferenceQaOffloadEnabled"));
+            raw.has_value()) {
+            inferenceQaOffloadEnabled = envFlagEnabled(raw.value());
+        }
     }
+    const bool inferenceQaOffloadActive = inferenceServiceEnabled && inferenceQaOffloadEnabled;
 
     int64_t itemId = params.value(QStringLiteral("itemId")).toInteger(0);
     QString path = params.value(QStringLiteral("path")).toString().trimmed();
@@ -2977,7 +3382,9 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     QElapsedTimer timer;
     timer.start();
     const bool qaModelDeclared = m_modelRegistry && m_modelRegistry->hasModel("qa-extractive");
-    const bool qaModelActive = m_qaExtractiveModel && m_qaExtractiveModel->isAvailable();
+    const bool qaModelActive = inferenceQaOffloadActive
+        ? m_inferenceServiceConnected
+        : (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable());
 
     if (!qaSnippetEnabled) {
         QJsonObject result;
@@ -3077,6 +3484,46 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     int bestModelChunkIndex = -1;
     const QString queryLower = query.toLower();
 
+    if (inferenceQaOffloadActive) {
+        QJsonArray contexts;
+        for (const QString& chunk : chunks) {
+            contexts.append(chunk);
+        }
+        QJsonObject qaParams;
+        qaParams[QStringLiteral("query")] = query;
+        qaParams[QStringLiteral("contexts")] = contexts;
+        qaParams[QStringLiteral("maxAnswerChars")] = maxChars;
+        qaParams[QStringLiteral("priority")] = QStringLiteral("live");
+        qaParams[QStringLiteral("deadlineMs")] =
+            QDateTime::currentMSecsSinceEpoch() + timeoutMs;
+        qaParams[QStringLiteral("requestId")] = QStringLiteral("qa-%1-%2")
+            .arg(itemId)
+            .arg(QDateTime::currentMSecsSinceEpoch());
+
+        auto payload = sendInferenceRequest(
+            QStringLiteral("qa_extract"),
+            qaParams,
+            timeoutMs + 50,
+            QStringLiteral("qa-extractive"),
+            QStringLiteral("qa_extract_failed"),
+            QStringLiteral("qa-%1-cancel").arg(itemId));
+        if (payload.has_value()) {
+            const QString status = payload->value(QStringLiteral("status")).toString();
+            if (status == QLatin1String("timeout")) {
+                timedOut = true;
+            } else if (status == QLatin1String("ok")) {
+                const QJsonObject qaResult = payload->value(QStringLiteral("result")).toObject();
+                bestModelAnswer.available = qaResult.value(QStringLiteral("available")).toBool(false);
+                bestModelAnswer.answer = qaResult.value(QStringLiteral("answer")).toString();
+                bestModelAnswer.confidence = qaResult.value(QStringLiteral("confidence")).toDouble();
+                bestModelAnswer.rawScore = qaResult.value(QStringLiteral("rawScore")).toDouble();
+                bestModelAnswer.startToken = qaResult.value(QStringLiteral("startToken")).toInt(-1);
+                bestModelAnswer.endToken = qaResult.value(QStringLiteral("endToken")).toInt(-1);
+                bestModelChunkIndex = qaResult.value(QStringLiteral("contextIndex")).toInt(-1);
+            }
+        }
+    }
+
     for (size_t chunkIdx = 0; chunkIdx < chunks.size(); ++chunkIdx) {
         if (timer.elapsed() > timeoutMs) {
             timedOut = true;
@@ -3084,7 +3531,7 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
         }
 
         const QString& chunk = chunks[chunkIdx];
-        if (qaModelActive) {
+        if (!inferenceQaOffloadActive && qaModelActive) {
             const auto modelAnswer = m_qaExtractiveModel->extract(query, chunk, maxChars);
             if (modelAnswer.available && (!bestModelAnswer.available
                                           || modelAnswer.confidence > bestModelAnswer.confidence)) {
@@ -3282,7 +3729,8 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     qint64 aggregateRssKb = 0;
     for (const QString& serviceName : {QStringLiteral("query"),
                                        QStringLiteral("indexer"),
-                                       QStringLiteral("extractor")}) {
+                                       QStringLiteral("extractor"),
+                                       QStringLiteral("inference")}) {
         const QJsonObject serviceStats = processStatsForService(serviceName);
         memoryByService[serviceName] = serviceStats;
         if (serviceStats.value(QStringLiteral("available")).toBool(false)) {
@@ -3344,6 +3792,7 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         }
     }
 
+    const QJsonObject inferenceHealth = inferenceHealthSnapshot();
     QString overallStatus = QStringLiteral("healthy");
     QString healthStatusReason = QStringLiteral("healthy");
     if (rebuildStateCopy.status == VectorRebuildState::Status::Running
@@ -3385,6 +3834,22 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
     indexHealth[QStringLiteral("queueWriterBatchDepth")] = queueWriterBatchDepth;
     indexHealth[QStringLiteral("queueSource")] = queueSource;
+    indexHealth[QStringLiteral("inferenceServiceConnected")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    indexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    indexHealth[QStringLiteral("inferenceQueueDepthByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceTimeoutCountByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceTimeoutCountByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceFallbackCountByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceFallbackCountByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceServiceTimeoutCountByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceTimeoutCountByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceServiceFailureCountByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceFailureCountByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceServiceRestartCountByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceRestartCountByRole")).toObject();
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
@@ -3496,6 +3961,16 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     QJsonObject runtimeSettings;
     runtimeSettings[QStringLiteral("embeddingEnabled")] =
         readBoolRuntimeSetting(QStringLiteral("embeddingEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceServiceEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceServiceEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceEmbedOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceRerankOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceQaOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceQaOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceShadowModeEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceShadowModeEnabled"), false);
     runtimeSettings[QStringLiteral("queryRouterEnabled")] =
         readBoolRuntimeSetting(QStringLiteral("queryRouterEnabled"), true);
     runtimeSettings[QStringLiteral("queryRouterMinConfidence")] = std::clamp(
@@ -3708,6 +4183,12 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     runtimeComponents[QStringLiteral("queryRouterModelActive")] = false;
     runtimeComponents[QStringLiteral("queryRouterInactiveReason")] =
         QStringLiteral("Query router currently uses heuristic implementation.");
+    runtimeComponents[QStringLiteral("inferenceServiceConnected")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    runtimeComponents[QStringLiteral("inferenceRoleStatusByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    runtimeComponents[QStringLiteral("inferenceQueueDepthByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
     runtimeComponents[QStringLiteral("embeddingStrongAvailable")] =
         (m_embeddingManager && m_embeddingManager->isAvailable());
     runtimeComponents[QStringLiteral("embeddingStrongModelId")] =
@@ -3724,22 +4205,39 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         m_fastEmbeddingManager ? m_fastEmbeddingManager->providerName() : QString();
     runtimeComponents[QStringLiteral("embeddingFastGeneration")] =
         m_fastEmbeddingManager ? m_fastEmbeddingManager->activeGenerationId() : QString();
+    const QJsonObject inferenceRoleStatusForComponents =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    const bool useInferenceRerank = runtimeSettings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true)
+        && runtimeSettings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true);
+    const bool useInferenceQa = runtimeSettings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true)
+        && runtimeSettings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true);
     runtimeComponents[QStringLiteral("crossEncoderFastAvailable")] =
-        (m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable());
+        useInferenceRerank
+            ? (inferenceRoleStatusForComponents.value(QStringLiteral("cross-encoder-fast")).toString()
+               == QLatin1String("ready"))
+            : (m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable());
     runtimeComponents[QStringLiteral("crossEncoderStrongAvailable")] =
-        (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable());
+        useInferenceRerank
+            ? (inferenceRoleStatusForComponents.value(QStringLiteral("cross-encoder")).toString()
+               == QLatin1String("ready"))
+            : (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable());
     runtimeComponents[QStringLiteral("personalizedLtrAvailable")] =
         (m_personalizedLtr && m_personalizedLtr->isAvailable());
     runtimeComponents[QStringLiteral("personalizedLtrModelVersion")] =
         m_personalizedLtr ? m_personalizedLtr->modelVersion() : QString();
     runtimeComponents[QStringLiteral("qaExtractiveAvailable")] =
-        (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable());
+        useInferenceQa
+            ? (inferenceRoleStatusForComponents.value(QStringLiteral("qa-extractive")).toString()
+               == QLatin1String("ready"))
+            : (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable());
     runtimeComponents[QStringLiteral("qaSnippetEnabled")] =
         runtimeSettings.value(QStringLiteral("qaSnippetEnabled")).toBool(true);
     runtimeComponents[QStringLiteral("qaPreviewMode")] =
-        (m_qaExtractiveModel && m_qaExtractiveModel->isAvailable())
-            ? QStringLiteral("model_plus_extractive_fallback")
-            : QStringLiteral("extractive_fallback_only");
+        useInferenceQa
+            ? QStringLiteral("inference_service_plus_extractive_fallback")
+            : ((m_qaExtractiveModel && m_qaExtractiveModel->isAvailable())
+                ? QStringLiteral("model_plus_extractive_fallback")
+                : QStringLiteral("extractive_fallback_only"));
     runtimeComponents[QStringLiteral("vectorStoreAvailable")] =
         (m_vectorStore != nullptr);
     runtimeComponents[QStringLiteral("vectorIndexStrongAvailable")] =
@@ -3776,6 +4274,16 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
             return !runtimeModelId.isEmpty()
                 && (runtimeModelId == entryModelId || runtimeModelId == entryName);
         };
+        const QJsonObject inferenceRoleStatusByModel =
+            inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+        const bool inferenceEnabled =
+            runtimeSettings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true);
+        const bool inferenceEmbedOffload =
+            runtimeSettings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true);
+        const bool inferenceRerankOffload =
+            runtimeSettings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true);
+        const bool inferenceQaOffload =
+            runtimeSettings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true);
 
         for (const QString& role : roles) {
             const auto it = m_modelRegistry->manifest().models.find(role.toStdString());
@@ -3794,45 +4302,81 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
             bool runtimeActive = false;
             QString runtimeState = QStringLiteral("inactive");
             QString runtimeReason;
+            const QString inferenceRoleState =
+                inferenceRoleStatusByModel.value(role).toString();
 
             if (role == QLatin1String("bi-encoder")) {
-                runtimeActive = m_embeddingManager
-                    && m_embeddingManager->isAvailable()
-                    && modelIdMatches(m_embeddingManager->activeModelId(),
-                                      entry.modelId, entry.name);
-                runtimeState = runtimeActive
-                    ? QStringLiteral("active")
-                    : ((m_embeddingManager && m_embeddingManager->isAvailable())
-                           ? QStringLiteral("available_not_selected")
-                           : QStringLiteral("unavailable"));
-                if (!runtimeActive && (m_embeddingManager && m_embeddingManager->isAvailable())) {
-                    runtimeReason = QStringLiteral("Embedding manager loaded a fallback role/model.");
+                if (inferenceEnabled && inferenceEmbedOffload && !inferenceRoleState.isEmpty()) {
+                    runtimeActive = inferenceRoleState == QLatin1String("ready");
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : inferenceRoleState;
+                    if (!runtimeActive) {
+                        runtimeReason = QStringLiteral("Served by inference process role state: %1.")
+                            .arg(inferenceRoleState);
+                    }
+                } else {
+                    runtimeActive = m_embeddingManager
+                        && m_embeddingManager->isAvailable()
+                        && modelIdMatches(m_embeddingManager->activeModelId(),
+                                          entry.modelId, entry.name);
+                    runtimeState = runtimeActive
+                        ? QStringLiteral("active")
+                        : ((m_embeddingManager && m_embeddingManager->isAvailable())
+                               ? QStringLiteral("available_not_selected")
+                               : QStringLiteral("unavailable"));
+                    if (!runtimeActive && (m_embeddingManager && m_embeddingManager->isAvailable())) {
+                        runtimeReason = QStringLiteral("Embedding manager loaded a fallback role/model.");
+                    }
                 }
             } else if (role == QLatin1String("bi-encoder-fast")) {
-                runtimeActive = m_fastEmbeddingManager
-                    && m_fastEmbeddingManager->isAvailable()
-                    && modelIdMatches(m_fastEmbeddingManager->activeModelId(),
-                                      entry.modelId, entry.name);
-                runtimeState = runtimeActive
-                    ? QStringLiteral("active")
-                    : ((m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable())
-                           ? QStringLiteral("available_not_selected")
-                           : QStringLiteral("unavailable"));
+                if (inferenceEnabled && inferenceEmbedOffload && !inferenceRoleState.isEmpty()) {
+                    runtimeActive = inferenceRoleState == QLatin1String("ready");
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : inferenceRoleState;
+                } else {
+                    runtimeActive = m_fastEmbeddingManager
+                        && m_fastEmbeddingManager->isAvailable()
+                        && modelIdMatches(m_fastEmbeddingManager->activeModelId(),
+                                          entry.modelId, entry.name);
+                    runtimeState = runtimeActive
+                        ? QStringLiteral("active")
+                        : ((m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable())
+                               ? QStringLiteral("available_not_selected")
+                               : QStringLiteral("unavailable"));
+                }
             } else if (role == QLatin1String("cross-encoder-fast")) {
-                runtimeActive = m_fastCrossEncoderReranker
-                    && m_fastCrossEncoderReranker->isAvailable();
-                runtimeState = runtimeActive ? QStringLiteral("active")
-                                             : QStringLiteral("unavailable");
+                if (inferenceEnabled && inferenceRerankOffload && !inferenceRoleState.isEmpty()) {
+                    runtimeActive = inferenceRoleState == QLatin1String("ready");
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : inferenceRoleState;
+                } else {
+                    runtimeActive = m_fastCrossEncoderReranker
+                        && m_fastCrossEncoderReranker->isAvailable();
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : QStringLiteral("unavailable");
+                }
             } else if (role == QLatin1String("cross-encoder")) {
-                runtimeActive = m_crossEncoderReranker
-                    && m_crossEncoderReranker->isAvailable();
-                runtimeState = runtimeActive ? QStringLiteral("active")
-                                             : QStringLiteral("unavailable");
+                if (inferenceEnabled && inferenceRerankOffload && !inferenceRoleState.isEmpty()) {
+                    runtimeActive = inferenceRoleState == QLatin1String("ready");
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : inferenceRoleState;
+                } else {
+                    runtimeActive = m_crossEncoderReranker
+                        && m_crossEncoderReranker->isAvailable();
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : QStringLiteral("unavailable");
+                }
             } else if (role == QLatin1String("qa-extractive")) {
-                runtimeActive = m_qaExtractiveModel
-                    && m_qaExtractiveModel->isAvailable();
-                runtimeState = runtimeActive ? QStringLiteral("active")
-                                             : QStringLiteral("unavailable");
+                if (inferenceEnabled && inferenceQaOffload && !inferenceRoleState.isEmpty()) {
+                    runtimeActive = inferenceRoleState == QLatin1String("ready");
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : inferenceRoleState;
+                } else {
+                    runtimeActive = m_qaExtractiveModel
+                        && m_qaExtractiveModel->isAvailable();
+                    runtimeState = runtimeActive ? QStringLiteral("active")
+                                                 : QStringLiteral("unavailable");
+                }
             } else if (role == QLatin1String("query-router")) {
                 runtimeActive = false;
                 runtimeState = QStringLiteral("inactive");
@@ -4027,6 +4571,8 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     serviceHealth[QStringLiteral("indexerRunning")] = (queueSource == QLatin1String("indexer_rpc"));
     serviceHealth[QStringLiteral("extractorRunning")] = true;
     serviceHealth[QStringLiteral("queryServiceRunning")] = true;
+    serviceHealth[QStringLiteral("inferenceServiceRunning")] =
+        inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     serviceHealth[QStringLiteral("uptime")] = 0;
 
     QJsonObject result;

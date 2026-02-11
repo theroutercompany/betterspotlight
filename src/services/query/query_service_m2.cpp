@@ -5,6 +5,7 @@
 #include "core/feedback/path_preferences.h"
 #include "core/feedback/type_affinity.h"
 #include "core/ipc/message.h"
+#include "core/ipc/socket_client.h"
 #include "core/shared/logging.h"
 #include "core/embedding/embedding_manager.h"
 #include "core/models/model_registry.h"
@@ -376,6 +377,48 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     }
     sqlite3_busy_timeout(db, 5000);
 
+    const auto readBoolSettingFromDb = [&](const QString& key, bool defaultValue) {
+        static constexpr const char* kSql =
+            "SELECT value FROM settings WHERE key = ?1 LIMIT 1";
+        sqlite3_stmt* settingStmt = nullptr;
+        if (sqlite3_prepare_v2(db, kSql, -1, &settingStmt, nullptr) != SQLITE_OK) {
+            return defaultValue;
+        }
+        const QByteArray keyUtf8 = key.toUtf8();
+        sqlite3_bind_text(settingStmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+        QString raw;
+        if (sqlite3_step(settingStmt) == SQLITE_ROW) {
+            const char* value = reinterpret_cast<const char*>(sqlite3_column_text(settingStmt, 0));
+            raw = value ? QString::fromUtf8(value) : QString();
+        }
+        sqlite3_finalize(settingStmt);
+        if (raw.isEmpty()) {
+            return defaultValue;
+        }
+        return raw.compare(QStringLiteral("1"), Qt::CaseInsensitive) == 0
+            || raw.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0
+            || raw.compare(QStringLiteral("yes"), Qt::CaseInsensitive) == 0
+            || raw.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+    };
+
+    const bool inferenceServiceEnabled =
+        readBoolSettingFromDb(QStringLiteral("inferenceServiceEnabled"), true);
+    const bool inferenceEmbedOffloadEnabled =
+        readBoolSettingFromDb(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    const bool inferenceEmbedOffloadActive =
+        inferenceServiceEnabled && inferenceEmbedOffloadEnabled;
+    SocketClient inferenceClient;
+    bool inferenceConnected = false;
+    if (inferenceEmbedOffloadActive) {
+        const QString inferenceSocketPath = ServiceBase::socketPath(QStringLiteral("inference"));
+        inferenceConnected = inferenceClient.connectToServer(inferenceSocketPath, 500);
+        if (!inferenceConnected) {
+            updateFailedState(QStringLiteral("Inference service unavailable for rebuild embeddings"));
+            closeResources();
+            return;
+        }
+    }
+
     ModelRegistry workerRegistry(modelsDir);
     EmbeddingManager workerEmbeddingManager(&workerRegistry, "bi-encoder");
     EmbeddingManager workerFastEmbeddingManager(&workerRegistry, "bi-encoder-fast");
@@ -385,6 +428,61 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         return;
     }
     const bool fastEmbeddingAvailable = workerFastEmbeddingManager.initialize();
+
+    const auto embedBatchViaInference =
+        [&](const QString& role,
+            const std::vector<QString>& texts,
+            int microBatchSize) -> std::vector<std::vector<float>> {
+        std::vector<std::vector<float>> embeddings;
+        if (!inferenceConnected || texts.empty()) {
+            return embeddings;
+        }
+
+        QJsonArray textArray;
+        for (const QString& text : texts) {
+            textArray.append(text);
+        }
+
+        QJsonObject params;
+        params[QStringLiteral("role")] = role;
+        params[QStringLiteral("texts")] = textArray;
+        params[QStringLiteral("normalize")] = true;
+        params[QStringLiteral("priority")] = QStringLiteral("rebuild");
+        params[QStringLiteral("microBatchSize")] = std::max(1, microBatchSize);
+        params[QStringLiteral("requestId")] = QStringLiteral("rebuild-%1-%2-%3")
+            .arg(runId)
+            .arg(role)
+            .arg(QDateTime::currentMSecsSinceEpoch());
+        params[QStringLiteral("deadlineMs")] =
+            QDateTime::currentMSecsSinceEpoch() + 12000;
+
+        auto response = inferenceClient.sendRequest(QStringLiteral("embed_passages"), params, 12000);
+        if (!response.has_value()
+            || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+            return {};
+        }
+
+        const QJsonObject payload = response->value(QStringLiteral("result")).toObject();
+        if (payload.value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
+            return {};
+        }
+
+        const QJsonArray embeddingRows = payload.value(QStringLiteral("result"))
+            .toObject()
+            .value(QStringLiteral("embeddings"))
+            .toArray();
+        embeddings.reserve(static_cast<size_t>(embeddingRows.size()));
+        for (const QJsonValue& rowValue : embeddingRows) {
+            const QJsonArray rowArray = rowValue.toArray();
+            std::vector<float> row;
+            row.reserve(static_cast<size_t>(rowArray.size()));
+            for (const QJsonValue& value : rowArray) {
+                row.push_back(static_cast<float>(value.toDouble(0.0)));
+            }
+            embeddings.push_back(std::move(row));
+        }
+        return embeddings;
+    };
 
     const int embeddingDimensions = std::max(workerEmbeddingManager.embeddingDimensions(), 1);
     VectorIndex::IndexMetadata rebuiltMeta;
@@ -610,18 +708,23 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
         if (m_stopRebuildRequested.load()) return;
 
-        std::vector<std::vector<float>> embeddings = workerEmbeddingManager.embedBatch(texts);
-
-        if (m_stopRebuildRequested.load()) return;
-
-        if (embeddings.size() != texts.size()) {
-            embeddings.clear();
-            embeddings.reserve(texts.size());
-            for (const QString& text : texts) {
-                if (m_stopRebuildRequested.load()) return;
-                embeddings.push_back(workerEmbeddingManager.embed(text));
+        std::vector<std::vector<float>> embeddings;
+        if (inferenceEmbedOffloadActive) {
+            embeddings = embedBatchViaInference(QStringLiteral("bi-encoder"), texts, 8);
+        } else {
+            embeddings = workerEmbeddingManager.embedBatch(texts);
+            if (m_stopRebuildRequested.load()) return;
+            if (embeddings.size() != texts.size()) {
+                embeddings.clear();
+                embeddings.reserve(texts.size());
+                for (const QString& text : texts) {
+                    if (m_stopRebuildRequested.load()) return;
+                    embeddings.push_back(workerEmbeddingManager.embed(text));
+                }
             }
         }
+
+        if (m_stopRebuildRequested.load()) return;
 
         auto normalizeVector = [](const std::vector<float>& source) {
             std::vector<float> normalized = source;
@@ -658,14 +761,18 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
         int usableFastEmbeddings = 0;
         if (fastEmbeddingAvailable && rebuiltFastIndex) {
-            std::vector<std::vector<float>> fastEmbeddings =
-                workerFastEmbeddingManager.embedBatch(texts);
-            if (fastEmbeddings.size() != texts.size()) {
-                fastEmbeddings.clear();
-                fastEmbeddings.reserve(texts.size());
-                for (const QString& text : texts) {
-                    if (m_stopRebuildRequested.load()) return;
-                    fastEmbeddings.push_back(workerFastEmbeddingManager.embed(text));
+            std::vector<std::vector<float>> fastEmbeddings;
+            if (inferenceEmbedOffloadActive) {
+                fastEmbeddings = embedBatchViaInference(QStringLiteral("bi-encoder-fast"), texts, 8);
+            } else {
+                fastEmbeddings = workerFastEmbeddingManager.embedBatch(texts);
+                if (fastEmbeddings.size() != texts.size()) {
+                    fastEmbeddings.clear();
+                    fastEmbeddings.reserve(texts.size());
+                    for (const QString& text : texts) {
+                        if (m_stopRebuildRequested.load()) return;
+                        fastEmbeddings.push_back(workerFastEmbeddingManager.embed(text));
+                    }
                 }
             }
 
