@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file>menubar_idle.png</file>
+        <file>menubar_indexing_a.png</file>
+        <file>menubar_indexing_b.png</file>
+        <file>menubar_error.png</file>
+    </qresource>
+</RCC>

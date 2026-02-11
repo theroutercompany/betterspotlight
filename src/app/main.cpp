@@ -22,22 +22,54 @@
 
 namespace {
 
-QIcon trayStateIcon(const QColor& color)
+QIcon fallbackTrayStateIcon(const QColor& color, bool isErrorIcon)
 {
     constexpr int kSize = 24;
-    constexpr int kDot = 14;
     QPixmap pixmap(kSize, kSize);
     pixmap.fill(Qt::transparent);
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(Qt::NoPen);
+
+    constexpr qreal kInset = 2.0;
+    const QRectF tile(kInset, kInset, kSize - (2.0 * kInset), kSize - (2.0 * kInset));
+    painter.setPen(QPen(QColor(0, 0, 0, 70), 1.0));
     painter.setBrush(color);
-    const int x = (kSize - kDot) / 2;
-    const int y = (kSize - kDot) / 2;
-    painter.drawEllipse(x, y, kDot, kDot);
+    painter.drawRoundedRect(tile, 5.0, 5.0);
+
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.drawEllipse(QRectF(6.8, 6.8, 8.0, 8.0));
+    painter.drawLine(QPointF(13.2, 13.2), QPointF(17.2, 17.2));
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Qt::white);
+    if (isErrorIcon) {
+        painter.drawRoundedRect(QRectF(11.0, 4.0, 2.0, 7.2), 0.9, 0.9);
+        painter.drawEllipse(QRectF(11.0, 13.3, 2.0, 2.0));
+    } else {
+        QPolygonF sparkle;
+        sparkle << QPointF(18.5, 5.0)
+                << QPointF(19.5, 8.0)
+                << QPointF(22.5, 9.0)
+                << QPointF(19.5, 10.0)
+                << QPointF(18.5, 13.0)
+                << QPointF(17.5, 10.0)
+                << QPointF(14.5, 9.0)
+                << QPointF(17.5, 8.0);
+        painter.drawPolygon(sparkle);
+    }
 
     return QIcon(pixmap);
+}
+
+QIcon trayStateIcon(const QString& resourcePath, const QColor& fallbackColor, bool isErrorIcon)
+{
+    const QIcon icon(resourcePath);
+    if (!icon.isNull()) {
+        return icon;
+    }
+    return fallbackTrayStateIcon(fallbackColor, isErrorIcon);
 }
 
 } // namespace
@@ -130,10 +162,14 @@ int main(int argc, char* argv[])
     // --- Set up the system tray icon (C++ for reliability on macOS) ---
 
     QSystemTrayIcon trayIcon;
-    const QIcon idleTrayIcon = trayStateIcon(QColor(QStringLiteral("#1976D2")));
-    const QIcon indexingTrayIconA = trayStateIcon(QColor(QStringLiteral("#FB8C00")));
-    const QIcon indexingTrayIconB = trayStateIcon(QColor(QStringLiteral("#F57C00")));
-    const QIcon errorTrayIcon = trayStateIcon(QColor(QStringLiteral("#C62828")));
+    const QIcon idleTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_idle.png"),
+                                             QColor(QStringLiteral("#1976D2")), false);
+    const QIcon indexingTrayIconA = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_a.png"),
+                                                  QColor(QStringLiteral("#FB8C00")), false);
+    const QIcon indexingTrayIconB = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_b.png"),
+                                                  QColor(QStringLiteral("#F57C00")), false);
+    const QIcon errorTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_error.png"),
+                                              QColor(QStringLiteral("#C62828")), true);
     trayIcon.setIcon(indexingTrayIconA);
     trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Starting services"));
 

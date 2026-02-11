@@ -18,7 +18,12 @@ qt_add_executable(betterspotlight
     onboarding_controller.cpp
     settings_controller.h
     settings_controller.cpp
+    assets/icons.qrc
 )
+
+set(APP_ICON_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/assets/BetterSpotlight.icns")
+set_source_files_properties(${APP_ICON_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+target_sources(betterspotlight PRIVATE ${APP_ICON_ICNS})
 
 # Strip qml/ prefix so types register as "Main" not "qml.Main"
 set_source_files_properties(qml/Main.qml          PROPERTIES QT_RESOURCE_ALIAS Main.qml)
@@ -81,6 +86,7 @@ endif()
 set_target_properties(betterspotlight PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+    MACOSX_BUNDLE_ICON_FILE "BetterSpotlight.icns"
     MACOSX_BUNDLE_BUNDLE_NAME "BetterSpotlight"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.betterspotlight.app"
     MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
