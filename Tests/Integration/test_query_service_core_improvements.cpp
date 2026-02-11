@@ -221,6 +221,7 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                  QStringLiteral("indexer_unavailable"));
         QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);
         QCOMPARE(indexHealth.value(QStringLiteral("expectedGapFailures")).toInt(), 1);
+        QVERIFY(!indexHealth.value(QStringLiteral("m2ModulesInitialized")).toBool(true));
     }
 
     // Start fake indexer and verify queue parity fields.
@@ -358,6 +359,14 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
             QVERIFY2(name.endsWith(QStringLiteral(".pdf")),
                      qPrintable(QStringLiteral("Unexpected non-pdf result: %1").arg(name)));
         }
+
+        const QJsonObject postSearchHealth = sendOrFail(queryClient, QStringLiteral("getHealth"));
+        QCOMPARE(postSearchHealth.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+        const QJsonObject postSearchIndexHealth = postSearchHealth.value(QStringLiteral("result"))
+                                                      .toObject()
+                                                      .value(QStringLiteral("indexHealth"))
+                                                      .toObject();
+        QVERIFY(postSearchIndexHealth.value(QStringLiteral("m2ModulesInitialized")).toBool(false));
     }
 
     // Typo guardrail checks.

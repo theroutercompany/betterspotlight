@@ -286,6 +286,7 @@ QVariantMap SearchController::getHealthSync()
             indexHealth[QStringLiteral("queuePending")] = pending;
             indexHealth[QStringLiteral("queueInProgress")] = processing;
             indexHealth[QStringLiteral("queueDropped")] = dropped;
+            indexHealth[QStringLiteral("queueSource")] = QStringLiteral("indexer_rpc");
             indexHealth[QStringLiteral("queuePreparing")] =
                 queueResult.value(QStringLiteral("preparing")).toInt();
             indexHealth[QStringLiteral("queueWriting")] =
@@ -313,6 +314,30 @@ QVariantMap SearchController::getHealthSync()
                     rootStatus.append(rootEntry);
                 }
                 indexHealth[QStringLiteral("indexRoots")] = rootStatus;
+            }
+
+            if (indexHealth.value(QStringLiteral("healthStatusReason")).toString()
+                == QLatin1String("indexer_unavailable")) {
+                const bool rebuilding =
+                    indexHealth.value(QStringLiteral("overallStatus")).toString()
+                        == QLatin1String("rebuilding")
+                    || indexHealth.value(QStringLiteral("vectorRebuildStatus")).toString()
+                        == QLatin1String("running")
+                    || indexHealth.value(QStringLiteral("totalIndexedItems")).toInteger() == 0;
+                const int criticalFailures =
+                    indexHealth.value(QStringLiteral("criticalFailures")).toInt();
+
+                if (rebuilding) {
+                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("rebuilding");
+                    indexHealth[QStringLiteral("healthStatusReason")] = QStringLiteral("rebuilding");
+                } else if (criticalFailures > 0) {
+                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("degraded");
+                    indexHealth[QStringLiteral("healthStatusReason")] =
+                        QStringLiteral("degraded_critical_failures");
+                } else {
+                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("healthy");
+                    indexHealth[QStringLiteral("healthStatusReason")] = QStringLiteral("healthy");
+                }
             }
         }
     }
