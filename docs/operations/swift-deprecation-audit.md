@@ -19,6 +19,26 @@ Every Swift file gets one of three classifications:
 > but C++ has a dedicated `Chunker` class in `src/core/indexing/chunker.cpp`. These are
 > called out where relevant.
 
+## 2026-02-11 Implementation Update (Qt/C++ Migration Finalization)
+
+Applied the Swift deletion/deprecation execution plan with full build + test validation.
+
+- Removed **16 Swift files** that are fully superseded by Qt/C++ and not referenced by the active build.
+- Marked **11 Swift files** with a deprecation banner (`DEPRECATED SWIFT REFERENCE`) to keep short-term migration context while remaining parity items are closed.
+- Retained **1 Swift fixture file** (`Tests/Fixtures/sample_documents/sample.swift`) for extraction/indexing test corpus coverage.
+
+Validation executed after changes:
+
+- Reference guard across non-doc/non-Swift paths for removed files.
+- `cmake --build build` (success).
+- `ctest --test-dir build --output-on-failure` (**54/54 passed**).
+
+Current Swift file state in repo:
+
+- Total remaining `.swift` files: **12**
+- Deprecated reference files: **11**
+- Fixture files kept intentionally: **1**
+
 ---
 
 ## 1. ~~SAFE TO DELETE (21 files)~~ COMPLETED 2026-02-07

@@ -1,3 +1,8 @@
+// DEPRECATED SWIFT REFERENCE
+// Qt/C++ is the source of truth.
+// Keep this file only as temporary migration reference while parity items are closed.
+// Do not add new features or fixes here.
+
 import Foundation
 
 /// Result of scanning a file or directory
