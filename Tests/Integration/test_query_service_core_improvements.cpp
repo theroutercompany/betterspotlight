@@ -382,8 +382,9 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         const QString answer = result.value(QStringLiteral("answer")).toString().toLower();
         QVERIFY(answer.contains(QStringLiteral("breaking")));
         QVERIFY(answer.contains(QStringLiteral("barrier")));
-        QCOMPARE(result.value(QStringLiteral("source")).toString(),
-                 QStringLiteral("extractive_preview"));
+        const QString source = result.value(QStringLiteral("source")).toString();
+        QVERIFY(source == QStringLiteral("extractive_preview")
+                || source == QStringLiteral("qa_extractive_model"));
     }
 
     {

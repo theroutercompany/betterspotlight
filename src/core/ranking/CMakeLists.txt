@@ -3,6 +3,7 @@ add_library(betterspotlight-core-ranking STATIC
     context_signals.cpp
     scorer.cpp
     cross_encoder_reranker.cpp
+    qa_extractive_model.cpp
     reranker_cascade.cpp
     personalized_ltr.cpp
 )
