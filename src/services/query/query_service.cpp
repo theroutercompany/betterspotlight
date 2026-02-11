@@ -2207,7 +2207,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     int fastSemanticCandidates = 0;
     bool dualIndexUsed = false;
     const bool inferenceEmbedOffloadActive =
-        embeddingEnabled && inferenceServiceEnabled && inferenceEmbedOffloadEnabled;
+        embeddingEnabled
+        && inferenceServiceEnabled
+        && inferenceEmbedOffloadEnabled
+        && !inferenceShadowModeEnabled;
     if (embeddingEnabled && m_vectorStore) {
         QElapsedTimer semanticTimer;
         semanticTimer.start();
@@ -2475,7 +2478,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     bool rerankerStage2Applied = false;
     bool rerankerAmbiguous = false;
     const bool inferenceRerankOffloadActive =
-        embeddingEnabled && inferenceServiceEnabled && inferenceRerankOffloadEnabled;
+        embeddingEnabled
+        && inferenceServiceEnabled
+        && inferenceRerankOffloadEnabled
+        && !inferenceShadowModeEnabled;
     const bool coremlProviderUsed = (m_embeddingManager
             && m_embeddingManager->providerName().compare(QStringLiteral("coreml"), Qt::CaseInsensitive) == 0)
         || (m_fastEmbeddingManager
@@ -3327,6 +3333,7 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
     bool qaSnippetEnabled = true;
     bool inferenceServiceEnabled = true;
     bool inferenceQaOffloadEnabled = true;
+    bool inferenceShadowModeEnabled = false;
     if (m_store.has_value()) {
         if (const auto raw = m_store->getSetting(QStringLiteral("qaSnippetEnabled"));
             raw.has_value()) {
@@ -3340,8 +3347,13 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
             raw.has_value()) {
             inferenceQaOffloadEnabled = envFlagEnabled(raw.value());
         }
+        if (const auto raw = m_store->getSetting(QStringLiteral("inferenceShadowModeEnabled"));
+            raw.has_value()) {
+            inferenceShadowModeEnabled = envFlagEnabled(raw.value());
+        }
     }
-    const bool inferenceQaOffloadActive = inferenceServiceEnabled && inferenceQaOffloadEnabled;
+    const bool inferenceQaOffloadActive =
+        inferenceServiceEnabled && inferenceQaOffloadEnabled && !inferenceShadowModeEnabled;
 
     int64_t itemId = params.value(QStringLiteral("itemId")).toInteger(0);
     QString path = params.value(QStringLiteral("path")).toString().trimmed();
