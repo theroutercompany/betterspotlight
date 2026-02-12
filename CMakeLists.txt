@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(BETTERSPOTLIGHT_ENABLE_COVERAGE "Enable llvm coverage instrumentation" OFF)
+
 # macOS deployment target
 set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 
@@ -25,6 +27,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(-O2 -flto)
     add_link_options(-flto)
+endif()
+
+if(BETTERSPOTLIGHT_ENABLE_COVERAGE)
+    add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+    add_link_options(-fprofile-instr-generate -fcoverage-mapping)
 endif()
 
 # ---------- Qt 6 ----------
@@ -120,4 +127,4 @@ add_subdirectory(src/services/inference)
 add_subdirectory(src/app)
 
 enable_testing()
-add_subdirectory(tests)
+add_subdirectory(Tests)

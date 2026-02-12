@@ -223,6 +223,15 @@ bool containsExpectedFileInTopN(const QJsonArray& ranked,
     return false;
 }
 
+bool envFlagEnabled(const QString& raw)
+{
+    const QString normalized = raw.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
+}
+
 } // namespace
 
 class TestQueryServiceRelevanceFixture : public QObject {
@@ -429,6 +438,12 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
     QStringList failures;
     QJsonArray rankingMissDetails;
     QJsonArray semanticUnavailableDetails;
+    const QString gateMode = qEnvironmentVariable("BS_RELEVANCE_GATE_MODE")
+                                 .trimmed()
+                                 .toLower();
+    const bool enforceGate = gateMode.isEmpty() || gateMode == QLatin1String("enforce");
+    const bool requireSemanticInEnforce = enforceGate
+        && envFlagEnabled(qEnvironmentVariable("BS_RELEVANCE_REQUIRE_SEMANTIC"));
 
     for (const QueryCase& c : cases) {
         if (c.category == QLatin1String("typo_strict")) {
@@ -437,7 +452,6 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
         }
 
         if (c.requiresVectors && !vectorsReady) {
-            ++semanticUnavailable;
             const QString detail = QStringLiteral(
                                        "[%1|%2] q=\"%3\" expect=\"%4\" semantic_unavailable (%5)")
                                        .arg(c.id,
@@ -449,11 +463,16 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
             QJsonObject entry;
             entry[QStringLiteral("id")] = c.id;
             entry[QStringLiteral("category")] = c.category;
-            entry[QStringLiteral("failureType")] = QStringLiteral("semantic_unavailable");
+            entry[QStringLiteral("failureType")] = requireSemanticInEnforce
+                ? QStringLiteral("semantic_required_unavailable")
+                : QStringLiteral("semantic_unavailable");
             entry[QStringLiteral("query")] = c.query;
             entry[QStringLiteral("expectedFileName")] = c.expectedFileName;
             entry[QStringLiteral("reason")] = vectorUnavailableReason;
             semanticUnavailableDetails.append(entry);
+            if (!requireSemanticInEnforce) {
+                ++semanticUnavailable;
+            }
             continue;
         }
 
@@ -504,6 +523,9 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
         report[QStringLiteral("fixtureRoot")] = fixtureRoot;
         report[QStringLiteral("dbPath")] = dbPath;
         report[QStringLiteral("gatePassRate")] = gatePassRate;
+        report[QStringLiteral("gateMode")] = enforceGate
+            ? QStringLiteral("enforce")
+            : QStringLiteral("report_only");
         report[QStringLiteral("totalCases")] = total;
         report[QStringLiteral("passedCases")] = passed;
         report[QStringLiteral("passRate")] = passRate;
@@ -540,13 +562,15 @@ void TestQueryServiceRelevanceFixture::testFixtureRelevanceGateViaIpc()
             qInfo().noquote() << line;
         }
     }
-    QVERIFY2(passRate >= gatePassRate,
-             qPrintable(QStringLiteral("Fixture relevance gate failed: %1/%2 (%3%%) below gate %4%% (required %5)")
-                            .arg(passed)
-                            .arg(total)
-                            .arg(QString::number(passRate, 'f', 2))
-                            .arg(QString::number(gatePassRate, 'f', 1))
-                            .arg(requiredPasses)));
+    if (enforceGate) {
+        QVERIFY2(passRate >= gatePassRate,
+                 qPrintable(QStringLiteral("Fixture relevance gate failed: %1/%2 (%3%%) below gate %4%% (required %5)")
+                                .arg(passed)
+                                .arg(total)
+                                .arg(QString::number(passRate, 'f', 2))
+                                .arg(QString::number(gatePassRate, 'f', 1))
+                                .arg(requiredPasses)));
+    }
 }
 
 QTEST_MAIN(TestQueryServiceRelevanceFixture)

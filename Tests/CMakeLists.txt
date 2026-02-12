@@ -1,145 +1,232 @@
 find_package(Qt6 REQUIRED COMPONENTS Test)
 
-# Helper macro to create a test executable.
-# Each test file gets its own executable and CTest registration.
-macro(bs_add_test name source)
-    add_executable(${name} ${source})
+set(BS_TEST_REPORT_DIR "${CMAKE_BINARY_DIR}/test-reports")
+file(MAKE_DIRECTORY "${BS_TEST_REPORT_DIR}")
+
+add_library(betterspotlight-test-support STATIC
+    Support/service_process_harness.cpp
+    Support/ipc_test_utils.cpp
+)
+target_include_directories(betterspotlight-test-support PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/Support
+)
+target_link_libraries(betterspotlight-test-support PUBLIC
+    betterspotlight-core
+    sqlite3
+    Qt6::Core
+    Qt6::Test
+    Qt6::Network
+)
+
+function(bs_add_test name source)
+    set(options)
+    set(oneValueArgs TIMEOUT)
+    set(multiValueArgs LABELS SOURCES LINK_LIBS ENV COMPILE_DEFINITIONS COMPILE_OPTIONS)
+    cmake_parse_arguments(BS "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    add_executable(${name}
+        ${source}
+        ${BS_SOURCES}
+    )
     target_link_libraries(${name} PRIVATE
         betterspotlight-core
+        betterspotlight-test-support
         sqlite3
         Qt6::Core
         Qt6::Test
         Qt6::Network
+        ${BS_LINK_LIBS}
     )
+    if(BS_COMPILE_DEFINITIONS)
+        target_compile_definitions(${name} PRIVATE ${BS_COMPILE_DEFINITIONS})
+    endif()
+    if(BS_COMPILE_OPTIONS)
+        target_compile_options(${name} PRIVATE ${BS_COMPILE_OPTIONS})
+    endif()
+
     add_test(NAME ${name} COMMAND ${name})
-endmacro()
 
-# ── Unit tests ────────────────────────────────────────────────────
-bs_add_test(test-sqlite-store       Unit/test_sqlite_store.cpp)
-bs_add_test(test-sqlite-store-joined Unit/test_sqlite_store_joined.cpp)
-bs_add_test(test-path-rules         Unit/test_path_rules.cpp)
-bs_add_test(test-scoring            Unit/test_scoring.cpp)
-bs_add_test(test-chunker            Unit/test_chunker.cpp)
-bs_add_test(test-bsignore-parser    Unit/test_bsignore_parser.cpp)
-bs_add_test(test-ipc-messages       Unit/test_ipc_messages.cpp)
-bs_add_test(test-match-classifier   Unit/test_match_classifier.cpp)
-bs_add_test(test-corrupt-files     Unit/test_corrupt_files.cpp)
-bs_add_test(test-query-ranking      Unit/test_query_ranking.cpp)
-bs_add_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
-bs_add_test(test-extraction-extension-fallback Unit/test_extraction_extension_fallback.cpp)
-bs_add_test(test-docs-memo-location Unit/test_docs_memo_location.cpp)
-target_compile_definitions(test-docs-memo-location PRIVATE
-    BETTERSPOTLIGHT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    if(BS_TIMEOUT)
+        set(_timeout "${BS_TIMEOUT}")
+    else()
+        set(_timeout 60)
+    endif()
+    if(BS_LABELS)
+        set(_labels "${BS_LABELS}")
+    else()
+        set(_labels "unit")
+    endif()
+    set_tests_properties(${name} PROPERTIES
+        TIMEOUT "${_timeout}"
+        LABELS "${_labels}"
+    )
+    if(BS_ENV)
+        set_tests_properties(${name} PROPERTIES
+            ENVIRONMENT "${BS_ENV}"
+        )
+    endif()
+endfunction()
+
+function(bs_add_unit_test name source)
+    bs_add_test(${name} ${source} LABELS "unit" TIMEOUT 60 ${ARGN})
+endfunction()
+
+function(bs_add_integration_test name source)
+    bs_add_test(${name} ${source} LABELS "integration" TIMEOUT 180 ${ARGN})
+endfunction()
+
+function(bs_add_relevance_test name source)
+    bs_add_test(${name} ${source} LABELS "integration;relevance" TIMEOUT 180 ${ARGN})
+endfunction()
+
+# Unit tests
+bs_add_unit_test(test-sqlite-store Unit/test_sqlite_store.cpp)
+bs_add_unit_test(test-sqlite-store-extended Unit/test_sqlite_store_extended.cpp)
+bs_add_unit_test(test-sqlite-store-joined Unit/test_sqlite_store_joined.cpp)
+bs_add_unit_test(test-path-rules Unit/test_path_rules.cpp)
+bs_add_unit_test(test-scoring Unit/test_scoring.cpp)
+bs_add_unit_test(test-query-normalizer Unit/test_query_normalizer.cpp)
+bs_add_unit_test(test-search-result Unit/test_search_result.cpp)
+bs_add_unit_test(test-chunker Unit/test_chunker.cpp)
+bs_add_unit_test(test-bsignore-parser Unit/test_bsignore_parser.cpp)
+bs_add_unit_test(test-ipc-messages Unit/test_ipc_messages.cpp)
+bs_add_unit_test(test-match-classifier Unit/test_match_classifier.cpp)
+bs_add_unit_test(test-corrupt-files Unit/test_corrupt_files.cpp)
+bs_add_unit_test(test-query-ranking Unit/test_query_ranking.cpp)
+bs_add_unit_test(test-pdf-extractor Unit/test_pdf_extractor.cpp)
+bs_add_unit_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
+bs_add_unit_test(test-extraction-extension-fallback Unit/test_extraction_extension_fallback.cpp)
+
+# M3 query understanding tests
+bs_add_unit_test(test-temporal-parser Unit/test_temporal_parser.cpp)
+bs_add_unit_test(test-entity-extractor Unit/test_entity_extractor.cpp)
+bs_add_unit_test(test-doctype-classifier Unit/test_doctype_classifier.cpp)
+bs_add_unit_test(test-rules-engine Unit/test_rules_engine.cpp)
+
+# M3 unit tests
+bs_add_unit_test(test-model-registry Unit/test_model_registry.cpp)
+bs_add_unit_test(test-query-router Unit/test_query_router.cpp)
+bs_add_unit_test(test-reranker-cascade Unit/test_reranker_cascade.cpp)
+bs_add_unit_test(test-personalized-ltr Unit/test_personalized_ltr.cpp)
+bs_add_unit_test(test-dual-index-calibration Unit/test_dual_index_calibration.cpp)
+
+# Stability/reliability tests
+bs_add_unit_test(test-sqlite-store-reliability Unit/test_sqlite_store_reliability.cpp)
+bs_add_unit_test(test-ipc-reliability Unit/test_ipc_reliability.cpp)
+bs_add_unit_test(test-embedding-circuit-breaker Unit/test_embedding_circuit_breaker.cpp)
+bs_add_unit_test(test-extraction-timeout Unit/test_extraction_timeout.cpp)
+
+# Relevance push unit tests
+bs_add_unit_test(test-score-transparency Unit/test_score_transparency.cpp)
+bs_add_unit_test(test-typo-recall Unit/test_typo_recall.cpp)
+bs_add_unit_test(test-semantic-adaptive Unit/test_semantic_adaptive.cpp)
+bs_add_unit_test(test-query-cache Unit/test_query_cache.cpp)
+
+# Cross-encoder + StructuredQuery tests
+bs_add_unit_test(test-tokenizer-pair Unit/test_tokenizer_pair.cpp)
+bs_add_unit_test(test-cross-encoder-reranker Unit/test_cross_encoder_reranker.cpp)
+bs_add_unit_test(test-structured-query-boost Unit/test_structured_query_boost.cpp)
+
+# M2 unit tests
+bs_add_unit_test(test-tokenizer Unit/test_tokenizer.cpp)
+bs_add_unit_test(test-embedding Unit/test_embedding.cpp)
+bs_add_unit_test(test-quantizer Unit/test_quantizer.cpp)
+bs_add_unit_test(test-vector-index Unit/test_vector_index.cpp)
+bs_add_unit_test(test-search-merger Unit/test_search_merger.cpp)
+bs_add_unit_test(test-interaction-tracker Unit/test_interaction_tracker.cpp)
+bs_add_unit_test(test-feedback-aggregator Unit/test_feedback_aggregator.cpp)
+bs_add_unit_test(test-path-preferences Unit/test_path_preferences.cpp)
+bs_add_unit_test(test-type-affinity Unit/test_type_affinity.cpp)
+
+# New hotspot unit tests
+bs_add_unit_test(test-pipeline Unit/test_pipeline.cpp)
+bs_add_unit_test(test-migration Unit/test_migration.cpp)
+bs_add_unit_test(test-vector-store Unit/test_vector_store.cpp)
+bs_add_unit_test(test-model-session Unit/test_model_session.cpp)
+bs_add_unit_test(test-tokenizer-factory Unit/test_tokenizer_factory.cpp)
+bs_add_unit_test(test-mdls-text-extractor Unit/test_mdls_text_extractor.cpp)
+bs_add_unit_test(test-qa-extractive-model Unit/test_qa_extractive_model.cpp)
+
+# Non-runtime docs/lint check
+bs_add_test(test-docs-memo-location Unit/test_docs_memo_location.cpp
+    TIMEOUT 30
+    LABELS "docs_lint"
+    COMPILE_DEFINITIONS BETTERSPOTLIGHT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
-# ── Integration tests ────────────────────────────────────────────
-bs_add_test(test-full-pipeline      Integration/test_full_pipeline.cpp)
-bs_add_test(test-index-persistence  Integration/test_index_persistence.cpp)
-bs_add_test(test-incremental-update Integration/test_incremental_update.cpp)
-bs_add_test(test-crash-isolation    Integration/test_crash_isolation.cpp)
-bs_add_test(test-index-backpressure Integration/test_index_backpressure.cpp)
-bs_add_test(test-query-service-core-improvements Integration/test_query_service_core_improvements.cpp)
-bs_add_test(test-query-service-relevance-fixture Integration/test_query_service_relevance_fixture.cpp)
-target_compile_definitions(test-query-service-relevance-fixture PRIVATE
-    BS_RELEVANCE_BASELINES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/baselines.json"
+# Integration tests
+bs_add_integration_test(test-full-pipeline Integration/test_full_pipeline.cpp)
+bs_add_integration_test(test-index-persistence Integration/test_index_persistence.cpp)
+bs_add_integration_test(test-incremental-update Integration/test_incremental_update.cpp)
+bs_add_integration_test(test-crash-isolation Integration/test_crash_isolation.cpp)
+bs_add_integration_test(test-index-backpressure Integration/test_index_backpressure.cpp)
+bs_add_integration_test(test-query-service-core-improvements Integration/test_query_service_core_improvements.cpp)
+bs_add_integration_test(test-query-service-ipc-extensions Integration/test_query_service_ipc_extensions.cpp)
+bs_add_integration_test(test-query-service-semantic-offload Integration/test_query_service_semantic_offload.cpp)
+bs_add_integration_test(test-semantic-search Integration/test_semantic_search.cpp)
+bs_add_integration_test(test-embedding-fallback Integration/test_embedding_fallback.cpp)
+bs_add_integration_test(test-boost-verification Integration/test_boost_verification.cpp)
+bs_add_integration_test(test-context-boost Integration/test_context_boost.cpp)
+bs_add_integration_test(test-embedding-recovery Integration/test_embedding_recovery.cpp)
+
+# New service IPC integration tests
+bs_add_test(test-indexer-service-ipc Integration/test_indexer_service_ipc.cpp
+    TIMEOUT 180
+    LABELS "integration;service_ipc"
 )
-set_tests_properties(test-query-service-relevance-fixture PROPERTIES
-    ENVIRONMENT "BS_RELEVANCE_FIXTURE_REPORT_PATH=/tmp/bs_query_service_relevance_fixture_report.json"
+bs_add_test(test-extractor-service-ipc Integration/test_extractor_service_ipc.cpp
+    TIMEOUT 180
+    LABELS "integration;service_ipc"
 )
-#
-# Deterministic relevance gate promotion policy:
-# - Transitional gatePassRate=90.0 while the 100-case corpus is stabilized.
-# - Promote to gatePassRate=95.0 in tests/relevance/baselines.json only
-#   after 3 consecutive clean runs of test-query-service-relevance-fixture.
-#
-
-add_executable(test-app-lifecycle-states
-    Integration/test_app_lifecycle_states.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/onboarding_controller.cpp
+bs_add_test(test-inference-service-ipc Integration/test_inference_service_ipc.cpp
+    TIMEOUT 180
+    LABELS "integration;service_ipc"
 )
-target_link_libraries(test-app-lifecycle-states PRIVATE
-    betterspotlight-core
-    sqlite3
-    Qt6::Core
-    Qt6::Test
-    Qt6::Network
+bs_add_test(test-query-service-m2-ipc Integration/test_query_service_m2_ipc.cpp
+    TIMEOUT 180
+    LABELS "integration;service_ipc"
 )
-target_compile_options(test-app-lifecycle-states PRIVATE -Wno-keyword-macro)
-add_test(NAME test-app-lifecycle-states COMMAND test-app-lifecycle-states)
 
-add_executable(test-settings-controller-platform
-    Unit/test_settings_controller_platform.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/settings_controller.cpp
-    ${CMAKE_SOURCE_DIR}/src/app/platform_integration.cpp
+# Relevance gates (enforced in CI)
+bs_add_relevance_test(test-query-service-relevance-fixture Integration/test_query_service_relevance_fixture.cpp
+    COMPILE_DEFINITIONS BS_RELEVANCE_BASELINES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/baselines.json"
+    ENV
+        BS_RELEVANCE_FIXTURE_REPORT_PATH=${BS_TEST_REPORT_DIR}/query_service_relevance_fixture.json
+        BS_RELEVANCE_GATE_MODE=enforce
+        BS_RELEVANCE_REQUIRE_SEMANTIC=1
 )
-target_link_libraries(test-settings-controller-platform PRIVATE
-    betterspotlight-core
-    sqlite3
-    Qt6::Core
-    Qt6::Test
-    Qt6::Network
+
+bs_add_relevance_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp
+    COMPILE_DEFINITIONS BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
+    ENV
+        BS_RELEVANCE_GATE_MODE=enforce
+        BS_RELEVANCE_REQUIRE_SEMANTIC=1
+        BS_RELEVANCE_REPORT_PATH=${BS_TEST_REPORT_DIR}/ui_sim_query_suite.json
 )
-target_compile_options(test-settings-controller-platform PRIVATE -Wno-keyword-macro)
-add_test(NAME test-settings-controller-platform COMMAND test-settings-controller-platform)
 
-# ── M3 Query understanding tests ───────────────────────────────
-bs_add_test(test-temporal-parser     Unit/test_temporal_parser.cpp)
-bs_add_test(test-entity-extractor    Unit/test_entity_extractor.cpp)
-bs_add_test(test-doctype-classifier  Unit/test_doctype_classifier.cpp)
-bs_add_test(test-rules-engine        Unit/test_rules_engine.cpp)
-
-# ── M3 Unit tests ────────────────────────────────────────────────
-bs_add_test(test-model-registry    Unit/test_model_registry.cpp)
-bs_add_test(test-query-router      Unit/test_query_router.cpp)
-bs_add_test(test-reranker-cascade  Unit/test_reranker_cascade.cpp)
-bs_add_test(test-personalized-ltr  Unit/test_personalized_ltr.cpp)
-bs_add_test(test-dual-index-calibration Unit/test_dual_index_calibration.cpp)
-
-# ── Wave 3: Stability & reliability tests ─────────────────────────
-bs_add_test(test-sqlite-store-reliability     Unit/test_sqlite_store_reliability.cpp)
-bs_add_test(test-ipc-reliability              Unit/test_ipc_reliability.cpp)
-bs_add_test(test-embedding-circuit-breaker    Unit/test_embedding_circuit_breaker.cpp)
-bs_add_test(test-extraction-timeout           Unit/test_extraction_timeout.cpp)
-
-# ── Wave 4: Relevance push tests ─────────────────────────────────
-bs_add_test(test-score-transparency      Unit/test_score_transparency.cpp)
-bs_add_test(test-typo-recall             Unit/test_typo_recall.cpp)
-bs_add_test(test-semantic-adaptive       Unit/test_semantic_adaptive.cpp)
-bs_add_test(test-query-cache             Unit/test_query_cache.cpp)
-
-# ── Wave 2: Cross-encoder + StructuredQuery signal tests ─────────
-bs_add_test(test-tokenizer-pair              Unit/test_tokenizer_pair.cpp)
-bs_add_test(test-cross-encoder-reranker      Unit/test_cross_encoder_reranker.cpp)
-bs_add_test(test-structured-query-boost      Unit/test_structured_query_boost.cpp)
-
-# ── M2 Unit tests ────────────────────────────────────────────────
-bs_add_test(test-tokenizer           Unit/test_tokenizer.cpp)
-bs_add_test(test-embedding           Unit/test_embedding.cpp)
-bs_add_test(test-quantizer           Unit/test_quantizer.cpp)
-bs_add_test(test-vector-index        Unit/test_vector_index.cpp)
-bs_add_test(test-search-merger       Unit/test_search_merger.cpp)
-bs_add_test(test-interaction-tracker Unit/test_interaction_tracker.cpp)
-bs_add_test(test-feedback-aggregator Unit/test_feedback_aggregator.cpp)
-bs_add_test(test-path-preferences    Unit/test_path_preferences.cpp)
-bs_add_test(test-type-affinity       Unit/test_type_affinity.cpp)
-
-# ── M2 Integration tests ────────────────────────────────────────
-bs_add_test(test-semantic-search     Integration/test_semantic_search.cpp)
-bs_add_test(test-embedding-fallback  Integration/test_embedding_fallback.cpp)
-bs_add_test(test-boost-verification  Integration/test_boost_verification.cpp)
-bs_add_test(test-context-boost       Integration/test_context_boost.cpp)
-bs_add_test(test-embedding-recovery  Integration/test_embedding_recovery.cpp)
-
-# ── Relevance gate tests ────────────────────────────────────────
-bs_add_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp)
-target_compile_definitions(test-ui-sim-query-suite PRIVATE
-    BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
-)
-set_tests_properties(test-ui-sim-query-suite PROPERTIES
-    ENVIRONMENT "BS_RELEVANCE_GATE_MODE=report_only;BS_RELEVANCE_REPORT_PATH=/tmp/bs_ui_sim_query_suite_report.json"
-)
 add_test(NAME test-ui-sim-query-suite-stress COMMAND test-ui-sim-query-suite)
 set_tests_properties(test-ui-sim-query-suite-stress PROPERTIES
-    ENVIRONMENT "BS_RELEVANCE_GATE_MODE=report_only;BS_RELEVANCE_REPORT_PATH=/tmp/bs_ui_sim_query_stress_report.json"
+    TIMEOUT 300
+    LABELS "relevance_stress"
+    ENVIRONMENT "BS_RELEVANCE_GATE_MODE=report_only;BS_RELEVANCE_REPORT_PATH=${BS_TEST_REPORT_DIR}/ui_sim_query_suite_stress.json"
+)
+
+# App-level integration tests that compile app sources into the test binary
+bs_add_test(test-app-lifecycle-states Integration/test_app_lifecycle_states.cpp
+    TIMEOUT 180
+    LABELS "integration"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/onboarding_controller.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+
+bs_add_test(test-settings-controller-platform Unit/test_settings_controller_platform.cpp
+    TIMEOUT 60
+    LABELS "unit"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/settings_controller.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/platform_integration.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
 )

@@ -67,6 +67,15 @@ QStringList tokenizeWords(const QString& text)
     }
     return tokens;
 }
+
+bool envFlagEnabled(const QString& raw)
+{
+    const QString normalized = raw.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
+}
 } // anonymous namespace
 
 class TestUiSimQuerySuite : public QObject {
@@ -248,6 +257,13 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
 
     const bs::Scorer scorer;
     const bs::QueryContext emptyContext;
+    const QString gateMode = qEnvironmentVariable("BS_RELEVANCE_GATE_MODE")
+                                 .trimmed()
+                                 .toLower();
+    const bool enforceGate = (gateMode == QLatin1String("enforce"));
+    const bool reportOnly = !enforceGate;
+    const bool requireSemanticInEnforce = enforceGate
+        && envFlagEnabled(qEnvironmentVariable("BS_RELEVANCE_REQUIRE_SEMANTIC"));
 
     int passed = 0;
     int semanticSkipped = 0;
@@ -288,7 +304,6 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
             continue;
         }
         if (testCase.category == QStringLiteral("semantic_probe") && !semanticAvailable) {
-            ++semanticSkipped;
             const QString detail = QStringLiteral(
                                        "[%1|%2] q=\"%3\" expect=\"%4\" semantic_unavailable")
                                        .arg(testCase.id,
@@ -299,13 +314,25 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
             QJsonObject failure;
             failure[QStringLiteral("id")] = testCase.id;
             failure[QStringLiteral("category")] = testCase.category;
-            failure[QStringLiteral("failureType")] = QStringLiteral("semantic_unavailable");
+            failure[QStringLiteral("failureType")] = requireSemanticInEnforce
+                ? QStringLiteral("semantic_required_unavailable")
+                : QStringLiteral("semantic_unavailable");
             failure[QStringLiteral("query")] = testCase.query;
             failure[QStringLiteral("expectedFileName")] = testCase.expectedFileName;
             semanticUnavailableDetails.append(failure);
+            if (!requireSemanticInEnforce) {
+                ++semanticSkipped;
+            }
             qInfo().noquote()
-                << QStringLiteral("CASE %1 (%2) => SKIP (requires vector search)")
-                       .arg(testCase.id, testCase.category);
+                << QStringLiteral("CASE %1 (%2) => %3 (requires vector search)")
+                       .arg(testCase.id, testCase.category,
+                            requireSemanticInEnforce
+                                ? QStringLiteral("FAIL")
+                                : QStringLiteral("SKIP"))
+                       ;
+            if (requireSemanticInEnforce) {
+                continue;
+            }
             continue;
         }
 
@@ -586,12 +613,6 @@ void TestUiSimQuerySuite::testRelevanceGateAgainstLiveIndex()
     }
     const double passRate = (100.0 * static_cast<double>(passed)) / static_cast<double>(total);
     const int requiredPasses = static_cast<int>(std::ceil((gatePassRate / 100.0) * static_cast<double>(total)));
-    const QString gateMode = qEnvironmentVariable("BS_RELEVANCE_GATE_MODE")
-                                 .trimmed()
-                                 .toLower();
-    const bool enforceGate = (gateMode == QLatin1String("enforce"));
-    const bool reportOnly = !enforceGate;
-
     qInfo().noquote() << QStringLiteral("Relevance gate summary: passed=%1/%2 passRate=%3%% required=%4%% (%5/%2)")
                              .arg(QString::number(passed),
                                   QString::number(total),

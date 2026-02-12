@@ -1,6 +1,83 @@
 #include <QtTest/QtTest>
 #include "core/ranking/cross_encoder_reranker.h"
+#include "core/models/model_registry.h"
 #include "core/shared/search_result.h"
+
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QScopeGuard>
+#include <QTemporaryDir>
+
+namespace {
+
+QString fixtureModelsSourceDir()
+{
+    const QString resolved = bs::ModelRegistry::resolveModelsDir();
+    const QString resolvedModel =
+        QDir(resolved).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    const QString resolvedVocab = QDir(resolved).filePath(QStringLiteral("vocab.txt"));
+    if (QFileInfo::exists(resolvedModel) && QFileInfo::exists(resolvedVocab)) {
+        return resolved;
+    }
+
+    return QStringLiteral("/Users/rexliu/betterspotlight/data/models");
+}
+
+bool linkOrCopyFile(const QString& sourcePath, const QString& targetPath)
+{
+    QFile::remove(targetPath);
+    if (QFile::link(sourcePath, targetPath)) {
+        return true;
+    }
+    return QFile::copy(sourcePath, targetPath);
+}
+
+bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
+{
+    const QString sourceDir = fixtureModelsSourceDir();
+    const QString modelSource =
+        QDir(sourceDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    const QString vocabSource = QDir(sourceDir).filePath(QStringLiteral("vocab.txt"));
+    if (!QFileInfo::exists(modelSource) || !QFileInfo::exists(vocabSource)) {
+        return false;
+    }
+
+    if (!linkOrCopyFile(modelSource,
+                        QDir(modelsDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx")))) {
+        return false;
+    }
+    if (!linkOrCopyFile(vocabSource, QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
+        return false;
+    }
+
+    const QByteArray manifest = R"({
+        "models": {
+            "cross-encoder": {
+                "name": "cross-fixture",
+                "modelId": "cross-fixture-v1",
+                "generationId": "v1",
+                "file": "bge-small-en-v1.5-int8.onnx",
+                "vocab": "vocab.txt",
+                "tokenizer": "wordpiece",
+                "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+                "outputs": ["logits"],
+                "task": "rerank"
+            }
+        }
+    })";
+    QFile manifestFile(QDir(modelsDir).filePath(QStringLiteral("manifest.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    manifestFile.write(manifest);
+    manifestFile.close();
+    return true;
+}
+
+} // namespace
 
 class TestCrossEncoderReranker : public QObject {
     Q_OBJECT
@@ -54,26 +131,78 @@ void TestCrossEncoderReranker::testRerankWithUnavailableModel()
 
 void TestCrossEncoderReranker::testMaxCandidatesCapping()
 {
-    bs::CrossEncoderReranker reranker(nullptr);
+    bs::CrossEncoderReranker unavailableReranker(nullptr);
     // Don't initialize — model unavailable
 
-    std::vector<bs::SearchResult> results;
+    std::vector<bs::SearchResult> unavailableResults;
     for (int i = 0; i < 100; ++i) {
         bs::SearchResult sr;
         sr.itemId = i + 1;
         sr.path = QStringLiteral("/home/user/file_%1.txt").arg(i);
         sr.name = QStringLiteral("file_%1.txt").arg(i);
         sr.score = 200.0 - i;
-        results.push_back(sr);
+        unavailableResults.push_back(sr);
     }
 
-    bs::RerankerConfig config;
-    config.maxCandidates = 10;
+    bs::RerankerConfig unavailableConfig;
+    unavailableConfig.maxCandidates = 10;
 
     // With unavailable model, rerank returns 0 regardless of config
-    const int boosted = reranker.rerank(QStringLiteral("query"), results, config);
-    QCOMPARE(boosted, 0);
-    QCOMPARE(static_cast<int>(results.size()), 100); // results not truncated
+    const int unavailableBoosted = unavailableReranker.rerank(
+        QStringLiteral("query"), unavailableResults, unavailableConfig);
+    QCOMPARE(unavailableBoosted, 0);
+    QCOMPARE(static_cast<int>(unavailableResults.size()), 100); // results not truncated
+
+    QTemporaryDir modelsDir;
+    QVERIFY(modelsDir.isValid());
+    QVERIFY2(prepareCrossEncoderFixtureModelsDir(modelsDir.path()),
+             "Failed to prepare fixture models directory for cross-encoder");
+
+    const QByteArray oldDisableCoreMl = qgetenv("BETTERSPOTLIGHT_DISABLE_COREML");
+    qputenv("BETTERSPOTLIGHT_DISABLE_COREML", QByteArrayLiteral("1"));
+    const auto restoreEnv = qScopeGuard([&]() {
+        if (oldDisableCoreMl.isNull()) {
+            qunsetenv("BETTERSPOTLIGHT_DISABLE_COREML");
+        } else {
+            qputenv("BETTERSPOTLIGHT_DISABLE_COREML", oldDisableCoreMl);
+        }
+    });
+    Q_UNUSED(restoreEnv);
+
+    bs::ModelRegistry registry(modelsDir.path());
+    bs::CrossEncoderReranker reranker(&registry, "cross-encoder");
+    QVERIFY2(reranker.initialize(), "Cross-encoder fixture should initialize");
+    QVERIFY(reranker.isAvailable());
+
+    std::vector<bs::SearchResult> results;
+    results.reserve(3);
+    for (int i = 0; i < 3; ++i) {
+        bs::SearchResult sr;
+        sr.itemId = i + 1;
+        sr.path = QStringLiteral("/tmp/doc_%1.md").arg(i + 1);
+        sr.name = QStringLiteral("doc_%1.md").arg(i + 1);
+        sr.snippet = QStringLiteral("semantic rerank fixture snippet %1").arg(i + 1);
+        sr.score = 10.0 - static_cast<double>(i);
+        results.push_back(sr);
+    }
+    const double untouchedScore = results[2].score;
+
+    bs::RerankerConfig config;
+    config.weight = 4.0f;
+    config.maxCandidates = 2;
+    config.minScoreThreshold = 0.0f;
+
+    const int boosted = reranker.rerank(QStringLiteral("semantic rerank fixture query"),
+                                        results,
+                                        config);
+    QCOMPARE(boosted, 2);
+    for (int i = 0; i < 2; ++i) {
+        QVERIFY(results[static_cast<size_t>(i)].crossEncoderScore > 0.0f);
+        QVERIFY(results[static_cast<size_t>(i)].crossEncoderScore <= 1.0f);
+        QVERIFY(results[static_cast<size_t>(i)].scoreBreakdown.crossEncoderBoost > 0.0);
+    }
+    QCOMPARE(results[2].scoreBreakdown.crossEncoderBoost, 0.0);
+    QCOMPARE(results[2].score, untouchedScore);
 }
 
 QTEST_MAIN(TestCrossEncoderReranker)
