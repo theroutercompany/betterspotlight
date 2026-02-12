@@ -250,12 +250,12 @@ void TestMdlsTextExtractor::runProcessScenarios()
     const QString mdlsSlow = writeExecutableScript(
         dir,
         QStringLiteral("mdls_slow.sh"),
-        QStringLiteral("#!/bin/sh\nsleep 0.2\necho 'kMDItemTextContent = \"late\"'\nexit 0\n"));
+        QStringLiteral("#!/bin/sh\nsleep 0.6\necho 'kMDItemTextContent = \"late\"'\nexit 0\n"));
     QVERIFY(!mdlsSlow.isEmpty());
     {
         ScopedEnvVar mdimportPath("BS_TEST_MDIMPORT_PATH", mdimportOk.toUtf8());
         ScopedEnvVar mdlsPath("BS_TEST_MDLS_PATH", mdlsSlow.toUtf8());
-        ScopedEnvVar timeout("BS_TEST_MDLS_TIMEOUT_MS", "50");
+        ScopedEnvVar timeout("BS_TEST_MDLS_TIMEOUT_MS", "250");
         bs::MdlsTextExtractor extractor;
         const bs::ExtractionResult result = extractor.extract(filePath);
         QCOMPARE(result.status, bs::ExtractionResult::Status::Timeout);
@@ -266,12 +266,12 @@ void TestMdlsTextExtractor::runProcessScenarios()
     const QString mdimportSlow = writeExecutableScript(
         dir,
         QStringLiteral("mdimport_slow.sh"),
-        QStringLiteral("#!/bin/sh\nsleep 0.2\nexit 0\n"));
+        QStringLiteral("#!/bin/sh\nsleep 0.6\nexit 0\n"));
     QVERIFY(!mdimportSlow.isEmpty());
     {
         ScopedEnvVar mdimportPath("BS_TEST_MDIMPORT_PATH", mdimportSlow.toUtf8());
         ScopedEnvVar mdlsPath("BS_TEST_MDLS_PATH", mdlsQuoted.toUtf8());
-        ScopedEnvVar timeout("BS_TEST_MDLS_TIMEOUT_MS", "50");
+        ScopedEnvVar timeout("BS_TEST_MDLS_TIMEOUT_MS", "250");
         bs::MdlsTextExtractor extractor;
         const bs::ExtractionResult result = extractor.extract(filePath);
         QCOMPARE(result.status, bs::ExtractionResult::Status::Timeout);

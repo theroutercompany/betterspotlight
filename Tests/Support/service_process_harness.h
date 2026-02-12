@@ -19,6 +19,10 @@ struct ServiceLaunchConfig {
     bool forwardChannels = true;
     int startTimeoutMs = 5000;
     int connectTimeoutMs = 5000;
+    int readyTimeoutMs = 30000;
+    int requestDefaultTimeoutMs = 5000;
+    bool waitForReadyBanner = true;
+    bool requirePingReady = true;
 };
 
 class ServiceProcessHarness {
@@ -41,7 +45,7 @@ public:
 
     QJsonObject request(const QString& method,
                         const QJsonObject& params = {},
-                        int timeoutMs = 3000);
+                        int timeoutMs = -1);
 
 private:
     QString m_serviceName;
@@ -54,7 +58,7 @@ private:
     QProcess m_process;
     SocketClient m_client;
     bool m_started = false;
+    int m_requestDefaultTimeoutMs = 5000;
 };
 
 } // namespace bs::test
-

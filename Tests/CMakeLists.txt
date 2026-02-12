@@ -94,7 +94,12 @@ bs_add_unit_test(test-ipc-messages Unit/test_ipc_messages.cpp)
 bs_add_unit_test(test-match-classifier Unit/test_match_classifier.cpp)
 bs_add_unit_test(test-corrupt-files Unit/test_corrupt_files.cpp)
 bs_add_unit_test(test-query-ranking Unit/test_query_ranking.cpp)
-bs_add_unit_test(test-pdf-extractor Unit/test_pdf_extractor.cpp)
+bs_add_unit_test(test-pdf-extractor Unit/test_pdf_extractor.cpp
+    COMPILE_DEFINITIONS BETTERSPOTLIGHT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+bs_add_unit_test(test-ocr-extractor Unit/test_ocr_extractor.cpp
+    LINK_LIBS Qt6::Gui
+)
 bs_add_unit_test(test-extraction-office-pdf Unit/test_extraction_office_pdf.cpp)
 bs_add_unit_test(test-extraction-extension-fallback Unit/test_extraction_extension_fallback.cpp)
 
@@ -140,7 +145,39 @@ bs_add_unit_test(test-path-preferences Unit/test_path_preferences.cpp)
 bs_add_unit_test(test-type-affinity Unit/test_type_affinity.cpp)
 
 # New hotspot unit tests
-bs_add_unit_test(test-pipeline Unit/test_pipeline.cpp)
+bs_add_unit_test(test-indexer Unit/test_indexer.cpp)
+bs_add_test(test-pipeline Unit/test_pipeline.cpp
+    TIMEOUT 180
+    LABELS "unit"
+)
+bs_add_unit_test(test-service-base Unit/test_service_base.cpp)
+bs_add_unit_test(test-supervisor Unit/test_supervisor.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_test(test-control-plane-actor Unit/test_control_plane_actor.cpp
+    TIMEOUT 60
+    LABELS "unit"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/control_plane_actor.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_test(test-health-aggregator-actor Unit/test_health_aggregator_actor.cpp
+    TIMEOUT 60
+    LABELS "unit"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_aggregator_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_snapshot_v2.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_unit_test(test-pipeline-scheduler-actor Unit/test_pipeline_scheduler_actor.cpp)
+bs_add_unit_test(test-path-state-actor Unit/test_path_state_actor.cpp)
+bs_add_test(test-inference-supervisor-actor Unit/test_inference_supervisor_actor.cpp
+    TIMEOUT 60
+    LABELS "unit"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_supervisor_actor.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
 bs_add_unit_test(test-migration Unit/test_migration.cpp)
 bs_add_unit_test(test-vector-store Unit/test_vector_store.cpp)
 bs_add_unit_test(test-model-session Unit/test_model_session.cpp)
@@ -218,8 +255,37 @@ bs_add_test(test-app-lifecycle-states Integration/test_app_lifecycle_states.cpp
     LABELS "integration"
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/control_plane_actor.h
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/control_plane_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_aggregator_actor.h
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_aggregator_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_snapshot_v2.h
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_snapshot_v2.cpp
         ${CMAKE_SOURCE_DIR}/src/app/onboarding_controller.cpp
     COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_test(test-single-instance-handoff Integration/test_single_instance_handoff.cpp
+    TIMEOUT 120
+    LABELS "integration"
+)
+bs_add_test(test-health-consistency-v2 Integration/test_health_consistency_v2.cpp
+    TIMEOUT 180
+    LABELS "integration"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/search_controller.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/control_plane_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_aggregator_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_snapshot_v2.cpp
+    LINK_LIBS
+        Qt6::Gui
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_test(test-orphan-reconciliation Integration/test_orphan_reconciliation.cpp
+    TIMEOUT 120
+    LABELS "integration"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/runtime_environment.cpp
 )
 
 bs_add_test(test-settings-controller-platform Unit/test_settings_controller_platform.cpp

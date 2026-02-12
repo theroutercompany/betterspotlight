@@ -56,6 +56,8 @@ void TestExtractorServiceIpc::testExtractorIpcContract()
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 10000;
     launch.connectTimeoutMs = 10000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 5000;
     QVERIFY2(harness.start(launch), "Failed to start extractor service");
 
     {
@@ -154,4 +156,3 @@ void TestExtractorServiceIpc::testExtractorIpcContract()
 
 QTEST_MAIN(TestExtractorServiceIpc)
 #include "test_extractor_service_ipc.moc"
-

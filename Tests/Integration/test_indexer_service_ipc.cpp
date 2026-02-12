@@ -52,6 +52,8 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 10000;
     launch.connectTimeoutMs = 10000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 7000;
     QVERIFY2(harness.start(launch), "Failed to start indexer service");
 
     const auto requestQueueStatus = [&harness](int timeoutMs = 3000) {
@@ -84,12 +86,14 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
     startParams[QStringLiteral("roots")] = roots;
 
     {
-        const QJsonObject response = harness.request(QStringLiteral("startIndexing"), startParams);
+        const QJsonObject response =
+            harness.request(QStringLiteral("startIndexing"), startParams, 15000);
         QVERIFY(bs::test::isResponse(response));
         QVERIFY(bs::test::resultPayload(response).value(QStringLiteral("success")).toBool(false));
     }
     {
-        const QJsonObject response = harness.request(QStringLiteral("startIndexing"), startParams);
+        const QJsonObject response =
+            harness.request(QStringLiteral("startIndexing"), startParams, 15000);
         QVERIFY(bs::test::isError(response));
         QCOMPARE(bs::test::errorPayload(response).value(QStringLiteral("code")).toInt(),
                  static_cast<int>(bs::IpcErrorCode::AlreadyRunning));
@@ -134,11 +138,11 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
         QVERIFY(bs::test::resultPayload(response).value(QStringLiteral("queued")).toBool(false));
     }
 
-    const QJsonObject rebuildFirst = harness.request(QStringLiteral("rebuildAll"));
+    const QJsonObject rebuildFirst = harness.request(QStringLiteral("rebuildAll"), {}, 15000);
     QVERIFY(bs::test::isResponse(rebuildFirst));
     QVERIFY(bs::test::resultPayload(rebuildFirst).contains(QStringLiteral("started")));
 
-    const QJsonObject rebuildSecond = harness.request(QStringLiteral("rebuildAll"));
+    const QJsonObject rebuildSecond = harness.request(QStringLiteral("rebuildAll"), {}, 15000);
     QVERIFY(bs::test::isResponse(rebuildSecond));
     const QJsonObject rebuildSecondResult = bs::test::resultPayload(rebuildSecond);
     QVERIFY(rebuildSecondResult.contains(QStringLiteral("alreadyRunning")));

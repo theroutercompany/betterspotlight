@@ -3,10 +3,124 @@
 #include "core/models/model_manifest.h"
 #include "core/models/model_registry.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QElapsedTimer>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
+#include <QScopeGuard>
+#include <QStandardPaths>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
+
+namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, const QByteArray& value)
+        : key_(key)
+        , oldValue_(qgetenv(key))
+        , hadValue_(!oldValue_.isNull())
+    {
+        qputenv(key_, value);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (hadValue_) {
+            qputenv(key_, oldValue_);
+        } else {
+            qunsetenv(key_);
+        }
+    }
+
+private:
+    const char* key_ = nullptr;
+    QByteArray oldValue_;
+    bool hadValue_ = false;
+};
+
+QString fixtureModelsSourceDir()
+{
+    const QString resolved = bs::ModelRegistry::resolveModelsDir();
+    const QString modelPath =
+        QDir(resolved).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    const QString vocabPath = QDir(resolved).filePath(QStringLiteral("vocab.txt"));
+    if (QFileInfo::exists(modelPath) && QFileInfo::exists(vocabPath)) {
+        return resolved;
+    }
+    return QStringLiteral("/Users/rexliu/betterspotlight/data/models");
+}
+
+bool linkOrCopyFile(const QString& sourcePath, const QString& destPath)
+{
+    QFile::remove(destPath);
+    if (QFile::link(sourcePath, destPath)) {
+        return true;
+    }
+    return QFile::copy(sourcePath, destPath);
+}
+
+bool prepareCrossEncoderFixtureDir(const QString& modelsDir, bool includeAliasFallbackRole)
+{
+    const QString sourceDir = fixtureModelsSourceDir();
+    const QString sourceModel =
+        QDir(sourceDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    const QString sourceVocab = QDir(sourceDir).filePath(QStringLiteral("vocab.txt"));
+    if (!QFileInfo::exists(sourceModel) || !QFileInfo::exists(sourceVocab)) {
+        return false;
+    }
+
+    if (!linkOrCopyFile(sourceModel,
+                        QDir(modelsDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx")))) {
+        return false;
+    }
+    if (!linkOrCopyFile(sourceVocab,
+                        QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
+        return false;
+    }
+
+    QJsonObject crossEntry;
+    crossEntry.insert(QStringLiteral("name"), QStringLiteral("cross-fixture"));
+    crossEntry.insert(QStringLiteral("modelId"), QStringLiteral("cross-fixture-v1"));
+    crossEntry.insert(QStringLiteral("generationId"), QStringLiteral("v1"));
+    crossEntry.insert(QStringLiteral("file"), QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    crossEntry.insert(QStringLiteral("vocab"), QStringLiteral("vocab.txt"));
+    crossEntry.insert(QStringLiteral("tokenizer"), QStringLiteral("wordpiece"));
+    crossEntry.insert(QStringLiteral("task"), QStringLiteral("rerank"));
+    crossEntry.insert(QStringLiteral("inputs"), QJsonArray{
+        QStringLiteral("input_ids"),
+        QStringLiteral("attention_mask"),
+        QStringLiteral("token_type_ids"),
+    });
+    crossEntry.insert(QStringLiteral("outputs"), QJsonArray{
+        QStringLiteral("logits"),
+    });
+
+    QJsonObject models;
+    models.insert(QStringLiteral("cross-encoder"), crossEntry);
+    if (includeAliasFallbackRole) {
+        QJsonObject aliasEntry = crossEntry;
+        aliasEntry.insert(QStringLiteral("file"), QStringLiteral("missing-model.onnx"));
+        aliasEntry.insert(QStringLiteral("fallbackRole"), QStringLiteral("cross-encoder"));
+        models.insert(QStringLiteral("alias-role"), aliasEntry);
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("models"), models);
+
+    QFile manifestFile(QDir(modelsDir).filePath(QStringLiteral("manifest.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    manifestFile.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    manifestFile.close();
+    return true;
+}
+
+} // namespace
 
 class TestModelRegistry : public QObject {
     Q_OBJECT
@@ -16,6 +130,12 @@ private slots:
     void testManifestMissingFile();
     void testManifestInvalidJson();
     void testRegistryGetSessionUnknownRole();
+
+private:
+    void runResolveModelsDirUsesEnvOverride();
+    void runGetSessionFallbackRoleAndPreload();
+    void runGetSessionFallbackCycleStops();
+    void runEnsureWritableModelsSeeded();
 };
 
 void TestModelRegistry::testManifestParsing()
@@ -145,6 +265,130 @@ void TestModelRegistry::testRegistryGetSessionUnknownRole()
     // Verify hasModel works
     QVERIFY(registry.hasModel("bi-encoder"));
     QVERIFY(!registry.hasModel("unknown-role"));
+
+    // Execute additional registry behavior scenarios from an existing slot to
+    // avoid stale Qt moc slot metadata in incremental test builds.
+    runResolveModelsDirUsesEnvOverride();
+    runGetSessionFallbackRoleAndPreload();
+    runGetSessionFallbackCycleStops();
+    runEnsureWritableModelsSeeded();
+}
+
+void TestModelRegistry::runResolveModelsDirUsesEnvOverride()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    QFile manifestFile(tempDir.path() + QStringLiteral("/manifest.json"));
+    QVERIFY(manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    manifestFile.write("{\"models\":{}}");
+    manifestFile.close();
+
+    ScopedEnvVar envModelsDir("BETTERSPOTLIGHT_MODELS_DIR", tempDir.path().toUtf8());
+    const QString resolved = bs::ModelRegistry::resolveModelsDir();
+    QCOMPARE(QDir::cleanPath(resolved), QDir::cleanPath(tempDir.path()));
+}
+
+void TestModelRegistry::runGetSessionFallbackRoleAndPreload()
+{
+    QTemporaryDir modelsDir;
+    QVERIFY(modelsDir.isValid());
+    QVERIFY2(prepareCrossEncoderFixtureDir(modelsDir.path(), /*includeAliasFallbackRole=*/true),
+             "Failed to prepare fixture models directory");
+
+    ScopedEnvVar disableCoreMl("BETTERSPOTLIGHT_DISABLE_COREML", QByteArrayLiteral("1"));
+
+    bs::ModelRegistry registry(modelsDir.path());
+    QVERIFY(registry.hasModel("cross-encoder"));
+    QVERIFY(registry.hasModel("alias-role"));
+
+    bs::ModelSession* aliasSession = registry.getSession("alias-role");
+    QVERIFY(aliasSession != nullptr);
+
+    bs::ModelSession* directSession = registry.getSession("cross-encoder");
+    QVERIFY(directSession != nullptr);
+    QCOMPARE(aliasSession, directSession);
+
+    registry.preload({"cross-encoder", "alias-role", "missing-role"});
+    QCOMPARE(registry.getSession("cross-encoder"), directSession);
+
+    QCOMPARE(QDir::cleanPath(registry.modelsDir()), QDir::cleanPath(modelsDir.path()));
+    QVERIFY(registry.manifest().models.find("cross-encoder") != registry.manifest().models.end());
+}
+
+void TestModelRegistry::runGetSessionFallbackCycleStops()
+{
+    QTemporaryDir modelsDir;
+    QVERIFY(modelsDir.isValid());
+
+    QJsonObject cycleA;
+    cycleA.insert(QStringLiteral("name"), QStringLiteral("cycle-a"));
+    cycleA.insert(QStringLiteral("file"), QStringLiteral("missing-a.onnx"));
+    cycleA.insert(QStringLiteral("fallbackRole"), QStringLiteral("role-b"));
+
+    QJsonObject cycleB;
+    cycleB.insert(QStringLiteral("name"), QStringLiteral("cycle-b"));
+    cycleB.insert(QStringLiteral("file"), QStringLiteral("missing-b.onnx"));
+    cycleB.insert(QStringLiteral("fallbackRole"), QStringLiteral("role-a"));
+
+    QJsonObject models;
+    models.insert(QStringLiteral("role-a"), cycleA);
+    models.insert(QStringLiteral("role-b"), cycleB);
+
+    QJsonObject root;
+    root.insert(QStringLiteral("models"), models);
+
+    QFile manifestFile(modelsDir.path() + QStringLiteral("/manifest.json"));
+    QVERIFY(manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    manifestFile.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    manifestFile.close();
+
+    bs::ModelRegistry registry(modelsDir.path());
+    QElapsedTimer timer;
+    timer.start();
+    bs::ModelSession* session = registry.getSession("role-a");
+    QVERIFY(session == nullptr);
+    QVERIFY(timer.elapsed() < 2000);
+}
+
+void TestModelRegistry::runEnsureWritableModelsSeeded()
+{
+    QStandardPaths::setTestModeEnabled(true);
+
+    const QString sourceDir = QDir::cleanPath(
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../Resources/models"));
+    QVERIFY(QDir().mkpath(sourceDir));
+
+    QFile sourceManifest(sourceDir + QStringLiteral("/manifest.json"));
+    QVERIFY(sourceManifest.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    sourceManifest.write("{\"models\":{}}");
+    sourceManifest.close();
+
+    QString error;
+    QVERIFY(bs::ModelRegistry::ensureWritableModelsSeeded(&error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    const QString writable = bs::ModelRegistry::writableModelsDir();
+    const QString manifestPath = writable + QStringLiteral("/manifest.json");
+    const QString vocabPath = writable + QStringLiteral("/vocab.txt");
+    QVERIFY(QFileInfo::exists(manifestPath));
+    QVERIFY(QFileInfo(manifestPath).size() > 0);
+
+    // Force reseed path by truncating a required file to zero bytes.
+    QFile manifestFile(manifestPath);
+    QVERIFY(manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    manifestFile.close();
+    QCOMPARE(QFileInfo(manifestPath).size(), 0LL);
+
+    QVERIFY(bs::ModelRegistry::ensureWritableModelsSeeded(&error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(QFileInfo(manifestPath).size() > 0);
+
+    // Optional artifacts may be absent on some hosts; when present they should
+    // never be zero-sized after seeding.
+    if (QFileInfo::exists(vocabPath)) {
+        QVERIFY(QFileInfo(vocabPath).size() > 0);
+    }
 }
 
 QTEST_MAIN(TestModelRegistry)

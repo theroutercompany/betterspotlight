@@ -4,19 +4,51 @@
 
 #include <sqlite3.h>
 
+#include <QDir>
+#include <QTemporaryDir>
+
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 class TestVectorStore : public QObject {
     Q_OBJECT
 
 private slots:
+    void testNullDatabaseGuardClauses();
     void testMappingLifecycleAndGenerations();
     void testSetActiveGenerationCreatesDefaultState();
     void testLegacySchemaMigrationPath();
     void testRejectsInvalidMappingArguments();
     void testGetAllMappingsAndClearAll();
+    void testCorruptNegativeLabelRowsAreIgnored();
+    void testGenerationStateActivationFlow();
+    void testReadOnlyDatabaseRejectsMutationsGracefully();
+    void testListGenerationStatesHandlesMissingTable();
 };
+
+void TestVectorStore::testNullDatabaseGuardClauses()
+{
+    bs::VectorStore store(nullptr);
+
+    QVERIFY(!store.addMapping(1, 1, "m", "v1", 1, "cpu", 0, "active"));
+    QVERIFY(!store.removeMapping(1));
+    QVERIFY(!store.removeGeneration("v1"));
+    QCOMPARE(store.countMappings(), 0);
+    QCOMPARE(store.countMappingsForGeneration("v1"), 0);
+    QVERIFY(!store.getLabel(1).has_value());
+    QVERIFY(!store.getItemId(1).has_value());
+    QVERIFY(store.getAllMappings().empty());
+    QVERIFY(store.listGenerationStates().empty());
+    QVERIFY(!store.activeGenerationState().has_value());
+    QCOMPARE(store.activeGenerationId(), std::string("v1"));
+    QVERIFY(!store.setActiveGeneration("v2"));
+    QVERIFY(!store.clearAll());
+
+    bs::VectorStore::GenerationState invalid;
+    invalid.generationId = "";
+    QVERIFY(!store.upsertGenerationState(invalid));
+}
 
 void TestVectorStore::testMappingLifecycleAndGenerations()
 {
@@ -149,6 +181,137 @@ void TestVectorStore::testGetAllMappingsAndClearAll()
     QVERIFY(store.clearAll());
     QCOMPARE(store.countMappings(), 0);
     QVERIFY(store.getAllMappings().empty());
+
+    sqlite3_close(db);
+}
+
+void TestVectorStore::testCorruptNegativeLabelRowsAreIgnored()
+{
+    sqlite3* db = nullptr;
+    QCOMPARE(sqlite3_open(":memory:", &db), SQLITE_OK);
+    QVERIFY(db != nullptr);
+
+    bs::VectorStore store(db);
+    QVERIFY(store.addMapping(10, 110, "model-a", "v1", 384, "cpu", 0, "active"));
+
+    // Inject corrupt legacy row directly; production code should defensively ignore it.
+    QCOMPARE(sqlite3_exec(
+                 db,
+                 "INSERT INTO vector_map ("
+                 "item_id, hnsw_label, generation_id, model_id, dimensions, provider, "
+                 "passage_ordinal, embedded_at, migration_state"
+                 ") VALUES (999, -7, 'v1', 'legacy', 384, 'cpu', 0, 0, 'active');",
+                 nullptr, nullptr, nullptr),
+             SQLITE_OK);
+
+    QVERIFY(!store.getLabel(999, "v1").has_value());
+    const auto mappings = store.getAllMappings("v1");
+    const auto it = std::find_if(mappings.begin(), mappings.end(), [](const auto& pair) {
+        return pair.first == 999;
+    });
+    QVERIFY(it == mappings.end());
+
+    sqlite3_close(db);
+}
+
+void TestVectorStore::testGenerationStateActivationFlow()
+{
+    sqlite3* db = nullptr;
+    QCOMPARE(sqlite3_open(":memory:", &db), SQLITE_OK);
+    QVERIFY(db != nullptr);
+
+    bs::VectorStore store(db);
+
+    bs::VectorStore::GenerationState v2;
+    v2.generationId = "v2";
+    v2.modelId = "model-v2";
+    v2.dimensions = 768;
+    v2.provider = "cpu";
+    v2.state = "building";
+    v2.progressPct = 25.0;
+    v2.active = true;
+    QVERIFY(store.upsertGenerationState(v2));
+    QCOMPARE(store.activeGenerationId(), std::string("v2"));
+
+    bs::VectorStore::GenerationState v3;
+    v3.generationId = "v3";
+    v3.modelId = "model-v3";
+    v3.dimensions = 1024;
+    v3.provider = "cpu";
+    v3.state = "building";
+    v3.progressPct = 10.0;
+    v3.active = false;
+    QVERIFY(store.upsertGenerationState(v3));
+
+    const auto states = store.listGenerationStates();
+    QVERIFY(states.size() >= 3); // includes default v1
+    const auto activeState = store.activeGenerationState();
+    QVERIFY(activeState.has_value());
+    QCOMPARE(activeState->generationId, std::string("v2"));
+
+    QVERIFY(store.setActiveGeneration("v3"));
+    QCOMPARE(store.activeGenerationId(), std::string("v3"));
+    const auto activeStateAfterSwitch = store.activeGenerationState();
+    QVERIFY(activeStateAfterSwitch.has_value());
+    QCOMPARE(activeStateAfterSwitch->generationId, std::string("v3"));
+
+    sqlite3_close(db);
+}
+
+void TestVectorStore::testReadOnlyDatabaseRejectsMutationsGracefully()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("vector.db"));
+
+    sqlite3* rwDb = nullptr;
+    QCOMPARE(sqlite3_open(dbPath.toUtf8().constData(), &rwDb), SQLITE_OK);
+    QVERIFY(rwDb != nullptr);
+    {
+        bs::VectorStore seeded(rwDb);
+        QVERIFY(seeded.addMapping(1, 11, "model", "v1", 384, "cpu", 0, "active"));
+    }
+    sqlite3_close(rwDb);
+
+    sqlite3* roDb = nullptr;
+    QCOMPARE(sqlite3_open_v2(dbPath.toUtf8().constData(),
+                             &roDb,
+                             SQLITE_OPEN_READONLY,
+                             nullptr),
+             SQLITE_OK);
+    QVERIFY(roDb != nullptr);
+
+    bs::VectorStore store(roDb);
+    bs::VectorStore::GenerationState update;
+    update.generationId = "v2";
+    update.modelId = "model-v2";
+    update.dimensions = 768;
+    update.provider = "cpu";
+    update.state = "building";
+    update.progressPct = 10.0;
+    update.active = true;
+
+    QVERIFY(!store.upsertGenerationState(update));
+    QVERIFY(!store.setActiveGeneration("v2"));
+
+    sqlite3_close(roDb);
+}
+
+void TestVectorStore::testListGenerationStatesHandlesMissingTable()
+{
+    sqlite3* db = nullptr;
+    QCOMPARE(sqlite3_open(":memory:", &db), SQLITE_OK);
+    QVERIFY(db != nullptr);
+
+    bs::VectorStore store(db);
+    QCOMPARE(sqlite3_exec(db,
+                          "DROP TABLE vector_generation_state;",
+                          nullptr, nullptr, nullptr),
+             SQLITE_OK);
+
+    const auto states = store.listGenerationStates();
+    QVERIFY(states.empty());
+    QVERIFY(!store.activeGenerationState().has_value());
 
     sqlite3_close(db);
 }

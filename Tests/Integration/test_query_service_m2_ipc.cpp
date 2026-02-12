@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -133,6 +134,8 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 8000;
     QVERIFY2(harness.start(launch), "Failed to start query service");
 
     {
@@ -153,13 +156,23 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     }
     {
         QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("bad-id");
+        params[QStringLiteral("selectedItemId")] = -4;
+        const QJsonObject response = harness.request(QStringLiteral("record_interaction"), params);
+        QVERIFY(bs::test::isError(response));
+        QCOMPARE(bs::test::errorPayload(response).value(QStringLiteral("code")).toInt(),
+                 static_cast<int>(bs::IpcErrorCode::InvalidParams));
+    }
+    {
+        QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("report");
         params[QStringLiteral("selectedItemId")] = seededItemId;
         params[QStringLiteral("selectedPath")] = seededPath;
         params[QStringLiteral("matchType")] = QStringLiteral("exact");
         params[QStringLiteral("resultPosition")] = 1;
         params[QStringLiteral("frontmostApp")] = QStringLiteral("Finder");
-        const QJsonObject response = harness.request(QStringLiteral("record_interaction"), params);
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_interaction"), params, 10000);
         QVERIFY(bs::test::isResponse(response));
         QVERIFY(bs::test::resultPayload(response).value(QStringLiteral("recorded")).toBool(false));
     }
@@ -170,6 +183,15 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         const QJsonObject response = harness.request(QStringLiteral("get_path_preferences"), params);
         QVERIFY(bs::test::isResponse(response));
         QVERIFY(bs::test::resultPayload(response).value(QStringLiteral("directories")).isArray());
+    }
+    {
+        QJsonObject params;
+        params[QStringLiteral("limit")] = 999;
+        const QJsonObject response = harness.request(QStringLiteral("get_path_preferences"), params);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonArray directories =
+            bs::test::resultPayload(response).value(QStringLiteral("directories")).toArray();
+        QVERIFY(directories.size() <= 200);
     }
 
     {
@@ -197,10 +219,45 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(result.value(QStringLiteral("count")).toInt() >= 1);
     }
 
+    bs::test::ServiceProcessHarness inferenceHarness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig inferenceLaunch;
+    inferenceLaunch.homeDir = tempHome.path();
+    inferenceLaunch.dataDir = dataDir;
+    inferenceLaunch.env.insert(
+        QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    inferenceLaunch.env.insert(
+        QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    inferenceLaunch.startTimeoutMs = 15000;
+    inferenceLaunch.connectTimeoutMs = 15000;
+    inferenceLaunch.readyTimeoutMs = 30000;
+    inferenceLaunch.requestDefaultTimeoutMs = 7000;
+    QVERIFY2(inferenceHarness.start(inferenceLaunch),
+             "Failed to start inference service for rebuild-offload coverage");
+    {
+        bool inferenceReady = false;
+        QElapsedTimer waitTimer;
+        waitTimer.start();
+        while (waitTimer.elapsed() < 5000) {
+            const QJsonObject healthResponse =
+                inferenceHarness.request(QStringLiteral("get_inference_health"), {}, 1500);
+            if (bs::test::isResponse(healthResponse)) {
+                inferenceReady = true;
+                break;
+            }
+            QTest::qWait(100);
+        }
+        QVERIFY2(inferenceReady, "Inference service did not become ready before rebuild");
+    }
+
     QJsonObject rebuildParams;
     QJsonArray includePaths;
+    includePaths.append(docsDir.path() + QStringLiteral("/"));
+    includePaths.append(QString());
     includePaths.append(docsDir.path());
+    includePaths.append(QDir(docsDir.path()).filePath(QStringLiteral("sub/..")));
     rebuildParams[QStringLiteral("includePaths")] = includePaths;
+    rebuildParams[QStringLiteral("targetGeneration")] = QStringLiteral("  v9  ");
 
     const QJsonObject rebuildResponse =
         harness.request(QStringLiteral("rebuild_vector_index"), rebuildParams, 15000);
@@ -209,6 +266,8 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     QVERIFY(rebuildResult.value(QStringLiteral("started")).toBool(false));
     QVERIFY(!rebuildResult.value(QStringLiteral("alreadyRunning")).toBool(true));
     QVERIFY(rebuildResult.value(QStringLiteral("runId")).toInteger(0) > 0);
+    QCOMPARE(rebuildResult.value(QStringLiteral("targetGeneration")).toString(),
+             QStringLiteral("v9"));
 
     const QJsonObject secondResponse =
         harness.request(QStringLiteral("rebuildVectorIndex"), rebuildParams, 5000);
@@ -241,6 +300,55 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     QVERIFY(finalStatus == QStringLiteral("running") || finalStatus == QStringLiteral("succeeded"));
     QVERIFY(indexHealth.value(QStringLiteral("vectorRebuildProcessed")).toInt() >= 2);
     QVERIFY(indexHealth.value(QStringLiteral("vectorRebuildEmbedded")).toInt() >= 2);
+
+    QTemporaryDir tempHomeNoFake;
+    QTemporaryDir fakeModelsDir;
+    QVERIFY(tempHomeNoFake.isValid());
+    QVERIFY(fakeModelsDir.isValid());
+
+    const QString dataDirNoFake =
+        QDir(tempHomeNoFake.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDirNoFake));
+
+    const QString manifestPath = QDir(fakeModelsDir.path()).filePath(QStringLiteral("manifest.json"));
+    {
+        QFile manifest(manifestPath);
+        QVERIFY(manifest.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        const QJsonObject models{
+            {QStringLiteral("bi-encoder"),
+             QJsonObject{
+                 {QStringLiteral("name"), QStringLiteral("broken-model")},
+                 {QStringLiteral("file"), QStringLiteral("missing.onnx")},
+                 {QStringLiteral("dimensions"), 384},
+                 {QStringLiteral("generationId"), QStringLiteral("v2")},
+             }},
+        };
+        const QJsonObject root{{QStringLiteral("models"), models}};
+        manifest.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+        manifest.close();
+    }
+
+    bs::test::ServiceProcessHarness noFakeHarness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig noFakeLaunch;
+    noFakeLaunch.homeDir = tempHomeNoFake.path();
+    noFakeLaunch.dataDir = dataDirNoFake;
+    noFakeLaunch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), fakeModelsDir.path());
+    noFakeLaunch.startTimeoutMs = 15000;
+    noFakeLaunch.connectTimeoutMs = 15000;
+    noFakeLaunch.readyTimeoutMs = 30000;
+    noFakeLaunch.requestDefaultTimeoutMs = 8000;
+    QVERIFY2(noFakeHarness.start(noFakeLaunch), "Failed to start no-fake query service");
+
+    QJsonObject noFakeParams;
+    QJsonArray noFakePaths;
+    noFakePaths.append(docsDir.path());
+    noFakeParams[QStringLiteral("includePaths")] = noFakePaths;
+    const QJsonObject unsupportedResponse =
+        noFakeHarness.request(QStringLiteral("rebuild_vector_index"), noFakeParams, 8000);
+    QVERIFY(bs::test::isError(unsupportedResponse));
+    QCOMPARE(bs::test::errorPayload(unsupportedResponse).value(QStringLiteral("code")).toInt(),
+             static_cast<int>(bs::IpcErrorCode::Unsupported));
 }
 
 QTEST_MAIN(TestQueryServiceM2Ipc)

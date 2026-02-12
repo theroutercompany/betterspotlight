@@ -31,8 +31,12 @@ void TestInferenceServiceIpc::testInferenceIpcContract()
     bs::test::ServiceLaunchConfig launch;
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
     launch.startTimeoutMs = 20000;
     launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 7000;
     QVERIFY2(harness.start(launch), "Failed to start inference service");
 
     {

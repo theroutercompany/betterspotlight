@@ -1,13 +1,21 @@
 #include <QtTest/QtTest>
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
+#include <QFile>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QRandomGenerator>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include "core/ipc/message.h"
 #include "core/ipc/socket_client.h"
 #include "core/ipc/socket_server.h"
 #include "core/ipc/supervisor.h"
+
+#include <memory>
+#include <vector>
 
 class TestIpcReliability : public QObject {
     Q_OBJECT
@@ -17,8 +25,22 @@ private slots:
     void testReadBufferCapServer();
     void testAutoReconnectOnDisconnect();
     void testAutoReconnectMaxAttempts();
+    void testSocketServerCloseWithActiveClients_NoUAF();
+    void testSocketServerDisconnectRace_IdempotentCleanup();
+    void testSocketClientRepeatedConnectAttempts_RecoversFromErrorState();
     void testSupervisorCrashWindowReset();
 };
+
+namespace {
+
+QString makeShortSocketPath(const QString& tag)
+{
+    const QString token = QString::number(QRandomGenerator::global()->generate(), 16);
+    return QDir(QDir::tempPath()).filePath(
+        QStringLiteral("bs-%1-%2.sock").arg(tag.left(6), token.left(8)));
+}
+
+} // namespace
 
 void TestIpcReliability::testReadBufferCapClient()
 {
@@ -151,6 +173,96 @@ void TestIpcReliability::testAutoReconnectMaxAttempts()
 
     client.disableAutoReconnect();
     client.disconnect();
+}
+
+void TestIpcReliability::testSocketServerCloseWithActiveClients_NoUAF()
+{
+    const QString socketPath = makeShortSocketPath(QStringLiteral("close"));
+    QFile::remove(socketPath);
+
+    bs::SocketServer server;
+    server.setRequestHandler([](const QJsonObject& request) {
+        const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
+        return bs::IpcMessage::makeResponse(id, QJsonObject{{QStringLiteral("ok"), true}});
+    });
+    QVERIFY(server.listen(socketPath));
+
+    std::vector<std::unique_ptr<bs::SocketClient>> clients;
+    clients.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+        auto client = std::make_unique<bs::SocketClient>();
+        QVERIFY(client->connectToServer(socketPath, 3000));
+        clients.push_back(std::move(client));
+    }
+
+    for (const auto& client : clients) {
+        QVERIFY(client->isConnected());
+    }
+
+    server.close();
+    server.close(); // idempotent close path should be safe
+    QVERIFY(!server.isListening());
+
+    for (const auto& client : clients) {
+        client->disconnect();
+        QVERIFY(!client->isConnected());
+    }
+    QFile::remove(socketPath);
+}
+
+void TestIpcReliability::testSocketServerDisconnectRace_IdempotentCleanup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString socketPath = dir.path() + "/test_disconnect_race.sock";
+
+    bs::SocketServer server;
+    server.setRequestHandler([](const QJsonObject& request) {
+        const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
+        return bs::IpcMessage::makeResponse(id, QJsonObject{{QStringLiteral("ok"), true}});
+    });
+    QVERIFY(server.listen(socketPath));
+
+    QSignalSpy connectedSpy(&server, &bs::SocketServer::clientConnected);
+    QSignalSpy disconnectedSpy(&server, &bs::SocketServer::clientDisconnected);
+
+    bs::SocketClient client;
+    QVERIFY(client.connectToServer(socketPath, 3000));
+    if (connectedSpy.count() == 0) {
+        QVERIFY(connectedSpy.wait(3000));
+    }
+
+    // Exercise repeated disconnect/close transitions; cleanup should stay idempotent.
+    client.disconnect();
+    client.disconnect();
+    server.close();
+    server.close();
+
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    QVERIFY(disconnectedSpy.count() <= 1);
+}
+
+void TestIpcReliability::testSocketClientRepeatedConnectAttempts_RecoversFromErrorState()
+{
+    const QString socketPath = makeShortSocketPath(QStringLiteral("reconn"));
+    QFile::remove(socketPath);
+
+    bs::SocketClient client;
+    for (int i = 0; i < 8; ++i) {
+        QVERIFY(!client.connectToServer(socketPath, 100));
+        QVERIFY(!client.isConnected());
+    }
+
+    QLocalServer server;
+    QVERIFY(server.listen(socketPath));
+
+    QVERIFY2(client.connectToServer(socketPath, 3000),
+             "Client should recover after repeated failed connect attempts");
+    QVERIFY(client.isConnected());
+
+    client.disconnect();
+    server.close();
+    QFile::remove(socketPath);
 }
 
 void TestIpcReliability::testSupervisorCrashWindowReset()

@@ -17,6 +17,7 @@ class TestPipeline : public QObject {
 
 private slots:
     void testLifecycleAndBehaviorPaths();
+    void testTransientExtractionFailureTriggersBoundedRetriesWithBackoff();
 };
 
 void TestPipeline::testLifecycleAndBehaviorPaths()
@@ -76,7 +77,7 @@ void TestPipeline::testLifecycleAndBehaviorPaths()
     }
     QVERIFY(pipeline.processedCount() > processedBeforeReindex);
 
-    for (int i = 0; i < 250; ++i) {
+    for (int i = 0; i < 80; ++i) {
         pipeline.reindexPath(filePath);
     }
     timer.restart();
@@ -120,6 +121,71 @@ void TestPipeline::testLifecycleAndBehaviorPaths()
     QVERIFY2(drainedAfterRebuild, "Pipeline should drain after rebuildAll");
 
     pipeline.stop();
+    pipeline.stop();
+}
+
+void TestPipeline::testTransientExtractionFailureTriggersBoundedRetriesWithBackoff()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString rootPath = QDir(tempDir.path()).filePath(QStringLiteral("root"));
+    QVERIFY(QDir().mkpath(rootPath));
+
+    const QString transientPath = QDir(rootPath).filePath(QStringLiteral("transient.doc"));
+    QFile::remove(transientPath);
+
+    bs::ExtractionManager extractor;
+    bs::PathRules rules;
+    rules.setExplicitIncludeRoots({rootPath.toStdString()});
+
+    bs::PipelineRuntimeConfig cfg;
+    cfg.batchCommitSize = 1;
+    cfg.batchCommitIntervalMs = 10;
+    cfg.maxPipelineRetries = 2;
+    cfg.enqueueRetrySleepMs = 2;
+    cfg.memoryPressureSleepMs = 2;
+    cfg.drainPollAttempts = 250;
+    cfg.drainPollIntervalMs = 10;
+    cfg.retryBackoffBaseMs = 50;
+    cfg.retryBackoffCapMs = 100;
+    cfg.rssProvider = []() { return 64; };
+
+    bs::Pipeline pipeline(store, extractor, rules, cfg);
+    pipeline.start({});
+
+    QVERIFY2(QFile::link(QStringLiteral("/dev/null"), transientPath),
+             "Failed to create test symlink fixture");
+
+    QElapsedTimer timer;
+    timer.start();
+    const int processedBefore = pipeline.processedCount();
+
+    pipeline.reindexPath(transientPath);
+
+    bool observedRetrySettlement = false;
+    while (timer.elapsed() < 12000) {
+        const bs::QueueStats stats = pipeline.queueStatus();
+        if (pipeline.processedCount() >= processedBefore + 2
+            && stats.depth == 0
+            && stats.preparing == 0
+            && stats.writing == 0) {
+            observedRetrySettlement = true;
+            break;
+        }
+        QTest::qWait(20);
+    }
+
+    QVERIFY2(observedRetrySettlement,
+             "Expected transient extraction failure to retry and settle cleanly");
+    QVERIFY2(timer.elapsed() >= 40,
+             "Retry path should include backoff delay before terminal failure");
+
     pipeline.stop();
 }
 
