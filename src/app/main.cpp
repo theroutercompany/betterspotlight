@@ -5,6 +5,7 @@
 #include "settings_controller.h"
 #include "status_bar_bridge.h"
 #include "update_manager.h"
+#include "core/models/model_registry.h"
 #include "core/shared/logging.h"
 
 #include <QApplication>
@@ -97,6 +98,17 @@ int main(int argc, char* argv[])
     app.setOrganizationDomain(QStringLiteral("com.betterspotlight"));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon_master.png")));
 
+    // Always run from a writable model cache to keep the bundle lean.
+    if (!qEnvironmentVariableIsSet("BETTERSPOTLIGHT_MODELS_DIR")) {
+        const QString writableModelsDir = bs::ModelRegistry::writableModelsDir();
+        QString seedError;
+        if (!bs::ModelRegistry::ensureWritableModelsSeeded(&seedError)) {
+            qWarning() << "Model bootstrap warning:" << seedError;
+        }
+        qputenv("BETTERSPOTLIGHT_MODELS_DIR", writableModelsDir.toUtf8());
+        qInfo() << "Using writable models dir:" << writableModelsDir;
+    }
+
     // Critical: app runs in background as a status bar app -- no dock icon,
     // no quit when last window closes.
     app.setQuitOnLastWindowClosed(false);
@@ -169,13 +181,13 @@ int main(int argc, char* argv[])
     // --- Set up the system tray icon (C++ for reliability on macOS) ---
 
     QSystemTrayIcon trayIcon;
-    const QIcon idleTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_idle.png"),
+    const QIcon idleTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_idle_v2.png"),
                                              TrayGlyphVariant::Idle);
-    const QIcon indexingTrayIconA = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_a.png"),
+    const QIcon indexingTrayIconA = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_a_v2.png"),
                                                   TrayGlyphVariant::IndexingA);
-    const QIcon indexingTrayIconB = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_b.png"),
+    const QIcon indexingTrayIconB = trayStateIcon(QStringLiteral(":/icons/menubar_indexing_b_v2.png"),
                                                   TrayGlyphVariant::IndexingB);
-    const QIcon errorTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_error.png"),
+    const QIcon errorTrayIcon = trayStateIcon(QStringLiteral(":/icons/menubar_error_v2.png"),
                                               TrayGlyphVariant::Error);
     trayIcon.setIcon(indexingTrayIconA);
     trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Starting services"));
@@ -293,10 +305,18 @@ int main(int argc, char* argv[])
                              7000);
     });
 
-    // Gate initial indexing until services are ready and onboarding is complete.
+    // Gate service start and initial indexing on onboarding completion.
     bool servicesReady = false;
     bool onboardingDone = !onboardingController.needsOnboarding();
+    bool servicesStarted = false;
     bool initialIndexingTriggered = false;
+    const auto ensureServicesStarted = [&]() {
+        if (servicesStarted) {
+            return;
+        }
+        serviceManager.start();
+        servicesStarted = true;
+    };
     const auto maybeStartInitialIndexing = [&]() {
         if (initialIndexingTriggered || !servicesReady || !onboardingDone) {
             return;
@@ -312,12 +332,14 @@ int main(int argc, char* argv[])
     QObject::connect(&onboardingController, &bs::OnboardingController::onboardingCompleted,
                      &app, [&]() {
         onboardingDone = true;
+        ensureServicesStarted();
         maybeStartInitialIndexing();
     });
 
-    // --- Start services ---
-
-    serviceManager.start();
+    // --- Start services only when onboarding is already complete ---
+    if (onboardingDone) {
+        ensureServicesStarted();
+    }
 
     qInfo() << "BetterSpotlight ready";
 

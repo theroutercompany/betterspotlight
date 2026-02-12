@@ -206,7 +206,7 @@ Item {
             Button {
                 Layout.preferredWidth: 160
                 Layout.preferredHeight: 40
-                text: qsTr("Start Indexing")
+                text: qsTr("Continue")
 
                 contentItem: Label {
                     text: parent.text

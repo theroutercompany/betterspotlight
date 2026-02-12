@@ -42,7 +42,8 @@ Window {
                         model: [
                             qsTr("Welcome"),
                             qsTr("Full Disk Access"),
-                            qsTr("Home Folders")
+                            qsTr("Home Folders"),
+                            qsTr("Models")
                         ]
 
                         delegate: RowLayout {
@@ -108,6 +109,15 @@ Window {
                 HomeMapStep {
                     onBack: {
                         currentStep = 1
+                    }
+                    onFinished: {
+                        currentStep = 3
+                    }
+                }
+
+                ModelSetupStep {
+                    onBack: {
+                        currentStep = 2
                     }
                     onFinished: {
                         onboardingControllerObj.completeOnboarding()

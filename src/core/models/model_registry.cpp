@@ -5,9 +5,59 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QProcessEnvironment>
+#include <QStandardPaths>
 
 namespace bs {
+
+namespace {
+
+QStringList modelDirCandidates(bool includeEnvOverride)
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList candidates;
+
+    if (includeEnvOverride) {
+        const QString envModelDir =
+            QProcessEnvironment::systemEnvironment().value(
+                QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
+        if (!envModelDir.isEmpty()) {
+            candidates << QDir::cleanPath(envModelDir);
+        }
+    }
+
+    candidates << QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"));
+    candidates << QDir::cleanPath(
+        appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"));
+    candidates << QDir::cleanPath(
+        appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"));
+    candidates << QDir::cleanPath(appDir + QStringLiteral("/../../../../data/models"));
+
+#ifdef BETTERSPOTLIGHT_SOURCE_DIR
+    candidates << QDir::cleanPath(QString::fromUtf8(BETTERSPOTLIGHT_SOURCE_DIR)
+                                  + QStringLiteral("/data/models"));
+#endif
+
+    candidates.removeDuplicates();
+    return candidates;
+}
+
+bool copyIfMissing(const QString& sourcePath, const QString& destPath)
+{
+    const QFileInfo destInfo(destPath);
+    if (destInfo.exists() && destInfo.isReadable() && destInfo.size() > 0) {
+        return true;
+    }
+    if (!QFileInfo::exists(sourcePath)) {
+        return false;
+    }
+    QDir().mkpath(QFileInfo(destPath).absolutePath());
+    QFile::remove(destPath);
+    return QFile::copy(sourcePath, destPath);
+}
+
+} // namespace
 
 ModelRegistry::ModelRegistry(const QString& modelsDir)
     : m_modelsDir(modelsDir)
@@ -87,26 +137,7 @@ void ModelRegistry::preload(const std::vector<std::string>& roles)
 QString ModelRegistry::resolveModelsDir()
 {
     const QString appDir = QCoreApplication::applicationDirPath();
-
-    QStringList candidates;
-
-    const QString envModelDir =
-        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
-    if (!envModelDir.isEmpty()) {
-        candidates << QDir::cleanPath(envModelDir);
-    }
-
-    candidates << QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"));
-    candidates << QDir::cleanPath(appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models"));
-    candidates << QDir::cleanPath(appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models"));
-    candidates << QDir::cleanPath(appDir + QStringLiteral("/../../../../data/models"));
-
-#ifdef BETTERSPOTLIGHT_SOURCE_DIR
-    candidates << QDir::cleanPath(QString::fromUtf8(BETTERSPOTLIGHT_SOURCE_DIR)
-                                  + QStringLiteral("/data/models"));
-#endif
-
-    candidates.removeDuplicates();
+    const QStringList candidates = modelDirCandidates(/*includeEnvOverride=*/true);
 
     for (const QString& dir : candidates) {
         const QString manifestPath = dir + QStringLiteral("/manifest.json");
@@ -133,6 +164,73 @@ const ModelManifest& ModelRegistry::manifest() const
 const QString& ModelRegistry::modelsDir() const
 {
     return m_modelsDir;
+}
+
+QString ModelRegistry::writableModelsDir()
+{
+    return QDir::cleanPath(
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/models"));
+}
+
+bool ModelRegistry::ensureWritableModelsSeeded(QString* errorOut)
+{
+    if (errorOut) {
+        *errorOut = QString();
+    }
+
+    const QString destDir = writableModelsDir();
+    if (!QDir().mkpath(destDir)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create writable model directory: %1")
+                            .arg(destDir);
+        }
+        return false;
+    }
+
+    // Use non-env candidates to avoid self-copying if caller already exported
+    // BETTERSPOTLIGHT_MODELS_DIR.
+    const QStringList sources = modelDirCandidates(/*includeEnvOverride=*/false);
+    QString sourceDir;
+    for (const QString& candidate : sources) {
+        if (QFile::exists(candidate + QStringLiteral("/manifest.json"))) {
+            sourceDir = candidate;
+            break;
+        }
+    }
+    if (sourceDir.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("No source models directory with manifest.json was found");
+        }
+        return false;
+    }
+
+    const QString manifestSrc = sourceDir + QStringLiteral("/manifest.json");
+    const QString manifestDst = destDir + QStringLiteral("/manifest.json");
+    if (!copyIfMissing(manifestSrc, manifestDst)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to seed manifest.json into writable models dir");
+        }
+        return false;
+    }
+
+    // Seed bootstrap artifacts only; larger optional models are downloaded on demand.
+    const QString vocabSrc = sourceDir + QStringLiteral("/vocab.txt");
+    const QString vocabDst = destDir + QStringLiteral("/vocab.txt");
+    if (!copyIfMissing(vocabSrc, vocabDst)) {
+        LOG_WARN(bsCore, "ModelRegistry: vocab seed missing at %s", qPrintable(vocabSrc));
+    }
+
+    const QString smallSrc = sourceDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
+    const QString smallDst = destDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
+    if (!copyIfMissing(smallSrc, smallDst)) {
+        LOG_WARN(bsCore, "ModelRegistry: bootstrap embedding model missing at %s",
+                 qPrintable(smallSrc));
+    }
+
+    LOG_INFO(bsCore, "ModelRegistry: writable model cache ready at %s",
+             qPrintable(destDir));
+    return true;
 }
 
 } // namespace bs

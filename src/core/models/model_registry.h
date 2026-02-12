@@ -45,6 +45,16 @@ public:
     // Falls back to the first candidate if none contain the manifest.
     static QString resolveModelsDir();
 
+    // Default writable model cache location used for first-run downloads.
+    // This is usually:
+    //   ~/Library/Application Support/BetterSpotlight/models
+    static QString writableModelsDir();
+
+    // Seeds the writable model cache with bootstrap artifacts from the best
+    // available source dir (bundle/build/env) so runtime downloads can extend
+    // from a valid manifest without modifying the app bundle.
+    static bool ensureWritableModelsSeeded(QString* errorOut = nullptr);
+
     const ModelManifest& manifest() const;
     const QString& modelsDir() const;
 

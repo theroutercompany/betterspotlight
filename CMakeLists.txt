@@ -52,7 +52,7 @@ option(BETTERSPOTLIGHT_FETCH_MODELS
        ON)
 option(BETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL
        "Fetch the 1024d max-quality embedding model as part of model asset bootstrap"
-       ON)
+       OFF)
 if(APPLE)
     option(BETTERSPOTLIGHT_PREFER_COREML
            "Prefer CoreML execution provider on Apple Silicon when available"

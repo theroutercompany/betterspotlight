@@ -1,9 +1,9 @@
 <RCC>
     <qresource prefix="/icons">
         <file>app_icon_master.png</file>
-        <file>menubar_idle.png</file>
-        <file>menubar_indexing_a.png</file>
-        <file>menubar_indexing_b.png</file>
-        <file>menubar_error.png</file>
+        <file>menubar_idle_v2.png</file>
+        <file>menubar_indexing_a_v2.png</file>
+        <file>menubar_indexing_b_v2.png</file>
+        <file>menubar_error_v2.png</file>
     </qresource>
 </RCC>

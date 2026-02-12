@@ -880,16 +880,16 @@ QString ServiceManager::findServiceBinary(const QString& name) const
 
     QString appDir = QCoreApplication::applicationDirPath();
 
-    // Strategy 1: Same directory as app binary (installed bundle)
-    QString bundlePath = appDir + QStringLiteral("/") + binaryName;
-    if (QFileInfo::exists(bundlePath)) {
-        return bundlePath;
-    }
-
-    // Strategy 2: ../Helpers/ inside the bundle
+    // Strategy 1: ../Helpers/ inside the bundle (release layout)
     QString helpersPath = appDir + QStringLiteral("/../Helpers/") + binaryName;
     if (QFileInfo::exists(helpersPath)) {
         return QFileInfo(helpersPath).canonicalFilePath();
+    }
+
+    // Strategy 2: Same directory as app binary (development fallback)
+    QString bundlePath = appDir + QStringLiteral("/") + binaryName;
+    if (QFileInfo::exists(bundlePath)) {
+        return bundlePath;
     }
 
     // Strategy 3: CMake build directory layout — binaries are in

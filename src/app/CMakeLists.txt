@@ -37,6 +37,7 @@ set_source_files_properties(qml/onboarding/OnboardingWindow.qml PROPERTIES QT_RE
 set_source_files_properties(qml/onboarding/WelcomeStep.qml      PROPERTIES QT_RESOURCE_ALIAS onboarding/WelcomeStep.qml)
 set_source_files_properties(qml/onboarding/FdaStep.qml          PROPERTIES QT_RESOURCE_ALIAS onboarding/FdaStep.qml)
 set_source_files_properties(qml/onboarding/HomeMapStep.qml      PROPERTIES QT_RESOURCE_ALIAS onboarding/HomeMapStep.qml)
+set_source_files_properties(qml/onboarding/ModelSetupStep.qml   PROPERTIES QT_RESOURCE_ALIAS onboarding/ModelSetupStep.qml)
 
 # Component QML files
 set_source_files_properties(qml/components/HotkeyRecorder.qml   PROPERTIES QT_RESOURCE_ALIAS components/HotkeyRecorder.qml)
@@ -56,6 +57,7 @@ qt_add_qml_module(betterspotlight
         qml/onboarding/WelcomeStep.qml
         qml/onboarding/FdaStep.qml
         qml/onboarding/HomeMapStep.qml
+        qml/onboarding/ModelSetupStep.qml
         qml/components/HotkeyRecorder.qml
         qml/components/DirectoryPicker.qml
         qml/components/PatternEditor.qml
@@ -71,6 +73,15 @@ target_link_libraries(betterspotlight PRIVATE
     Qt6::Network
     "-framework Carbon"
     "-framework ServiceManagement"
+)
+
+# Release-grade bundle layout depends on helper binaries existing before app
+# post-build staging.
+add_dependencies(betterspotlight
+    betterspotlight-indexer
+    betterspotlight-extractor
+    betterspotlight-query
+    betterspotlight-inference
 )
 
 if(APPLE AND BETTERSPOTLIGHT_ENABLE_SPARKLE)
@@ -102,5 +113,19 @@ add_custom_command(TARGET betterspotlight POST_BUILD
         -DBS_MODEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}/data/models
         -DBS_MODEL_DEST_DIR=$<TARGET_FILE_DIR:betterspotlight>/../Resources/models
         -P ${CMAKE_SOURCE_DIR}/cmake/sync_embedding_models.cmake
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:betterspotlight>/../Helpers
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:betterspotlight-indexer>
+        $<TARGET_FILE_DIR:betterspotlight>/../Helpers/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:betterspotlight-extractor>
+        $<TARGET_FILE_DIR:betterspotlight>/../Helpers/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:betterspotlight-query>
+        $<TARGET_FILE_DIR:betterspotlight>/../Helpers/
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:betterspotlight-inference>
+        $<TARGET_FILE_DIR:betterspotlight>/../Helpers/
     VERBATIM
 )
