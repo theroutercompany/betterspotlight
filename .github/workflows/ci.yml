@@ -65,6 +65,13 @@ jobs:
             --stop-on-failure \
             --output-on-failure
 
+      - name: Service IPC tests (blocking)
+        run: |
+          ctest --test-dir build-sanitizers \
+            -L "service_ipc" \
+            --stop-on-failure \
+            --output-on-failure
+
       - name: Critical repeat-until-fail
         run: |
           ctest --test-dir build-sanitizers \
