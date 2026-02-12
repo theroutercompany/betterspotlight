@@ -14,6 +14,9 @@ namespace {
 
 constexpr int64_t kMaxFileSizeBytes = 50 * 1024 * 1024;
 constexpr int kExtractorTimeoutMs = 30000;
+constexpr const char* kEnvMdimportPath = "BS_TEST_MDIMPORT_PATH";
+constexpr const char* kEnvMdlsPath = "BS_TEST_MDLS_PATH";
+constexpr const char* kEnvExtractorTimeoutMs = "BS_TEST_MDLS_TIMEOUT_MS";
 
 const QSet<QString>& mdlsSupportedExtensions()
 {
@@ -27,6 +30,27 @@ const QSet<QString>& mdlsSupportedExtensions()
         QStringLiteral("key"),
     };
     return exts;
+}
+
+int extractorTimeoutMs()
+{
+    const QByteArray timeoutOverride = qgetenv(kEnvExtractorTimeoutMs);
+    if (timeoutOverride.isEmpty()) {
+        return kExtractorTimeoutMs;
+    }
+
+    bool ok = false;
+    const int parsed = QString::fromUtf8(timeoutOverride).toInt(&ok);
+    return (ok && parsed > 0) ? parsed : kExtractorTimeoutMs;
+}
+
+QString programPath(const QString& defaultProgramPath, const char* envVar)
+{
+    const QByteArray overrideProgramPath = qgetenv(envVar);
+    if (overrideProgramPath.isEmpty()) {
+        return defaultProgramPath;
+    }
+    return QString::fromUtf8(overrideProgramPath);
 }
 
 QString decodeMdlsEscapes(const QString& input)
@@ -103,6 +127,7 @@ ExtractionResult runProcess(
     const QString& program,
     const QStringList& args,
     const QString& timeoutMessage,
+    int timeoutMs,
     QElapsedTimer& timer)
 {
     QProcess process;
@@ -110,14 +135,14 @@ ExtractionResult runProcess(
 
     ExtractionResult result;
 
-    if (!process.waitForStarted(kExtractorTimeoutMs)) {
+    if (!process.waitForStarted(timeoutMs)) {
         result.status = ExtractionResult::Status::UnsupportedFormat;
         result.errorMessage = QStringLiteral("Failed to start process: %1").arg(program);
         result.durationMs = static_cast<int>(timer.elapsed());
         return result;
     }
 
-    if (!process.waitForFinished(kExtractorTimeoutMs)) {
+    if (!process.waitForFinished(timeoutMs)) {
         process.kill();
         process.waitForFinished();
         result.status = ExtractionResult::Status::Timeout;
@@ -183,11 +208,16 @@ ExtractionResult MdlsTextExtractor::extract(const QString& filePath)
         return result;
     }
 
+    const int timeoutMs = extractorTimeoutMs();
+    const QString mdimportPath = programPath(QStringLiteral("/usr/bin/mdimport"), kEnvMdimportPath);
+    const QString mdlsPath = programPath(QStringLiteral("/usr/bin/mdls"), kEnvMdlsPath);
+
     LOG_DEBUG(bsExtraction, "Running mdimport for %s", qUtf8Printable(filePath));
     ExtractionResult mdimportResult = runProcess(
-        QStringLiteral("/usr/bin/mdimport"),
+        mdimportPath,
         {filePath},
         QStringLiteral("mdimport timed out"),
+        timeoutMs,
         timer);
 
     if (mdimportResult.status == ExtractionResult::Status::Timeout) {
@@ -197,9 +227,10 @@ ExtractionResult MdlsTextExtractor::extract(const QString& filePath)
 
     LOG_DEBUG(bsExtraction, "Running mdls kMDItemTextContent for %s", qUtf8Printable(filePath));
     ExtractionResult mdlsResult = runProcess(
-        QStringLiteral("/usr/bin/mdls"),
+        mdlsPath,
         {QStringLiteral("-name"), QStringLiteral("kMDItemTextContent"), filePath},
         QStringLiteral("mdls timed out"),
+        timeoutMs,
         timer);
 
     if (mdlsResult.status == ExtractionResult::Status::Timeout) {

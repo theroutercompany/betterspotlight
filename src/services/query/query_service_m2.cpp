@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -34,6 +35,63 @@ constexpr int kVectorRebuildProgressPersistStride = 32;
 constexpr qint64 kVectorRebuildProgressPersistIntervalMs = 1500;
 constexpr int kVectorRebuildChunksPerItem = 3;
 constexpr int kVectorRebuildMaxChunkChars = 8192;
+
+bool envFlagEnabled(const QString& raw)
+{
+    const QString normalized = raw.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
+}
+
+bool testFakeEmbeddingsEnabled()
+{
+    if (!qEnvironmentVariableIsSet("BS_TEST_FAKE_EMBEDDINGS")) {
+        return false;
+    }
+    return envFlagEnabled(qEnvironmentVariable("BS_TEST_FAKE_EMBEDDINGS"));
+}
+
+bool testFakeFastEmbeddingsEnabled()
+{
+    if (!qEnvironmentVariableIsSet("BS_TEST_FAKE_FAST_EMBEDDINGS")) {
+        return true;
+    }
+    return envFlagEnabled(qEnvironmentVariable("BS_TEST_FAKE_FAST_EMBEDDINGS"));
+}
+
+int testFakeEmbeddingDimensions(const char* key, int fallback)
+{
+    bool ok = false;
+    const int parsed = qEnvironmentVariableIntValue(key, &ok);
+    if (!ok) {
+        return fallback;
+    }
+    return std::clamp(parsed, 8, 4096);
+}
+
+std::vector<float> makeDeterministicEmbedding(const QString& text, int dimensions, uint seed)
+{
+    std::vector<float> embedding(static_cast<size_t>(std::max(dimensions, 1)), 0.0f);
+    uint state = qHash(text, seed);
+    double normSquared = 0.0;
+    for (int i = 0; i < dimensions; ++i) {
+        state = state * 1664525u + 1013904223u;
+        const float unit = static_cast<float>(static_cast<double>(state & 0xFFFFu) / 65535.0);
+        const float value = (unit * 2.0f) - 1.0f;
+        embedding[static_cast<size_t>(i)] = value;
+        normSquared += static_cast<double>(value) * static_cast<double>(value);
+    }
+
+    const double norm = std::sqrt(normSquared);
+    if (norm > 0.0) {
+        for (float& value : embedding) {
+            value = static_cast<float>(static_cast<double>(value) / norm);
+        }
+    }
+    return embedding;
+}
 } // namespace
 
 QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject& params)
@@ -201,7 +259,8 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
                                      QStringLiteral("Database is not available"));
     }
 
-    if (!m_embeddingManager || !m_embeddingManager->isAvailable()) {
+    const bool fakeEmbeddings = testFakeEmbeddingsEnabled();
+    if ((!m_embeddingManager || !m_embeddingManager->isAvailable()) && !fakeEmbeddings) {
         return IpcMessage::makeError(id, IpcErrorCode::Unsupported,
                                      QStringLiteral("Embedding model is unavailable"));
     }
@@ -409,25 +468,123 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         inferenceServiceEnabled && inferenceEmbedOffloadEnabled;
     SocketClient inferenceClient;
     bool inferenceConnected = false;
+    bool inferenceEmbedOffloadRunEnabled = false;
+    bool inferenceFallbackLogged = false;
     if (inferenceEmbedOffloadActive) {
         const QString inferenceSocketPath = ServiceBase::socketPath(QStringLiteral("inference"));
         inferenceConnected = inferenceClient.connectToServer(inferenceSocketPath, 500);
         if (!inferenceConnected) {
-            updateFailedState(QStringLiteral("Inference service unavailable for rebuild embeddings"));
-            closeResources();
-            return;
+            LOG_WARN(bsIpc,
+                     "Vector rebuild run %llu: inference offload unavailable, falling back to local embeddings",
+                     static_cast<unsigned long long>(runId));
+        } else {
+            inferenceEmbedOffloadRunEnabled = true;
         }
     }
 
-    ModelRegistry workerRegistry(modelsDir);
-    EmbeddingManager workerEmbeddingManager(&workerRegistry, "bi-encoder");
-    EmbeddingManager workerFastEmbeddingManager(&workerRegistry, "bi-encoder-fast");
-    if (!workerEmbeddingManager.initialize()) {
-        updateFailedState(QStringLiteral("Embedding model is unavailable"));
-        closeResources();
-        return;
+    const bool fakeEmbeddings = testFakeEmbeddingsEnabled();
+    const bool fakeFastEmbeddings = testFakeFastEmbeddingsEnabled();
+
+    std::unique_ptr<ModelRegistry> workerRegistry;
+    std::unique_ptr<EmbeddingManager> workerEmbeddingManager;
+    std::unique_ptr<EmbeddingManager> workerFastEmbeddingManager;
+
+    std::function<std::vector<std::vector<float>>(const std::vector<QString>&)> embedStrongBatchLocal;
+    std::function<std::vector<float>(const QString&)> embedStrongSingleLocal;
+    std::function<std::vector<std::vector<float>>(const std::vector<QString>&)> embedFastBatchLocal;
+    std::function<std::vector<float>(const QString&)> embedFastSingleLocal;
+
+    int embeddingDimensions = 0;
+    int fastEmbeddingDimensions = 0;
+    bool fastEmbeddingAvailable = false;
+    QString embeddingModelId;
+    QString embeddingProvider;
+    QString fastModelId;
+    QString fastProvider;
+    QString fastGeneration = QStringLiteral("v3_fast");
+
+    if (fakeEmbeddings) {
+        embeddingDimensions = testFakeEmbeddingDimensions("BS_TEST_FAKE_EMBEDDING_DIMS", 24);
+        embeddingModelId = QStringLiteral("test-fake-bi-encoder");
+        embeddingProvider = QStringLiteral("test-fake");
+        embedStrongBatchLocal =
+            [embeddingDimensions](const std::vector<QString>& texts) {
+                std::vector<std::vector<float>> out;
+                out.reserve(texts.size());
+                for (const QString& text : texts) {
+                    out.push_back(makeDeterministicEmbedding(
+                        text, embeddingDimensions, /*seed=*/0xB510A3u));
+                }
+                return out;
+            };
+        embedStrongSingleLocal =
+            [embeddingDimensions](const QString& text) {
+                return makeDeterministicEmbedding(
+                    text, embeddingDimensions, /*seed=*/0xB510A3u);
+            };
+
+        fastEmbeddingAvailable = fakeFastEmbeddings;
+        if (fastEmbeddingAvailable) {
+            fastEmbeddingDimensions = testFakeEmbeddingDimensions(
+                "BS_TEST_FAKE_FAST_EMBEDDING_DIMS", embeddingDimensions);
+            fastGeneration = QStringLiteral("v3_fast_test");
+            fastModelId = QStringLiteral("test-fake-bi-encoder-fast");
+            fastProvider = QStringLiteral("test-fake");
+            embedFastBatchLocal =
+                [fastEmbeddingDimensions](const std::vector<QString>& texts) {
+                    std::vector<std::vector<float>> out;
+                    out.reserve(texts.size());
+                    for (const QString& text : texts) {
+                        out.push_back(makeDeterministicEmbedding(
+                            text, fastEmbeddingDimensions, /*seed=*/0xF457A11u));
+                    }
+                    return out;
+                };
+            embedFastSingleLocal =
+                [fastEmbeddingDimensions](const QString& text) {
+                    return makeDeterministicEmbedding(
+                        text, fastEmbeddingDimensions, /*seed=*/0xF457A11u);
+                };
+        }
+    } else {
+        workerRegistry = std::make_unique<ModelRegistry>(modelsDir);
+        workerEmbeddingManager = std::make_unique<EmbeddingManager>(workerRegistry.get(), "bi-encoder");
+        workerFastEmbeddingManager = std::make_unique<EmbeddingManager>(workerRegistry.get(),
+                                                                         "bi-encoder-fast");
+        if (!workerEmbeddingManager->initialize()) {
+            updateFailedState(QStringLiteral("Embedding model is unavailable"));
+            closeResources();
+            return;
+        }
+        fastEmbeddingAvailable = workerFastEmbeddingManager->initialize();
+
+        embeddingDimensions = std::max(workerEmbeddingManager->embeddingDimensions(), 1);
+        embeddingModelId = workerEmbeddingManager->activeModelId();
+        embeddingProvider = workerEmbeddingManager->providerName();
+        embedStrongBatchLocal =
+            [strong = workerEmbeddingManager.get()](const std::vector<QString>& texts) {
+                return strong->embedBatch(texts);
+            };
+        embedStrongSingleLocal =
+            [strong = workerEmbeddingManager.get()](const QString& text) {
+                return strong->embed(text);
+            };
+
+        fastGeneration = workerFastEmbeddingManager->activeGenerationId().isEmpty()
+            ? QStringLiteral("v3_fast")
+            : workerFastEmbeddingManager->activeGenerationId();
+        fastEmbeddingDimensions = std::max(workerFastEmbeddingManager->embeddingDimensions(), 1);
+        fastModelId = workerFastEmbeddingManager->activeModelId();
+        fastProvider = workerFastEmbeddingManager->providerName();
+        embedFastBatchLocal =
+            [fast = workerFastEmbeddingManager.get()](const std::vector<QString>& texts) {
+                return fast->embedBatch(texts);
+            };
+        embedFastSingleLocal =
+            [fast = workerFastEmbeddingManager.get()](const QString& text) {
+                return fast->embed(text);
+            };
     }
-    const bool fastEmbeddingAvailable = workerFastEmbeddingManager.initialize();
 
     const auto embedBatchViaInference =
         [&](const QString& role,
@@ -484,12 +641,11 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         return embeddings;
     };
 
-    const int embeddingDimensions = std::max(workerEmbeddingManager.embeddingDimensions(), 1);
     VectorIndex::IndexMetadata rebuiltMeta;
     rebuiltMeta.dimensions = embeddingDimensions;
-    rebuiltMeta.modelId = workerEmbeddingManager.activeModelId().toStdString();
+    rebuiltMeta.modelId = embeddingModelId.toStdString();
     rebuiltMeta.generationId = targetGeneration.toStdString();
-    rebuiltMeta.provider = workerEmbeddingManager.providerName().toStdString();
+    rebuiltMeta.provider = embeddingProvider.toStdString();
 
     auto rebuiltIndex = std::make_unique<VectorIndex>(rebuiltMeta);
     if (!rebuiltIndex->create()) {
@@ -498,16 +654,11 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         return;
     }
 
-    const QString fastGeneration = workerFastEmbeddingManager.activeGenerationId().isEmpty()
-        ? QStringLiteral("v3_fast")
-        : workerFastEmbeddingManager.activeGenerationId();
-    const int fastEmbeddingDimensions =
-        std::max(workerFastEmbeddingManager.embeddingDimensions(), 1);
     VectorIndex::IndexMetadata rebuiltFastMeta;
     rebuiltFastMeta.dimensions = fastEmbeddingDimensions;
-    rebuiltFastMeta.modelId = workerFastEmbeddingManager.activeModelId().toStdString();
+    rebuiltFastMeta.modelId = fastModelId.toStdString();
     rebuiltFastMeta.generationId = fastGeneration.toStdString();
-    rebuiltFastMeta.provider = workerFastEmbeddingManager.providerName().toStdString();
+    rebuiltFastMeta.provider = fastProvider.toStdString();
 
     auto rebuiltFastIndex = std::unique_ptr<VectorIndex>{};
     if (fastEmbeddingAvailable) {
@@ -682,6 +833,20 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         }
     };
 
+    const auto disableInferenceOffloadForRun = [&](const QString& reason) {
+        if (!inferenceEmbedOffloadRunEnabled) {
+            return;
+        }
+        inferenceEmbedOffloadRunEnabled = false;
+        if (!inferenceFallbackLogged) {
+            LOG_WARN(bsIpc,
+                     "Vector rebuild run %llu: disabling inference offload (%s); falling back to local embeddings",
+                     static_cast<unsigned long long>(runId),
+                     qPrintable(reason));
+            inferenceFallbackLogged = true;
+        }
+    };
+
     auto processCurrentItem = [&]() {
         if (currentItemId <= 0) {
             return;
@@ -709,17 +874,27 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         if (m_stopRebuildRequested.load()) return;
 
         std::vector<std::vector<float>> embeddings;
-        if (inferenceEmbedOffloadActive) {
+        if (inferenceEmbedOffloadRunEnabled) {
             embeddings = embedBatchViaInference(QStringLiteral("bi-encoder"), texts, 8);
-        } else {
-            embeddings = workerEmbeddingManager.embedBatch(texts);
+            if (embeddings.size() != texts.size()) {
+                disableInferenceOffloadForRun(
+                    QStringLiteral("embed_passages timeout/degraded (bi-encoder)"));
+                embeddings.clear();
+            }
+        }
+
+        if (embeddings.size() != texts.size()) {
+            embeddings = embedStrongBatchLocal ? embedStrongBatchLocal(texts)
+                                               : std::vector<std::vector<float>>{};
             if (m_stopRebuildRequested.load()) return;
             if (embeddings.size() != texts.size()) {
                 embeddings.clear();
                 embeddings.reserve(texts.size());
                 for (const QString& text : texts) {
                     if (m_stopRebuildRequested.load()) return;
-                    embeddings.push_back(workerEmbeddingManager.embed(text));
+                    embeddings.push_back(
+                        embedStrongSingleLocal ? embedStrongSingleLocal(text)
+                                               : std::vector<float>{});
                 }
             }
         }
@@ -762,16 +937,26 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         int usableFastEmbeddings = 0;
         if (fastEmbeddingAvailable && rebuiltFastIndex) {
             std::vector<std::vector<float>> fastEmbeddings;
-            if (inferenceEmbedOffloadActive) {
+            if (inferenceEmbedOffloadRunEnabled) {
                 fastEmbeddings = embedBatchViaInference(QStringLiteral("bi-encoder-fast"), texts, 8);
-            } else {
-                fastEmbeddings = workerFastEmbeddingManager.embedBatch(texts);
+                if (fastEmbeddings.size() != texts.size()) {
+                    disableInferenceOffloadForRun(
+                        QStringLiteral("embed_passages timeout/degraded (bi-encoder-fast)"));
+                    fastEmbeddings.clear();
+                }
+            }
+
+            if (fastEmbeddings.size() != texts.size()) {
+                fastEmbeddings = embedFastBatchLocal ? embedFastBatchLocal(texts)
+                                                     : std::vector<std::vector<float>>{};
                 if (fastEmbeddings.size() != texts.size()) {
                     fastEmbeddings.clear();
                     fastEmbeddings.reserve(texts.size());
                     for (const QString& text : texts) {
                         if (m_stopRebuildRequested.load()) return;
-                        fastEmbeddings.push_back(workerFastEmbeddingManager.embed(text));
+                        fastEmbeddings.push_back(
+                            embedFastSingleLocal ? embedFastSingleLocal(text)
+                                                 : std::vector<float>{});
                     }
                 }
             }

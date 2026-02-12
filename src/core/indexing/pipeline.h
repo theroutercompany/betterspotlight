@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,25 @@ namespace bs {
 class SQLiteStore;
 class ExtractionManager;
 
+struct PipelineRuntimeConfig {
+    int batchCommitSize = 50;
+    int batchCommitIntervalMs = 250;
+    int maxPipelineRetries = 3;
+
+    size_t scanHighWatermark = 8000;
+    size_t scanResumeWatermark = 5000;
+    int enqueueRetrySleepMs = 25;
+    int memoryPressureSleepMs = 50;
+
+    int drainPollAttempts = 200;
+    int drainPollIntervalMs = 25;
+
+    int retryBackoffBaseMs = 500;
+    int retryBackoffCapMs = 8000;
+
+    std::function<int()> rssProvider;
+};
+
 // Pipeline — top-level indexing orchestrator.
 //
 // Architecture:
@@ -37,7 +57,9 @@ class Pipeline : public QObject {
 
 public:
     Pipeline(SQLiteStore& store, ExtractionManager& extractor,
-             const PathRules& pathRules, QObject* parent = nullptr);
+             const PathRules& pathRules,
+             const PipelineRuntimeConfig& runtimeConfig = {},
+             QObject* parent = nullptr);
     ~Pipeline() override;
 
     // Non-copyable, non-movable (QObject + thread ownership)
@@ -176,13 +198,7 @@ private:
     int m_memoryHardLimitMb = 1200;
 
     std::vector<std::string> m_scanRoots;
-
-    static constexpr int kBatchCommitSize = 50;
-    static constexpr int kBatchCommitIntervalMs = 250;
-    static constexpr int kMaxPipelineRetries = 3;
-    static constexpr size_t kScanHighWatermark = 8000;
-    static constexpr size_t kScanResumeWatermark = 5000;
-    static constexpr int kEnqueueRetrySleepMs = 25;
+    PipelineRuntimeConfig m_runtimeConfig;
 };
 
 } // namespace bs

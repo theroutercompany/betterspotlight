@@ -87,7 +87,9 @@ bool isTransientExtractionFailure(const PreparedWork& prepared)
 // ── Construction / destruction ──────────────────────────────
 
 Pipeline::Pipeline(SQLiteStore& store, ExtractionManager& extractor,
-                   const PathRules& pathRules, QObject* parent)
+                   const PathRules& pathRules,
+                   const PipelineRuntimeConfig& runtimeConfig,
+                   QObject* parent)
     : QObject(parent)
     , m_store(store)
     , m_extractor(extractor)
@@ -96,7 +98,24 @@ Pipeline::Pipeline(SQLiteStore& store, ExtractionManager& extractor,
     , m_workQueue()
     , m_indexer(std::make_unique<Indexer>(m_store, m_extractor, m_pathRules, m_chunker))
     , m_monitor(std::make_unique<FileMonitorMacOS>())
+    , m_runtimeConfig(runtimeConfig)
 {
+    m_runtimeConfig.batchCommitSize = std::max(1, m_runtimeConfig.batchCommitSize);
+    m_runtimeConfig.batchCommitIntervalMs = std::max(1, m_runtimeConfig.batchCommitIntervalMs);
+    m_runtimeConfig.maxPipelineRetries = std::max(0, m_runtimeConfig.maxPipelineRetries);
+    m_runtimeConfig.scanHighWatermark = std::max<size_t>(1, m_runtimeConfig.scanHighWatermark);
+    m_runtimeConfig.scanResumeWatermark = std::min(
+        m_runtimeConfig.scanResumeWatermark,
+        m_runtimeConfig.scanHighWatermark);
+    m_runtimeConfig.enqueueRetrySleepMs = std::max(1, m_runtimeConfig.enqueueRetrySleepMs);
+    m_runtimeConfig.memoryPressureSleepMs = std::max(1, m_runtimeConfig.memoryPressureSleepMs);
+    m_runtimeConfig.drainPollAttempts = std::max(1, m_runtimeConfig.drainPollAttempts);
+    m_runtimeConfig.drainPollIntervalMs = std::max(1, m_runtimeConfig.drainPollIntervalMs);
+    m_runtimeConfig.retryBackoffBaseMs = std::max(1, m_runtimeConfig.retryBackoffBaseMs);
+    m_runtimeConfig.retryBackoffCapMs = std::max(
+        m_runtimeConfig.retryBackoffBaseMs,
+        m_runtimeConfig.retryBackoffCapMs);
+
     m_idlePrepWorkers = computeIdlePrepWorkers();
     m_memoryPressurePrepWorkers = static_cast<size_t>(readEnvInt(
         "BETTERSPOTLIGHT_INDEXER_PREP_WORKERS_PRESSURE",
@@ -267,6 +286,9 @@ size_t Pipeline::applyMemoryAwarePrepWorkerLimit(size_t requestedWorkers) const
 
 int Pipeline::processRssMb() const
 {
+    if (m_runtimeConfig.rssProvider) {
+        return m_runtimeConfig.rssProvider();
+    }
     return currentProcessRssMb();
 }
 
@@ -352,15 +374,17 @@ bool Pipeline::waitForScanBackpressureWindow() const
         const size_t depth = totalPendingDepth();
         const int rssMb = processRssMb();
         const bool hardMemoryPressure = rssMb >= m_memoryHardLimitMb;
-        if (depth <= kScanHighWatermark && !hardMemoryPressure) {
+        if (depth <= m_runtimeConfig.scanHighWatermark && !hardMemoryPressure) {
             return true;
         }
 
         while (m_running.load() && !m_stopping.load()
-               && (totalPendingDepth() > kScanResumeWatermark
+               && (totalPendingDepth() > m_runtimeConfig.scanResumeWatermark
                    || processRssMb() >= m_memoryHardLimitMb)) {
             const int pressureSleepMs =
-                processRssMb() >= m_memorySoftLimitMb ? 50 : kEnqueueRetrySleepMs;
+                processRssMb() >= m_memorySoftLimitMb
+                    ? m_runtimeConfig.memoryPressureSleepMs
+                    : m_runtimeConfig.enqueueRetrySleepMs;
             std::this_thread::sleep_for(std::chrono::milliseconds(pressureSleepMs));
         }
     }
@@ -383,7 +407,8 @@ bool Pipeline::enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts)
             return true;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(kEnqueueRetrySleepMs));
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(m_runtimeConfig.enqueueRetrySleepMs));
     }
 
     LOG_WARN(bsIndex, "Failed to enqueue primary work after retries: %s",
@@ -393,14 +418,15 @@ bool Pipeline::enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts)
 
 void Pipeline::waitForPipelineDrain()
 {
-    for (int attempt = 0; attempt < 200; ++attempt) {
+    for (int attempt = 0; attempt < m_runtimeConfig.drainPollAttempts; ++attempt) {
         const bool drained = (totalPendingDepth() == 0)
             && (m_preparingCount.load() == 0)
             && (m_writingCount.load() == 0);
         if (drained) {
             return;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(m_runtimeConfig.drainPollIntervalMs));
     }
 
     LOG_WARN(bsIndex, "waitForPipelineDrain timed out; continuing rebuild with residual activity");
@@ -789,7 +815,7 @@ void Pipeline::writerLoop()
 
             if (result.status == IndexResult::Status::ExtractionFailed) {
                 const bool shouldRetry = isTransientExtractionFailure(prepared)
-                    && prepared.retryCount < kMaxPipelineRetries;
+                    && prepared.retryCount < m_runtimeConfig.maxPipelineRetries;
                 if (shouldRetry) {
                     WorkItem retryItem;
                     retryItem.type = WorkItem::Type::ModifiedContent;
@@ -797,21 +823,21 @@ void Pipeline::writerLoop()
                     retryItem.retryCount = prepared.retryCount + 1;
 
                     const int backoffMs = std::min(
-                        500 * (1 << (prepared.retryCount * 2)),
-                        8000);
+                        m_runtimeConfig.retryBackoffBaseMs * (1 << (prepared.retryCount * 2)),
+                        m_runtimeConfig.retryBackoffCapMs);
                     std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
 
                     if (m_workQueue.enqueue(retryItem)) {
                         m_retriedCount.fetch_add(1);
                         LOG_INFO(bsIndex, "Re-enqueued for retry (%d/%d): %s",
                                  retryItem.retryCount,
-                                 kMaxPipelineRetries,
+                                 m_runtimeConfig.maxPipelineRetries,
                                  qUtf8Printable(prepared.path));
                     } else {
                         m_failedCount.fetch_add(1);
                         LOG_WARN(bsIndex, "Failed to re-enqueue retry (%d/%d): %s",
                                  retryItem.retryCount,
-                                 kMaxPipelineRetries,
+                                 m_runtimeConfig.maxPipelineRetries,
                                  qUtf8Printable(prepared.path));
                     }
                 } else {
@@ -851,8 +877,10 @@ void Pipeline::writerLoop()
             && preparedQueueEmpty
             && pendingMergedCount() == 0;
 
-        const bool commitForSize = batchCount >= kBatchCommitSize;
-        const bool commitForTime = batchTimer.isValid() && batchTimer.elapsed() >= kBatchCommitIntervalMs;
+        const bool commitForSize = batchCount >= m_runtimeConfig.batchCommitSize;
+        const bool commitForTime =
+            batchTimer.isValid()
+            && batchTimer.elapsed() >= m_runtimeConfig.batchCommitIntervalMs;
 
         if (commitForSize || commitForTime || queueDrained) {
             commitBatch();

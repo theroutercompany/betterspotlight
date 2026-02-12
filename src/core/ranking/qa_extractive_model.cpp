@@ -26,6 +26,15 @@ namespace bs {
 
 namespace {
 
+bool envFlagEnabled(const QString& raw)
+{
+    const QString normalized = raw.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
+}
+
 QString normalizeAnswerText(const QString& text, int maxChars)
 {
     QString normalized = text.simplified();
@@ -132,9 +141,15 @@ bool QaExtractiveModel::initialize()
     }
 
     const auto& outputNames = modelSession->outputNames();
+    const bool allowSingleOutputFallback =
+        qEnvironmentVariableIsSet("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK")
+        && envFlagEnabled(qEnvironmentVariable("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK"));
     if (outputNames.size() >= 2) {
         m_impl->startOutputName = outputNames[0];
         m_impl->endOutputName = outputNames[1];
+    } else if (allowSingleOutputFallback && !outputNames.empty()) {
+        m_impl->startOutputName = outputNames.front();
+        m_impl->endOutputName = outputNames.front();
     } else {
         const auto itStart = std::find_if(outputNames.begin(), outputNames.end(),
                                           [](const std::string& value) {

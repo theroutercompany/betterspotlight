@@ -574,7 +574,7 @@ bool VectorStore::ensureVectorMapSchema()
         return false;
     }
 
-    if (!execSql(m_db, kCreateVectorMapSql) || !execSql(m_db, kCreateVectorMapIndexesSql)) {
+    if (!execSql(m_db, kCreateVectorMapSql)) {
         return false;
     }
 
@@ -590,9 +590,12 @@ bool VectorStore::ensureVectorMapSchema()
         "migration_state",
     };
     if (!hasVectorMapColumns(requiredColumns)) {
-        return migrateLegacyVectorMap();
+        if (!migrateLegacyVectorMap()) {
+            return false;
+        }
     }
-    return true;
+
+    return execSql(m_db, kCreateVectorMapIndexesSql);
 }
 
 bool VectorStore::ensureGenerationStateTable() const

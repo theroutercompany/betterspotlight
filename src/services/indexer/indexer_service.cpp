@@ -145,9 +145,13 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
                                      QStringLiteral("No valid roots provided"));
     }
 
-    // Open/create SQLiteStore at default path
-    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                      + QStringLiteral("/betterspotlight");
+    // Open/create SQLiteStore at default path, but allow tests/integration
+    // harnesses to force an isolated data directory.
+    QString dataDir = qEnvironmentVariable("BETTERSPOTLIGHT_DATA_DIR").trimmed();
+    if (dataDir.isEmpty()) {
+        dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                  + QStringLiteral("/betterspotlight");
+    }
     QDir().mkpath(dataDir);
     QString dbPath = dataDir + QStringLiteral("/index.db");
 

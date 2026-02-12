@@ -674,6 +674,7 @@ QJsonObject InferenceService::handleCancelRequest(uint64_t id, const QJsonObject
     }
 
     markCancelled(cancelToken);
+    garbageCollectCancelledTokens();
 
     QJsonObject result;
     result[QStringLiteral("cancelled")] = true;
@@ -731,7 +732,8 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                                                       int waitTimeoutMs)
 {
     Worker* worker = workerForRole(role);
-    if (!worker) {
+    const Worker* workerConst = static_cast<const InferenceService*>(this)->workerForRole(role);
+    if (!worker || !workerConst) {
         return std::nullopt;
     }
 
@@ -744,10 +746,12 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
 
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
-        const bool rebuildPriority =
-            envelope.priority.compare(QStringLiteral("rebuild"), Qt::CaseInsensitive) == 0;
-        auto& queue = rebuildPriority ? worker->rebuildQueue : worker->liveQueue;
-        const int queueLimit = rebuildPriority ? kWorkerQueueLimitRebuild : kWorkerQueueLimitLive;
+        const bool rebuildRole = isRebuildRole(role);
+        const bool liveRole = isLiveRole(role);
+        auto& queue = rebuildRole ? worker->rebuildQueue : worker->liveQueue;
+        const int queueLimit = rebuildRole ? kWorkerQueueLimitRebuild
+                                           : (liveRole ? kWorkerQueueLimitLive
+                                                       : kWorkerQueueLimitRebuild);
         if (static_cast<int>(queue.size()) >= queueLimit) {
             QJsonObject queueError = makeStatusPayload(
                 QStringLiteral("degraded"),
