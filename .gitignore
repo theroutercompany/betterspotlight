@@ -4,6 +4,7 @@
 DerivedData/
 Build/
 build/
+build-coverage/
 build-local/
 build-release/
 dist/

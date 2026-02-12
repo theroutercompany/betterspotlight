@@ -1,0 +1,17 @@
+{
+  "active_phase": "phase1",
+  "phases": {
+    "phase1": {
+      "line": 70.0,
+      "branch": 45.0
+    },
+    "phase2": {
+      "line": 80.0,
+      "branch": 55.0
+    },
+    "phase3": {
+      "line": 90.0,
+      "branch": 65.0
+    }
+  }
+}

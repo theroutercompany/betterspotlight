@@ -6,27 +6,86 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CMAKE_OSX_DEPLOYMENT_TARGET: "14.0"
+
 jobs:
-  build:
+  release-tests:
+    name: Release Build + CTest
     runs-on: macos-14
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Install dependencies
         run: |
           brew install qt@6 poppler tesseract leptonica pkg-config
-      
+
       - name: Configure
         run: |
-          cmake -B build \
+          cmake -S . -B build-release \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-      
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+
       - name: Build
-        run: cmake --build build -j$(sysctl -n hw.ncpu)
-      
+        run: cmake --build build-release -j"$(sysctl -n hw.ncpu)"
+
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          ctest --test-dir build-release \
+            -L "^(unit|integration|service_ipc|relevance|docs_lint)$" \
+            --output-on-failure
+
+  sanitizers:
+    name: Debug ASAN/UBSAN
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install qt@6 poppler tesseract leptonica pkg-config
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-sanitizers \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+
+      - name: Build
+        run: cmake --build build-sanitizers -j"$(sysctl -n hw.ncpu)"
+
+      - name: Unit + Integration tests (fail fast)
+        run: |
+          ctest --test-dir build-sanitizers \
+            -L "unit|integration" \
+            --stop-on-failure \
+            --output-on-failure
+
+      - name: Critical repeat-until-fail
+        run: |
+          ctest --test-dir build-sanitizers \
+            --repeat until-fail:3 \
+            -R "(test-query-service-core-improvements|test-query-service-relevance-fixture|test-indexer-service-ipc|test-extractor-service-ipc|test-inference-service-ipc|test-query-service-m2-ipc)" \
+            --output-on-failure
+
+  coverage-gate:
+    name: Coverage Gate
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install qt@6 poppler tesseract leptonica pkg-config
+
+      - name: Run coverage gate
+        run: |
+          BS_COVERAGE_PHASE=phase1 \
+          BS_QT_PREFIX_PATH="$(brew --prefix qt@6)" \
+          /bin/bash tools/coverage/run_gate.sh
