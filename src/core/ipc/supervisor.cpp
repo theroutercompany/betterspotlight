@@ -163,6 +163,23 @@ void Supervisor::stopAll()
     m_stopping = false;
 }
 
+bool Supervisor::restartService(const QString& serviceName)
+{
+    ManagedService* svc = findService(serviceName);
+    if (!svc) {
+        qCWarning(bsIpc, "Restart requested for unknown service '%s'",
+                  qPrintable(serviceName));
+        return false;
+    }
+    if (m_stopping) {
+        qCWarning(bsIpc, "Restart ignored for '%s' while supervisor is stopping",
+                  qPrintable(serviceName));
+        return false;
+    }
+    restartService(*svc);
+    return true;
+}
+
 SocketClient* Supervisor::clientFor(const QString& serviceName)
 {
     ManagedService* svc = findService(serviceName);

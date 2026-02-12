@@ -44,6 +44,9 @@ public:
     // Stop all services gracefully
     void stopAll();
 
+    // Restart a single managed service by name.
+    bool restartService(const QString& serviceName);
+
     // Get client for a specific service
     SocketClient* clientFor(const QString& serviceName);
 

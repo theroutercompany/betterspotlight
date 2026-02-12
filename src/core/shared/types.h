@@ -54,6 +54,7 @@ struct WorkItem {
     std::optional<uint64_t> knownModTime;
     std::optional<uint64_t> knownSize;
     int retryCount = 0;
+    bool rebuildLane = false;
 };
 
 // Filesystem metadata extracted in Stage 4

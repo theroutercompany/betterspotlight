@@ -1,5 +1,6 @@
 #include "core/ipc/socket_client.h"
 #include "core/shared/logging.h"
+#include <QPointer>
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -163,6 +164,24 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
     }
 
     return pending->response;
+}
+
+void SocketClient::sendRequestAsync(const QString& method,
+                                    const QJsonObject& params,
+                                    int timeoutMs,
+                                    RequestCallback callback)
+{
+    QPointer<SocketClient> self(this);
+    QTimer::singleShot(0, this, [self, method, params, timeoutMs, callback = std::move(callback)]() mutable {
+        if (!callback) {
+            return;
+        }
+        if (!self) {
+            callback(std::nullopt);
+            return;
+        }
+        callback(self->sendRequest(method, params, timeoutMs));
+    });
 }
 
 bool SocketClient::sendNotification(const QString& method, const QJsonObject& params)

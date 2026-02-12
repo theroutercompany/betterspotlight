@@ -279,22 +279,34 @@ bool downloadFileWithCurl(const QString& url, const QString& outputPath, QString
 
 } // namespace
 
+bool ServiceManager::envFlagEnabled(const char* key, bool fallback)
+{
+    const QString value = qEnvironmentVariable(key).trimmed().toLower();
+    if (value.isEmpty()) {
+        return fallback;
+    }
+    return value == QLatin1String("1")
+        || value == QLatin1String("true")
+        || value == QLatin1String("yes")
+        || value == QLatin1String("on");
+}
+
 ServiceManager::ServiceManager(QObject* parent)
     : QObject(parent)
-    , m_supervisor(std::make_unique<Supervisor>(this))
     , m_indexerStatus(QStringLiteral("stopped"))
     , m_extractorStatus(QStringLiteral("stopped"))
     , m_queryStatus(QStringLiteral("stopped"))
     , m_inferenceStatus(QStringLiteral("stopped"))
 {
-    connect(m_supervisor.get(), &Supervisor::serviceStarted,
-            this, &ServiceManager::onServiceStarted);
-    connect(m_supervisor.get(), &Supervisor::serviceStopped,
-            this, &ServiceManager::onServiceStopped);
-    connect(m_supervisor.get(), &Supervisor::serviceCrashed,
-            this, &ServiceManager::onServiceCrashed);
-    connect(m_supervisor.get(), &Supervisor::allServicesReady,
-            this, &ServiceManager::onAllServicesReady);
+    m_controlPlaneModeLegacy =
+        qEnvironmentVariable("BETTERSPOTLIGHT_CONTROL_PLANE_MODE").trimmed().toLower()
+            == QLatin1String("legacy");
+    m_healthModeLegacy =
+        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower()
+            == QLatin1String("legacy");
+
+    startControlPlaneThread();
+    startHealthThread();
 
     m_indexingStatusTimer.setInterval(2000);
     connect(&m_indexingStatusTimer, &QTimer::timeout,
@@ -304,6 +316,8 @@ ServiceManager::ServiceManager(QObject* parent)
 ServiceManager::~ServiceManager()
 {
     stop();
+    stopHealthThread();
+    stopControlPlaneThread();
 }
 
 bool ServiceManager::isReady() const
@@ -354,9 +368,157 @@ bool ServiceManager::modelDownloadHasError() const
     return m_modelDownloadHasError;
 }
 
+QVariantMap ServiceManager::healthSnapshot() const
+{
+    return m_latestHealthSnapshot.toVariantMap();
+}
+
 Supervisor* ServiceManager::supervisor() const
 {
-    return m_supervisor.get();
+    return nullptr;
+}
+
+void ServiceManager::startControlPlaneThread()
+{
+    if (m_controlPlaneActor) {
+        return;
+    }
+
+    m_controlPlaneActor = new ControlPlaneActor();
+    m_controlPlaneActor->moveToThread(&m_controlPlaneThread);
+    connect(&m_controlPlaneThread, &QThread::finished,
+            m_controlPlaneActor, &QObject::deleteLater);
+    connect(m_controlPlaneActor, &ControlPlaneActor::serviceStatusChanged,
+            this, [this](const QString& name, const QString& status) {
+        updateServiceStatus(name, status);
+    });
+    connect(m_controlPlaneActor, &ControlPlaneActor::serviceError,
+            this, &ServiceManager::serviceError);
+    connect(m_controlPlaneActor, &ControlPlaneActor::allServicesReady,
+            this, &ServiceManager::onAllServicesReady);
+    connect(m_controlPlaneActor, &ControlPlaneActor::managedServicesUpdated,
+            this, &ServiceManager::onControlPlaneServicesUpdated);
+    connect(m_controlPlaneActor, &ControlPlaneActor::serviceStatusChanged,
+            this, [this](const QString&, const QString&) {
+        if (m_healthAggregatorActor && !m_healthModeLegacy) {
+            QMetaObject::invokeMethod(
+                m_healthAggregatorActor,
+                "setManagedServices",
+                Qt::QueuedConnection,
+                Q_ARG(QJsonArray, m_cachedServiceSnapshot));
+            QMetaObject::invokeMethod(m_healthAggregatorActor, "triggerRefresh",
+                                      Qt::QueuedConnection);
+        }
+    });
+
+    m_controlPlaneThread.setObjectName(QStringLiteral("BetterSpotlight-ControlPlane"));
+    m_controlPlaneThread.start();
+    QMetaObject::invokeMethod(m_controlPlaneActor, "initialize",
+                              Qt::BlockingQueuedConnection);
+}
+
+void ServiceManager::stopControlPlaneThread()
+{
+    if (!m_controlPlaneActor) {
+        return;
+    }
+
+    if (m_controlPlaneThread.isRunning()) {
+        QMetaObject::invokeMethod(m_controlPlaneActor, "stopAll",
+                                  Qt::BlockingQueuedConnection);
+        m_controlPlaneThread.quit();
+        m_controlPlaneThread.wait();
+    }
+    m_controlPlaneActor = nullptr;
+}
+
+void ServiceManager::startHealthThread()
+{
+    if (m_healthAggregatorActor) {
+        return;
+    }
+
+    m_healthAggregatorActor = new HealthAggregatorActor();
+    m_healthAggregatorActor->moveToThread(&m_healthThread);
+    connect(&m_healthThread, &QThread::finished,
+            m_healthAggregatorActor, &QObject::deleteLater);
+    connect(m_healthAggregatorActor, &HealthAggregatorActor::snapshotUpdated,
+            this, &ServiceManager::onHealthSnapshotUpdated);
+
+    m_healthThread.setObjectName(QStringLiteral("BetterSpotlight-Health"));
+    m_healthThread.start();
+    QMetaObject::invokeMethod(
+        m_healthAggregatorActor,
+        "initialize",
+        Qt::BlockingQueuedConnection,
+        Q_ARG(QString, qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID")));
+
+    if (!m_healthModeLegacy) {
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "start", Qt::QueuedConnection);
+    }
+}
+
+void ServiceManager::stopHealthThread()
+{
+    if (!m_healthAggregatorActor) {
+        return;
+    }
+    if (m_healthThread.isRunning()) {
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "stop",
+                                  Qt::BlockingQueuedConnection);
+        m_healthThread.quit();
+        m_healthThread.wait();
+    }
+    m_healthAggregatorActor = nullptr;
+}
+
+void ServiceManager::onControlPlaneServicesUpdated(const QJsonArray& services)
+{
+    m_cachedServiceSnapshot = services;
+    if (!m_healthModeLegacy && m_healthAggregatorActor) {
+        QMetaObject::invokeMethod(
+            m_healthAggregatorActor,
+            "setManagedServices",
+            Qt::QueuedConnection,
+            Q_ARG(QJsonArray, services));
+    }
+}
+
+void ServiceManager::onHealthSnapshotUpdated(const QJsonObject& snapshot)
+{
+    m_latestHealthSnapshot = snapshot;
+    emit healthSnapshotChanged();
+    emit healthSnapshotUpdated(snapshot);
+
+    if (snapshot.isEmpty()) {
+        return;
+    }
+
+    const bool queueActive =
+        snapshot.value(QStringLiteral("queuePending")).toInt() > 0
+        || snapshot.value(QStringLiteral("queueInProgress")).toInt() > 0
+        || snapshot.value(QStringLiteral("queuePreparing")).toInt() > 0
+        || snapshot.value(QStringLiteral("queueWriting")).toInt() > 0
+        || snapshot.value(QStringLiteral("queueRebuildRunning")).toBool(false);
+    if (m_indexingActive != queueActive) {
+        m_indexingActive = queueActive;
+        updateTrayState();
+    }
+}
+
+QVariantMap ServiceManager::latestHealthSnapshot() const
+{
+    return m_latestHealthSnapshot.toVariantMap();
+}
+
+void ServiceManager::requestHealthRefresh()
+{
+    if (!m_healthModeLegacy && m_healthAggregatorActor) {
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "triggerRefresh",
+                                  Qt::QueuedConnection);
+    } else {
+        refreshIndexerQueueStatus();
+    }
 }
 
 void ServiceManager::start()
@@ -376,7 +538,7 @@ void ServiceManager::start()
     m_pendingPostRebuildVectorRefreshAttempts = 0;
     setModelDownloadState(/*running=*/false, QString(), /*hasError=*/false);
 
-    // Register all three service binaries
+    // Register all services
     const QStringList serviceNames = {
         QStringLiteral("indexer"),
         QStringLiteral("extractor"),
@@ -384,6 +546,7 @@ void ServiceManager::start()
         QStringLiteral("inference"),
     };
 
+    QVariantList descriptors;
     for (const auto& name : serviceNames) {
         QString binary = findServiceBinary(name);
         if (binary.isEmpty()) {
@@ -394,14 +557,37 @@ void ServiceManager::start()
             continue;
         }
 
-        LOG_INFO(bsCore, "ServiceManager: registering service '%s' -> %s",
-                 qPrintable(name), qPrintable(binary));
-        m_supervisor->addService(name, binary);
+        QVariantMap descriptor;
+        descriptor[QStringLiteral("name")] = name;
+        descriptor[QStringLiteral("binary")] = binary;
+        descriptors.push_back(descriptor);
         updateServiceStatus(name, QStringLiteral("starting"));
     }
 
-    if (!m_supervisor->startAll()) {
+    if (!m_controlPlaneActor) {
+        LOG_ERROR(bsCore, "ServiceManager: control plane actor unavailable");
+        return;
+    }
+
+    QMetaObject::invokeMethod(
+        m_controlPlaneActor,
+        "configureServices",
+        Qt::BlockingQueuedConnection,
+        Q_ARG(QVariantList, descriptors));
+
+    bool started = false;
+    QMetaObject::invokeMethod(
+        m_controlPlaneActor,
+        "startAll",
+        Qt::BlockingQueuedConnection,
+        Q_RETURN_ARG(bool, started));
+    if (!started) {
         LOG_WARN(bsCore, "ServiceManager: not all services started cleanly");
+    }
+
+    if (!m_healthModeLegacy && m_healthAggregatorActor) {
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "start", Qt::QueuedConnection);
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "triggerRefresh", Qt::QueuedConnection);
     }
     m_started = true;
     updateTrayState();
@@ -416,8 +602,18 @@ void ServiceManager::stop()
 
     joinModelDownloadThreadIfNeeded();
     LOG_INFO(bsCore, "ServiceManager: stopping services");
-    if (m_started) {
-        m_supervisor->stopAll();
+    if (m_started && m_controlPlaneActor) {
+        QMetaObject::invokeMethod(
+            m_controlPlaneActor,
+            "setLifecyclePhase",
+            Qt::BlockingQueuedConnection,
+            Q_ARG(QString, QStringLiteral("shutting_down")));
+    }
+    if (!m_healthModeLegacy && m_healthAggregatorActor) {
+        QMetaObject::invokeMethod(m_healthAggregatorActor, "stop", Qt::BlockingQueuedConnection);
+    }
+    if (m_started && m_controlPlaneActor) {
+        QMetaObject::invokeMethod(m_controlPlaneActor, "stopAll", Qt::BlockingQueuedConnection);
     }
 
     m_allReady = false;
@@ -544,35 +740,25 @@ bool ServiceManager::rebuildAll()
 
 bool ServiceManager::rebuildVectorIndex()
 {
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
-    if (!client || !client->isConnected()) {
-        LOG_WARN(bsCore, "ServiceManager: query not connected, can't send 'rebuildVectorIndex'");
-        return false;
-    }
-
     QJsonObject params;
     const QJsonArray embedRoots = loadEmbeddingRoots();
     if (!embedRoots.isEmpty()) {
         params[QStringLiteral("includePaths")] = embedRoots;
     }
 
-    auto response = client->sendRequest(QStringLiteral("rebuildVectorIndex"), params, 10000);
-    if (!response) {
-        LOG_ERROR(bsCore, "ServiceManager: query request failed: rebuildVectorIndex");
+    const ServiceRequestResult request =
+        sendServiceRequestSync(QStringLiteral("query"),
+                               QStringLiteral("rebuildVectorIndex"),
+                               params,
+                               10000);
+    if (!request.ok) {
+        LOG_ERROR(bsCore, "ServiceManager: query 'rebuildVectorIndex' failed: %s",
+                  qPrintable(request.error));
+        emit serviceError(QStringLiteral("query"), request.error);
         return false;
     }
 
-    const QString type = response->value(QStringLiteral("type")).toString();
-    if (type == QLatin1String("error")) {
-        const QString msg = response->value(QStringLiteral("error")).toObject()
-                                .value(QStringLiteral("message")).toString();
-        LOG_ERROR(bsCore, "ServiceManager: query 'rebuildVectorIndex' error: %s",
-                  qPrintable(msg));
-        emit serviceError(QStringLiteral("query"), msg);
-        return false;
-    }
-
-    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+    const QJsonObject result = request.response.value(QStringLiteral("result")).toObject();
     const bool started = result.value(QStringLiteral("started")).toBool();
     const bool alreadyRunning = result.value(QStringLiteral("alreadyRunning")).toBool();
     const qint64 runId = result.value(QStringLiteral("runId")).toInteger();
@@ -817,10 +1003,19 @@ void ServiceManager::triggerInitialIndexing()
 
 QVariantList ServiceManager::serviceDiagnostics() const
 {
-    if (!m_supervisor) {
+    if (!m_cachedServiceSnapshot.isEmpty()) {
+        return m_cachedServiceSnapshot.toVariantList();
+    }
+    if (!m_controlPlaneActor) {
         return {};
     }
-    return m_supervisor->serviceSnapshot().toVariantList();
+    QJsonArray snapshot;
+    QMetaObject::invokeMethod(
+        m_controlPlaneActor,
+        "serviceSnapshotSync",
+        Qt::BlockingQueuedConnection,
+        Q_RETURN_ARG(QJsonArray, snapshot));
+    return snapshot.toVariantList();
 }
 
 bool ServiceManager::sendIndexerRequest(const QString& method, const QJsonObject& params)
@@ -832,31 +1027,45 @@ bool ServiceManager::sendServiceRequest(const QString& serviceName,
                                         const QString& method,
                                         const QJsonObject& params)
 {
-    SocketClient* client = m_supervisor->clientFor(serviceName);
-    if (!client || !client->isConnected()) {
-        LOG_WARN(bsCore, "ServiceManager: %s not connected, can't send '%s'",
-                 qPrintable(serviceName), qPrintable(method));
-        return false;
+    const ServiceRequestResult result =
+        sendServiceRequestSync(serviceName, method, params, 10000);
+    if (!result.ok) {
+        LOG_ERROR(bsCore, "ServiceManager: %s '%s' failed: %s",
+                  qPrintable(serviceName),
+                  qPrintable(method),
+                  qPrintable(result.error));
+        emit serviceError(serviceName, result.error);
+    }
+    return result.ok;
+}
+
+ServiceManager::ServiceRequestResult ServiceManager::sendServiceRequestSync(
+    const QString& serviceName,
+    const QString& method,
+    const QJsonObject& params,
+    int timeoutMs)
+{
+    ServiceRequestResult out;
+    if (!m_controlPlaneActor) {
+        out.error = QStringLiteral("control_plane_unavailable");
+        return out;
     }
 
-    auto response = client->sendRequest(method, params, 10000);
-    if (!response) {
-        LOG_ERROR(bsCore, "ServiceManager: %s request failed: %s",
-                  qPrintable(serviceName), qPrintable(method));
-        return false;
-    }
+    QJsonObject actorResult;
+    QMetaObject::invokeMethod(
+        m_controlPlaneActor,
+        "sendServiceRequestSync",
+        Qt::BlockingQueuedConnection,
+        Q_RETURN_ARG(QJsonObject, actorResult),
+        Q_ARG(QString, serviceName),
+        Q_ARG(QString, method),
+        Q_ARG(QJsonObject, params),
+        Q_ARG(int, timeoutMs));
 
-    QString type = response->value(QStringLiteral("type")).toString();
-    if (type == QLatin1String("error")) {
-        QString msg = response->value(QStringLiteral("error")).toObject()
-                          .value(QStringLiteral("message")).toString();
-        LOG_ERROR(bsCore, "ServiceManager: %s '%s' error: %s",
-                  qPrintable(serviceName), qPrintable(method), qPrintable(msg));
-        emit serviceError(serviceName, msg);
-        return false;
-    }
-
-    return true;
+    out.ok = actorResult.value(QStringLiteral("ok")).toBool(false);
+    out.error = actorResult.value(QStringLiteral("error")).toString();
+    out.response = actorResult.value(QStringLiteral("response")).toObject();
+    return out;
 }
 
 QJsonArray ServiceManager::loadIndexRoots() const
@@ -1002,24 +1211,20 @@ void ServiceManager::updateTrayState()
 
 void ServiceManager::refreshIndexerQueueStatus()
 {
-    if (m_stopping || !m_allReady || !m_supervisor) {
+    if (m_stopping || !m_allReady) {
         return;
     }
 
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("indexer"));
-    if (!client || !client->isConnected()) {
+    const ServiceRequestResult request =
+        sendServiceRequestSync(QStringLiteral("indexer"),
+                               QStringLiteral("getQueueStatus"),
+                               {},
+                               500);
+    if (!request.ok) {
         return;
     }
 
-    auto response = client->sendRequest(QStringLiteral("getQueueStatus"), {}, 500);
-    if (!response) {
-        return;
-    }
-    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        return;
-    }
-
-    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+    const QJsonObject result = request.response.value(QStringLiteral("result")).toObject();
     const qint64 pending = result.value(QStringLiteral("pending")).toInteger();
     const qint64 processing = result.value(QStringLiteral("processing")).toInteger();
     const qint64 preparing = result.value(QStringLiteral("preparing")).toInteger();

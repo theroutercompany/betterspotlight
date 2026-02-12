@@ -3,6 +3,9 @@ add_library(betterspotlight-core-indexing STATIC
     chunker.cpp
     indexer.cpp
     pipeline.cpp
+    path_state_actor.cpp
+    pipeline_scheduler_actor.cpp
+    pipeline_telemetry_actor.cpp
 )
 
 target_include_directories(betterspotlight-core-indexing PUBLIC

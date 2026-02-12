@@ -2,11 +2,15 @@
 
 #include "core/indexing/chunker.h"
 #include "core/indexing/indexer.h"
+#include "core/indexing/path_state_actor.h"
+#include "core/indexing/pipeline_scheduler_actor.h"
+#include "core/indexing/pipeline_telemetry_actor.h"
 #include "core/indexing/work_queue.h"
 #include "core/fs/file_monitor_macos.h"
 #include "core/fs/path_rules.h"
 
 #include <QObject>
+#include <QJsonObject>
 #include <QString>
 
 #include <atomic>
@@ -56,6 +60,12 @@ class Pipeline : public QObject {
     Q_OBJECT
 
 public:
+    enum class ActorMode {
+        Legacy,
+        Dual,
+        ActorPrimary,
+    };
+
     Pipeline(SQLiteStore& store, ExtractionManager& extractor,
              const PathRules& pathRules,
              const PipelineRuntimeConfig& runtimeConfig = {},
@@ -90,6 +100,8 @@ public:
 
     // Snapshot of current queue statistics.
     QueueStats queueStatus() const;
+    QJsonObject telemetrySnapshot() const;
+    QString actorModeString() const;
 
     // Number of items processed so far.
     int processedCount() const { return m_processedCount.load(); }
@@ -103,12 +115,14 @@ private:
     struct PrepTask {
         WorkItem item;
         uint64_t generation = 0;
+        PipelineLane lane = PipelineLane::Live;
     };
 
     struct PathCoordinatorState {
         uint64_t latestGeneration = 0;
         bool inPrep = false;
         std::optional<WorkItem::Type> pendingMergedType;
+        bool pendingRebuildLane = false;
     };
 
     // Scan thread entry point: walks directories and enqueues work items.
@@ -136,6 +150,9 @@ private:
     static WorkItem::Type mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs);
     bool waitForScanBackpressureWindow() const;
     bool enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts = 1200);
+    bool enqueueLaneWorkItem(const WorkItem& item,
+                             PipelineLane lane,
+                             int maxAttempts = 1200);
 
     // Concurrency policy helpers.
     void updatePrepConcurrencyPolicy();
@@ -169,11 +186,13 @@ private:
 
     mutable std::mutex m_preparedMutex;
     std::condition_variable m_preparedCv;
-    std::deque<PreparedWork> m_preparedQueue;
+    std::deque<PreparedWork> m_preparedLiveQueue;
+    std::deque<PreparedWork> m_preparedRebuildQueue;
 
     // Path coordinator state
     mutable std::mutex m_coordMutex;
     std::unordered_map<std::string, PathCoordinatorState> m_pathCoordinator;
+    std::unique_ptr<PathStateActor> m_pathStateActor;
 
     // Rebuild coordination
     mutable std::mutex m_rebuildMutex;
@@ -188,6 +207,8 @@ private:
     std::atomic<size_t> m_coalescedCount{0};
     std::atomic<size_t> m_staleDroppedCount{0};
     std::atomic<size_t> m_writerBatchDepth{0};
+    std::atomic<size_t> m_livePending{0};
+    std::atomic<size_t> m_rebuildPending{0};
 
     // Concurrency policy
     std::atomic<bool> m_userActive{false};
@@ -199,6 +220,9 @@ private:
 
     std::vector<std::string> m_scanRoots;
     PipelineRuntimeConfig m_runtimeConfig;
+    ActorMode m_actorMode = ActorMode::Dual;
+    std::unique_ptr<PipelineSchedulerActor> m_schedulerActor;
+    std::unique_ptr<PipelineTelemetryActor> m_telemetryActor;
 };
 
 } // namespace bs

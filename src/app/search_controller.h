@@ -1,15 +1,20 @@
 #pragma once
 
 #include "core/ipc/socket_client.h"
+
 #include <QObject>
+#include <QJsonObject>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
+
+#include <memory>
 #include <optional>
 
 namespace bs {
 
 class Supervisor;
+class ServiceManager;
 
 class SearchController : public QObject {
     Q_OBJECT
@@ -24,8 +29,9 @@ public:
     explicit SearchController(QObject* parent = nullptr);
     ~SearchController() override;
 
-    // Set the supervisor to obtain the query service client
+    // Legacy wiring retained for compatibility.
     void setSupervisor(Supervisor* supervisor);
+    void setServiceManager(ServiceManager* serviceManager);
     void setClipboardSignalsEnabled(bool enabled);
 
     QString query() const;
@@ -45,7 +51,6 @@ public:
     Q_INVOKABLE void clearResults();
     Q_INVOKABLE void moveSelection(int delta);
 
-    // Request index health from the query service
     Q_INVOKABLE QVariantMap getHealthSync();
 
 signals:
@@ -57,8 +62,13 @@ signals:
 
 private slots:
     void executeSearch();
+    void onHealthSnapshotUpdated(const QJsonObject& snapshot);
 
 private:
+    static bool envFlagEnabled(const char* key, bool fallback = false);
+    SocketClient* ensureQueryClient(int timeoutMs = 400);
+    SocketClient* ensureIndexerClient(int timeoutMs = 250);
+
     void parseSearchResponse(const QJsonObject& response);
     void rebuildResultRows();
     int resultIndexForRow(int rowIndex) const;
@@ -70,6 +80,10 @@ private:
     void updateClipboardSignalsFromText(const QString& text);
 
     Supervisor* m_supervisor = nullptr;
+    ServiceManager* m_serviceManager = nullptr;
+    std::unique_ptr<SocketClient> m_queryClient;
+    std::unique_ptr<SocketClient> m_indexerClient;
+
     QString m_query;
     QVariantList m_results;
     QVariantList m_resultRows;

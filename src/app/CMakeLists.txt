@@ -15,6 +15,8 @@ qt_add_executable(betterspotlight
     hotkey_manager.cpp
     search_controller.h
     search_controller.cpp
+    runtime_environment.h
+    runtime_environment.cpp
     update_manager.h
     update_manager.mm
     platform_integration.h

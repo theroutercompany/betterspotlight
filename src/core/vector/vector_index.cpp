@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTextStream>
@@ -75,6 +76,20 @@ bool VectorIndex::create(int initialCapacity)
 
 bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath)
 {
+    QFileInfo indexInfo(QString::fromStdString(indexPath));
+    if (!indexInfo.exists() || !indexInfo.isFile()) {
+        qCritical() << "VectorIndex::load missing index file:" << indexInfo.filePath();
+        return false;
+    }
+
+    // Corrupted/truncated payloads can make downstream HNSW cleanup paths unsafe.
+    // Reject clearly invalid blobs before attempting to deserialize.
+    constexpr qint64 kMinSerializedIndexBytes = 96;
+    if (indexInfo.size() < kMinSerializedIndexBytes) {
+        qCritical() << "VectorIndex::load index payload too small:" << indexInfo.size();
+        return false;
+    }
+
     QFile metaFile(QString::fromStdString(metaPath));
     if (!metaFile.open(QIODevice::ReadOnly)) {
         qCritical() << "VectorIndex::load failed to open meta file:" << metaFile.fileName();

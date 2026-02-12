@@ -395,6 +395,8 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("bsignoreLastLoadedAtMs")] =
             bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
         result[QStringLiteral("memory")] = memoryTelemetry();
+        result[QStringLiteral("actorMode")] = QStringLiteral("legacy");
+        result[QStringLiteral("bulkhead")] = QJsonObject();
         return IpcMessage::makeResponse(id, result);
     }
 
@@ -460,6 +462,10 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
     result[QStringLiteral("bsignoreLastLoadedAtMs")] =
         bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
     result[QStringLiteral("memory")] = memoryTelemetry();
+    const QJsonObject telemetry = m_pipeline->telemetrySnapshot();
+    result[QStringLiteral("actorMode")] =
+        telemetry.value(QStringLiteral("actorMode")).toString(QStringLiteral("legacy"));
+    result[QStringLiteral("bulkhead")] = telemetry;
     return IpcMessage::makeResponse(id, result);
 }
 

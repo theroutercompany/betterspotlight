@@ -5,7 +5,9 @@
 #include "core/shared/logging.h"
 
 #include <QDateTime>
-#include <QDir>
+#include <QPointer>
+
+#include <algorithm>
 
 namespace bs {
 
@@ -13,6 +15,11 @@ namespace {
 
 constexpr int kPollIntervalMs = 2000;
 constexpr int kEventDebounceMs = 150;
+constexpr int kQueryProbeTimeoutMs = 250;
+constexpr int kIndexerProbeTimeoutMs = 250;
+constexpr int kInferenceProbeTimeoutMs = 300;
+constexpr int kExtractorProbeTimeoutMs = 200;
+constexpr qint64 kComponentStaleThresholdMs = 6000;
 constexpr qint64 kSnapshotStaleThresholdMs = 6000;
 
 QJsonObject mergedIndexHealth(const QJsonObject& queryHealthResult)
@@ -78,10 +85,21 @@ void HealthAggregatorActor::stop()
         return;
     }
     m_running = false;
+    m_refreshPending = false;
+    m_refreshInFlight = false;
     m_pollTimer.stop();
     m_eventDebounceTimer.stop();
     if (m_queryClient) {
         m_queryClient->disconnect();
+    }
+    if (m_indexerClient) {
+        m_indexerClient->disconnect();
+    }
+    if (m_inferenceClient) {
+        m_inferenceClient->disconnect();
+    }
+    if (m_extractorClient) {
+        m_extractorClient->disconnect();
     }
 }
 
@@ -124,49 +142,168 @@ QString HealthAggregatorActor::managedServiceState(const QString& serviceName) c
     return QStringLiteral("unavailable");
 }
 
-QJsonObject HealthAggregatorActor::fetchQueryHealth()
+void HealthAggregatorActor::fetchQueryHealthAsync(std::function<void(QJsonObject)> callback)
 {
+    if (!callback) {
+        return;
+    }
+
     if (!m_queryClient) {
         m_queryClient = std::make_unique<SocketClient>();
     }
     if (!m_queryClient->isConnected()) {
         const QString socketPath = ServiceBase::socketPath(QStringLiteral("query"));
         if (!m_queryClient->connectToServer(socketPath, 120)) {
-            return {};
+            callback({});
+            return;
         }
     }
 
-    auto response = m_queryClient->sendRequest(QStringLiteral("getQueryHealthV3"), {}, 250);
-    if (!response) {
-        response = m_queryClient->sendRequest(QStringLiteral("getHealthV2"), {}, 250);
-    }
-    if (!response) {
-        return {};
-    }
-    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        return {};
-    }
-    return response->value(QStringLiteral("result")).toObject();
+    QPointer<HealthAggregatorActor> self(this);
+    m_queryClient->sendRequestAsync(
+        QStringLiteral("getQueryHealthV3"),
+        {},
+        kQueryProbeTimeoutMs,
+        [self, callback = std::move(callback)](const std::optional<QJsonObject>& response) mutable {
+            if (!self) {
+                return;
+            }
+            if (!response.has_value()) {
+                callback({});
+                return;
+            }
+            if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                callback({});
+                return;
+            }
+            callback(response->value(QStringLiteral("result")).toObject());
+        });
 }
 
-QJsonObject HealthAggregatorActor::fetchIndexerQueue()
+void HealthAggregatorActor::fetchIndexerQueueAsync(std::function<void(QJsonObject)> callback)
 {
-    if (!isManagedServiceReady(QStringLiteral("indexer"))) {
-        return {};
+    if (!callback) {
+        return;
     }
 
-    SocketClient indexerClient;
-    if (!indexerClient.connectToServer(ServiceBase::socketPath(QStringLiteral("indexer")), 120)) {
-        return {};
+    if (!isManagedServiceReady(QStringLiteral("indexer"))) {
+        callback({});
+        return;
     }
-    const auto response = indexerClient.sendRequest(QStringLiteral("getQueueStatus"), {}, 250);
-    if (!response.has_value()) {
-        return {};
+
+    if (!m_indexerClient) {
+        m_indexerClient = std::make_unique<SocketClient>();
     }
-    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        return {};
+    if (!m_indexerClient->isConnected()) {
+        if (!m_indexerClient->connectToServer(ServiceBase::socketPath(QStringLiteral("indexer")), 120)) {
+            callback({});
+            return;
+        }
     }
-    return response->value(QStringLiteral("result")).toObject();
+
+    QPointer<HealthAggregatorActor> self(this);
+    m_indexerClient->sendRequestAsync(
+        QStringLiteral("getQueueStatus"),
+        {},
+        kIndexerProbeTimeoutMs,
+        [self, callback = std::move(callback)](const std::optional<QJsonObject>& response) mutable {
+            if (!self) {
+                return;
+            }
+            if (!response.has_value()) {
+                callback({});
+                return;
+            }
+            if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                callback({});
+                return;
+            }
+            callback(response->value(QStringLiteral("result")).toObject());
+        });
+}
+
+void HealthAggregatorActor::fetchInferenceHealthAsync(std::function<void(QJsonObject)> callback)
+{
+    if (!callback) {
+        return;
+    }
+
+    if (!isManagedServiceReady(QStringLiteral("inference"))) {
+        callback({});
+        return;
+    }
+
+    if (!m_inferenceClient) {
+        m_inferenceClient = std::make_unique<SocketClient>();
+    }
+    if (!m_inferenceClient->isConnected()) {
+        if (!m_inferenceClient->connectToServer(ServiceBase::socketPath(QStringLiteral("inference")), 120)) {
+            callback({});
+            return;
+        }
+    }
+
+    QPointer<HealthAggregatorActor> self(this);
+    m_inferenceClient->sendRequestAsync(
+        QStringLiteral("get_inference_health"),
+        {},
+        kInferenceProbeTimeoutMs,
+        [self, callback = std::move(callback)](const std::optional<QJsonObject>& response) mutable {
+            if (!self) {
+                return;
+            }
+            if (!response.has_value()) {
+                callback({});
+                return;
+            }
+            if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                callback({});
+                return;
+            }
+            callback(response->value(QStringLiteral("result")).toObject());
+        });
+}
+
+void HealthAggregatorActor::fetchExtractorHealthAsync(std::function<void(QJsonObject)> callback)
+{
+    if (!callback) {
+        return;
+    }
+
+    if (!isManagedServiceReady(QStringLiteral("extractor"))) {
+        callback({});
+        return;
+    }
+
+    if (!m_extractorClient) {
+        m_extractorClient = std::make_unique<SocketClient>();
+    }
+    if (!m_extractorClient->isConnected()) {
+        if (!m_extractorClient->connectToServer(ServiceBase::socketPath(QStringLiteral("extractor")), 120)) {
+            callback({});
+            return;
+        }
+    }
+
+    QPointer<HealthAggregatorActor> self(this);
+    m_extractorClient->sendRequestAsync(
+        QStringLiteral("ping"),
+        {},
+        kExtractorProbeTimeoutMs,
+        [self, callback = std::move(callback)](const std::optional<QJsonObject>& response) mutable {
+            if (!self) {
+                return;
+            }
+            if (!response.has_value()) {
+                callback({});
+                return;
+            }
+            if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                callback({});
+                return;
+            }
+            callback(response->value(QStringLiteral("result")).toObject());
+        });
 }
 
 QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
@@ -205,6 +342,12 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
         || mergedHealth.value(QStringLiteral("overallStatus")).toString() == QLatin1String("rebuilding")) {
         rebuilding = true;
     }
+    if (mergedHealth.value(QStringLiteral("inferenceProbeState")).toString()
+            == QLatin1String("unavailable")
+        || mergedHealth.value(QStringLiteral("extractorProbeState")).toString()
+               == QLatin1String("unavailable")) {
+        degradedService = true;
+    }
 
     if (missingRequired) {
         if (reason) *reason = QStringLiteral("required_service_unavailable");
@@ -230,6 +373,60 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
 
 void HealthAggregatorActor::refreshNow()
 {
+    if (!m_running) {
+        return;
+    }
+    if (m_refreshInFlight) {
+        m_refreshPending = true;
+        return;
+    }
+
+    m_refreshInFlight = true;
+    QPointer<HealthAggregatorActor> self(this);
+    fetchQueryHealthAsync([self](QJsonObject queryHealth) {
+        if (!self) {
+            return;
+        }
+        self->fetchIndexerQueueAsync([self, queryHealth = std::move(queryHealth)](QJsonObject indexerQueue) {
+            if (!self) {
+                return;
+            }
+            self->fetchInferenceHealthAsync(
+                [self,
+                 queryHealth = std::move(queryHealth),
+                 indexerQueue = std::move(indexerQueue)](QJsonObject inferenceHealth) mutable {
+                    if (!self) {
+                        return;
+                    }
+                    self->fetchExtractorHealthAsync(
+                        [self,
+                         queryHealth = std::move(queryHealth),
+                         indexerQueue = std::move(indexerQueue),
+                         inferenceHealth = std::move(inferenceHealth)](QJsonObject extractorHealth) mutable {
+                            if (!self) {
+                                return;
+                            }
+                            self->buildAndPublishSnapshot(
+                                queryHealth,
+                                indexerQueue,
+                                inferenceHealth,
+                                extractorHealth);
+                            self->m_refreshInFlight = false;
+                            if (self->m_refreshPending) {
+                                self->m_refreshPending = false;
+                                QTimer::singleShot(0, self, &HealthAggregatorActor::refreshNow);
+                            }
+                        });
+                });
+        });
+    });
+}
+
+void HealthAggregatorActor::buildAndPublishSnapshot(const QJsonObject& queryHealth,
+                                                    const QJsonObject& indexerQueue,
+                                                    const QJsonObject& inferenceHealth,
+                                                    const QJsonObject& extractorHealth)
+{
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
 
     HealthSnapshotV2 snapshot = unavailableSnapshot(
@@ -242,15 +439,43 @@ void HealthAggregatorActor::refreshNow()
     processes[QStringLiteral("orphanCount")] = 0;
     snapshot.processes = processes;
 
-    QJsonObject queryHealth = fetchQueryHealth();
     QJsonObject mergedHealth;
     if (!queryHealth.isEmpty()) {
         mergedHealth = mergedIndexHealth(queryHealth);
         snapshot.compatibility = mergedHealth;
     }
+    if (!inferenceHealth.isEmpty()) {
+        mergedHealth[QStringLiteral("inferenceServiceConnected")] =
+            inferenceHealth.value(QStringLiteral("connected")).toBool(true);
+        mergedHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+            inferenceHealth.value(QStringLiteral("roleStatusByModel")).toObject();
+        mergedHealth[QStringLiteral("inferenceQueueDepthByRole")] =
+            inferenceHealth.value(QStringLiteral("queueDepthByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceTimeoutCountByRole")] =
+            inferenceHealth.value(QStringLiteral("timeoutCountByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceServiceFailureCountByRole")] =
+            inferenceHealth.value(QStringLiteral("failureCountByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceServiceRestartCountByRole")] =
+            inferenceHealth.value(QStringLiteral("restartCountByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceSupervisorStateByRole")] =
+            inferenceHealth.value(QStringLiteral("supervisorStateByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceBackoffMsByRole")] =
+            inferenceHealth.value(QStringLiteral("backoffMsByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
+            inferenceHealth.value(QStringLiteral("restartBudgetExhaustedByRole")).toObject();
+        mergedHealth[QStringLiteral("inferenceProbeState")] = QStringLiteral("fresh");
+    } else if (!mergedHealth.contains(QStringLiteral("inferenceProbeState"))) {
+        mergedHealth[QStringLiteral("inferenceProbeState")] = QStringLiteral("unavailable");
+    }
 
-    // Refresh queue metrics from indexer directly, but keep query-local summary as baseline.
-    const QJsonObject indexerQueue = fetchIndexerQueue();
+    if (!extractorHealth.isEmpty()) {
+        mergedHealth[QStringLiteral("extractorProbeState")] = QStringLiteral("fresh");
+        mergedHealth[QStringLiteral("extractorLastPingMs")] =
+            extractorHealth.value(QStringLiteral("timestamp")).toInteger(now);
+    } else if (!mergedHealth.contains(QStringLiteral("extractorProbeState"))) {
+        mergedHealth[QStringLiteral("extractorProbeState")] = QStringLiteral("unavailable");
+    }
+
     if (!indexerQueue.isEmpty()) {
         mergedHealth[QStringLiteral("queuePending")] = indexerQueue.value(QStringLiteral("pending")).toInt();
         mergedHealth[QStringLiteral("queueInProgress")] = indexerQueue.value(QStringLiteral("processing")).toInt();
@@ -263,16 +488,24 @@ void HealthAggregatorActor::refreshNow()
             indexerQueue.value(QStringLiteral("rebuildRunning")).toBool(false);
         mergedHealth[QStringLiteral("queueRebuildStatus")] =
             indexerQueue.value(QStringLiteral("rebuildStatus")).toString(QStringLiteral("idle"));
+        const QJsonObject lastProgress =
+            indexerQueue.value(QStringLiteral("lastProgressReport")).toObject();
+        mergedHealth[QStringLiteral("queueScanned")] = lastProgress.value(QStringLiteral("scanned")).toInt();
+        mergedHealth[QStringLiteral("queueTotal")] = lastProgress.value(QStringLiteral("total")).toInt();
+        mergedHealth[QStringLiteral("queueProgressPct")] = mergedHealth.value(QStringLiteral("queueTotal")).toInt() > 0
+            ? (100.0 * static_cast<double>(mergedHealth.value(QStringLiteral("queueScanned")).toInt())
+               / static_cast<double>(mergedHealth.value(QStringLiteral("queueTotal")).toInt()))
+            : 0.0;
         mergedHealth[QStringLiteral("queueCoalesced")] = indexerQueue.value(QStringLiteral("coalesced")).toInt();
         mergedHealth[QStringLiteral("queueStaleDropped")] = indexerQueue.value(QStringLiteral("staleDropped")).toInt();
         mergedHealth[QStringLiteral("queuePrepWorkers")] = indexerQueue.value(QStringLiteral("prepWorkers")).toInt();
         mergedHealth[QStringLiteral("queueWriterBatchDepth")] =
             indexerQueue.value(QStringLiteral("writerBatchDepth")).toInt();
         mergedHealth[QStringLiteral("queueSource")] = QStringLiteral("indexer_rpc");
-    } else {
-        if (!mergedHealth.contains(QStringLiteral("queueSource"))) {
-            mergedHealth[QStringLiteral("queueSource")] = QStringLiteral("unavailable");
-        }
+        mergedHealth[QStringLiteral("pipelineBulkhead")] =
+            indexerQueue.value(QStringLiteral("bulkhead")).toObject();
+    } else if (!mergedHealth.contains(QStringLiteral("queueSource"))) {
+        mergedHealth[QStringLiteral("queueSource")] = QStringLiteral("unavailable");
     }
 
     const qint64 payloadSnapshotTime =
@@ -287,23 +520,47 @@ void HealthAggregatorActor::refreshNow()
         m_managedServices, mergedHealth, snapshot.stalenessMs, &overallReason);
     snapshot.overallReason = overallReason;
 
-    // Components
     QJsonObject components;
     for (const QJsonValue& value : m_managedServices) {
         const QJsonObject row = value.toObject();
+        const QString serviceName = row.value(QStringLiteral("name")).toString();
         HealthComponentV2 component;
         component.state = row.value(QStringLiteral("state")).toString();
-        component.reason = row.value(QStringLiteral("running")).toBool(false)
+        if (component.state.isEmpty()) {
+            component.state = QStringLiteral("unavailable");
+        }
+        const bool running = row.value(QStringLiteral("running")).toBool(false);
+        const bool ready = row.value(QStringLiteral("ready")).toBool(false);
+        component.reason = (running && ready)
             ? QStringLiteral("running")
-            : QStringLiteral("not_running");
+            : QStringLiteral("not_ready");
         component.lastUpdatedMs = row.value(QStringLiteral("updatedAtMs")).toInteger(now);
         component.stalenessMs = std::max<qint64>(0, now - component.lastUpdatedMs);
+        if (component.stalenessMs > kComponentStaleThresholdMs) {
+            component.state = QStringLiteral("stale");
+            component.reason = QStringLiteral("component_stale");
+        } else if (serviceName == QLatin1String("inference")
+                   && mergedHealth.value(QStringLiteral("inferenceProbeState")).toString()
+                       != QLatin1String("fresh")) {
+            if (component.state == QLatin1String("ready")
+                || component.state == QLatin1String("running")) {
+                component.state = QStringLiteral("degraded");
+            }
+            component.reason = QStringLiteral("probe_unavailable");
+        } else if (serviceName == QLatin1String("extractor")
+                   && mergedHealth.value(QStringLiteral("extractorProbeState")).toString()
+                       != QLatin1String("fresh")) {
+            if (component.state == QLatin1String("ready")
+                || component.state == QLatin1String("running")) {
+                component.state = QStringLiteral("degraded");
+            }
+            component.reason = QStringLiteral("probe_unavailable");
+        }
         component.metrics = row;
-        components[row.value(QStringLiteral("name")).toString()] = healthComponentToJson(component);
+        components[serviceName] = healthComponentToJson(component);
     }
     snapshot.components = components;
 
-    // Structured sections
     QJsonObject queue;
     queue[QStringLiteral("pending")] = mergedHealth.value(QStringLiteral("queuePending")).toInt();
     queue[QStringLiteral("inProgress")] = mergedHealth.value(QStringLiteral("queueInProgress")).toInt();
@@ -315,9 +572,26 @@ void HealthAggregatorActor::refreshNow()
     queue[QStringLiteral("staleDropped")] = mergedHealth.value(QStringLiteral("queueStaleDropped")).toInt();
     queue[QStringLiteral("prepWorkers")] = mergedHealth.value(QStringLiteral("queuePrepWorkers")).toInt();
     queue[QStringLiteral("writerBatchDepth")] = mergedHealth.value(QStringLiteral("queueWriterBatchDepth")).toInt();
-    queue[QStringLiteral("embeddingQueue")] =
-        mergedHealth.value(QStringLiteral("queueEmbedding")).toInt(0);
+    int embeddingQueueDepth = mergedHealth.value(QStringLiteral("queueEmbedding")).toInt(-1);
+    if (embeddingQueueDepth < 0) {
+        const QJsonObject roleDepth = mergedHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
+        int sum = 0;
+        for (auto it = roleDepth.begin(); it != roleDepth.end(); ++it) {
+            if (!it.key().startsWith(QStringLiteral("bi-encoder"))) {
+                continue;
+            }
+            const QJsonObject depth = it.value().toObject();
+            sum += depth.value(QStringLiteral("live")).toInt();
+            sum += depth.value(QStringLiteral("rebuild")).toInt();
+        }
+        embeddingQueueDepth = sum;
+    }
+    queue[QStringLiteral("embeddingQueue")] = embeddingQueueDepth;
     queue[QStringLiteral("source")] = mergedHealth.value(QStringLiteral("queueSource")).toString();
+    const QJsonObject bulkhead = mergedHealth.value(QStringLiteral("pipelineBulkhead")).toObject();
+    if (!bulkhead.isEmpty()) {
+        queue[QStringLiteral("bulkhead")] = bulkhead;
+    }
     snapshot.queue = queue;
 
     QJsonObject index;
@@ -347,6 +621,12 @@ void HealthAggregatorActor::refreshNow()
         mergedHealth.value(QStringLiteral("inferenceServiceFailureCountByRole")).toObject();
     inference[QStringLiteral("restartCountByRole")] =
         mergedHealth.value(QStringLiteral("inferenceServiceRestartCountByRole")).toObject();
+    inference[QStringLiteral("supervisorStateByRole")] =
+        mergedHealth.value(QStringLiteral("inferenceSupervisorStateByRole")).toObject();
+    inference[QStringLiteral("backoffMsByRole")] =
+        mergedHealth.value(QStringLiteral("inferenceBackoffMsByRole")).toObject();
+    inference[QStringLiteral("restartBudgetExhaustedByRole")] =
+        mergedHealth.value(QStringLiteral("inferenceRestartBudgetExhaustedByRole")).toObject();
     snapshot.inference = inference;
 
     QJsonObject compat = snapshot.compatibility;

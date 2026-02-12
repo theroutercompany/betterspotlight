@@ -82,6 +82,19 @@ bool isTransientExtractionFailure(const PreparedWork& prepared)
     return false;
 }
 
+Pipeline::ActorMode readActorMode()
+{
+    const QString raw =
+        qEnvironmentVariable("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE").trimmed().toLower();
+    if (raw == QLatin1String("legacy")) {
+        return Pipeline::ActorMode::Legacy;
+    }
+    if (raw == QLatin1String("actor_primary")) {
+        return Pipeline::ActorMode::ActorPrimary;
+    }
+    return Pipeline::ActorMode::Dual;
+}
+
 } // namespace
 
 // ── Construction / destruction ──────────────────────────────
@@ -129,6 +142,14 @@ Pipeline::Pipeline(SQLiteStore& store, ExtractionManager& extractor,
     }
 
     m_allowedPrepWorkers.store(m_idlePrepWorkers);
+    m_actorMode = readActorMode();
+    m_pathStateActor = std::make_unique<PathStateActor>();
+    PipelineSchedulerConfig schedulerConfig;
+    schedulerConfig.liveLaneCap = 4000;
+    schedulerConfig.rebuildLaneCap = 20000;
+    schedulerConfig.liveDispatchRatioPct = 70;
+    m_schedulerActor = std::make_unique<PipelineSchedulerActor>(schedulerConfig);
+    m_telemetryActor = std::make_unique<PipelineTelemetryActor>();
     LOG_INFO(bsIndex, "Pipeline created (idle prep workers=%d)",
              static_cast<int>(m_idlePrepWorkers));
 }
@@ -199,6 +220,9 @@ void Pipeline::stop()
     }
 
     m_workQueue.shutdown();
+    if (m_schedulerActor) {
+        m_schedulerActor->shutdown();
+    }
     wakeAllStages();
 
     if (m_scanThread.joinable()) {
@@ -262,6 +286,9 @@ void Pipeline::updatePrepConcurrencyPolicy()
 
     m_allowedPrepWorkers.store(clamped);
     m_extractor.setMaxConcurrent(static_cast<int>(clamped));
+    if (m_telemetryActor) {
+        m_telemetryActor->recordPrepWorkers(clamped);
+    }
 
     wakeAllStages();
 }
@@ -323,22 +350,38 @@ void Pipeline::resetRuntimeState()
     }
     {
         std::lock_guard<std::mutex> lock(m_preparedMutex);
-        m_preparedQueue.clear();
+        m_preparedLiveQueue.clear();
+        m_preparedRebuildQueue.clear();
     }
     {
         std::lock_guard<std::mutex> lock(m_coordMutex);
         m_pathCoordinator.clear();
     }
+    if (m_pathStateActor) {
+        m_pathStateActor->reset();
+    }
+    if (m_telemetryActor) {
+        m_telemetryActor->reset();
+    }
+    m_livePending.store(0);
+    m_rebuildPending.store(0);
 }
 
 void Pipeline::wakeAllStages()
 {
     m_prepCv.notify_all();
     m_preparedCv.notify_all();
+    if (m_schedulerActor) {
+        m_schedulerActor->notifyAll();
+    }
 }
 
 size_t Pipeline::pendingMergedCount() const
 {
+    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+        return m_pathStateActor->pendingMergedCount();
+    }
+
     std::lock_guard<std::mutex> lock(m_coordMutex);
     size_t count = 0;
     for (const auto& [_, state] : m_pathCoordinator) {
@@ -351,7 +394,12 @@ size_t Pipeline::pendingMergedCount() const
 
 size_t Pipeline::totalPendingDepth() const
 {
-    size_t ingress = m_workQueue.size();
+    size_t ingress = 0;
+    if (m_actorMode == ActorMode::ActorPrimary && m_schedulerActor) {
+        ingress = m_schedulerActor->totalDepth();
+    } else {
+        ingress = m_workQueue.size();
+    }
 
     size_t prep = 0;
     {
@@ -359,13 +407,15 @@ size_t Pipeline::totalPendingDepth() const
         prep = m_prepQueue.size();
     }
 
-    size_t prepared = 0;
+    size_t preparedLive = 0;
+    size_t preparedRebuild = 0;
     {
         std::lock_guard<std::mutex> lock(m_preparedMutex);
-        prepared = m_preparedQueue.size();
+        preparedLive = m_preparedLiveQueue.size();
+        preparedRebuild = m_preparedRebuildQueue.size();
     }
 
-    return ingress + prep + prepared + pendingMergedCount();
+    return ingress + prep + preparedLive + preparedRebuild + pendingMergedCount();
 }
 
 bool Pipeline::waitForScanBackpressureWindow() const
@@ -394,25 +444,70 @@ bool Pipeline::waitForScanBackpressureWindow() const
 
 bool Pipeline::enqueuePrimaryWorkItem(const WorkItem& item, int maxAttempts)
 {
+    return enqueueLaneWorkItem(item,
+                               item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live,
+                               maxAttempts);
+}
+
+bool Pipeline::enqueueLaneWorkItem(const WorkItem& item, PipelineLane lane, int maxAttempts)
+{
+    WorkItem laneItem = item;
+    laneItem.rebuildLane = (lane == PipelineLane::Rebuild);
+
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         if (!m_running.load() || m_stopping.load()) {
             return false;
         }
 
         if (!waitForScanBackpressureWindow()) {
+            QString dropReason = QStringLiteral("writer_lag");
+            const int rssMb = processRssMb();
+            if (rssMb >= m_memoryHardLimitMb) {
+                dropReason = QStringLiteral("memory_hard");
+            } else if (rssMb >= m_memorySoftLimitMb) {
+                dropReason = QStringLiteral("memory_soft");
+            }
+            if (m_schedulerActor) {
+                m_schedulerActor->recordDrop(lane, dropReason);
+            }
+            if (m_telemetryActor) {
+                m_telemetryActor->recordDrop(lane, dropReason);
+            }
             return false;
         }
 
-        if (m_workQueue.enqueue(item)) {
+        bool enqueued = false;
+        if (m_actorMode == ActorMode::ActorPrimary) {
+            enqueued = m_schedulerActor && m_schedulerActor->enqueue(laneItem, lane);
+        } else {
+            enqueued = m_workQueue.enqueue(laneItem);
+            if (m_actorMode == ActorMode::Dual && m_schedulerActor) {
+                // Dual mode runs actorized ingress in shadow for drift checks.
+                (void)m_schedulerActor->enqueue(laneItem, lane);
+            }
+        }
+
+        if (enqueued) {
+            if (lane == PipelineLane::Live) {
+                m_livePending.fetch_add(1);
+            } else {
+                m_rebuildPending.fetch_add(1);
+            }
             return true;
         }
 
+        if (m_schedulerActor) {
+            m_schedulerActor->recordDrop(lane, QStringLiteral("queue_full"));
+        }
+        if (m_telemetryActor) {
+            m_telemetryActor->recordDrop(lane, QStringLiteral("queue_full"));
+        }
         std::this_thread::sleep_for(
             std::chrono::milliseconds(m_runtimeConfig.enqueueRetrySleepMs));
     }
 
     LOG_WARN(bsIndex, "Failed to enqueue primary work after retries: %s",
-             item.filePath.c_str());
+             laneItem.filePath.c_str());
     return false;
 }
 
@@ -458,6 +553,7 @@ void Pipeline::reindexPath(const QString& path)
     WorkItem item;
     item.type = WorkItem::Type::ModifiedContent;
     item.filePath = path.toStdString();
+    item.rebuildLane = false;
 
     LOG_INFO(bsIndex, "Re-index requested: %s", qUtf8Printable(path));
     if (!enqueuePrimaryWorkItem(item, 200)) {
@@ -502,7 +598,8 @@ void Pipeline::rebuildAll(const std::vector<std::string>& roots)
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
-            if (enqueuePrimaryWorkItem(item)) {
+            item.rebuildLane = true;
+            if (enqueueLaneWorkItem(item, PipelineLane::Rebuild)) {
                 ++enqueued;
             } else {
                 m_failedCount.fetch_add(1);
@@ -517,13 +614,28 @@ void Pipeline::rebuildAll(const std::vector<std::string>& roots)
 
 QueueStats Pipeline::queueStatus() const
 {
-    QueueStats stats = m_workQueue.stats();
+    QueueStats stats;
+    if (m_actorMode == ActorMode::ActorPrimary) {
+        if (m_schedulerActor) {
+            const PipelineSchedulerStats schedulerStats = m_schedulerActor->stats();
+            stats.depth = schedulerStats.liveDepth + schedulerStats.rebuildDepth;
+            stats.droppedItems = schedulerStats.droppedQueueFull
+                + schedulerStats.droppedMemorySoft
+                + schedulerStats.droppedMemoryHard
+                + schedulerStats.droppedWriterLag;
+            stats.coalesced = schedulerStats.coalesced;
+            stats.staleDropped = schedulerStats.staleDropped;
+        }
+        stats.isPaused = m_paused.load();
+    } else {
+        stats = m_workQueue.stats();
+    }
 
     stats.depth = totalPendingDepth();
     stats.preparing = m_preparingCount.load();
     stats.writing = m_writingCount.load();
-    stats.coalesced = m_coalescedCount.load();
-    stats.staleDropped = m_staleDroppedCount.load();
+    stats.coalesced = std::max<size_t>(stats.coalesced, m_coalescedCount.load());
+    stats.staleDropped = std::max<size_t>(stats.staleDropped, m_staleDroppedCount.load());
     stats.prepWorkers = m_allowedPrepWorkers.load();
     stats.writerBatchDepth = m_writerBatchDepth.load();
     stats.failedItems = stats.droppedItems + m_failedCount.load();
@@ -531,6 +643,51 @@ QueueStats Pipeline::queueStatus() const
     stats.activeItems = stats.preparing + stats.writing;
 
     return stats;
+}
+
+QJsonObject Pipeline::telemetrySnapshot() const
+{
+    QJsonObject out;
+    out[QStringLiteral("actorMode")] = actorModeString();
+    out[QStringLiteral("livePending")] = static_cast<qint64>(m_livePending.load());
+    out[QStringLiteral("rebuildPending")] = static_cast<qint64>(m_rebuildPending.load());
+    if (m_schedulerActor) {
+        const PipelineSchedulerStats schedulerStats = m_schedulerActor->stats();
+        out[QStringLiteral("liveLaneDepth")] = static_cast<qint64>(schedulerStats.liveDepth);
+        out[QStringLiteral("rebuildLaneDepth")] = static_cast<qint64>(schedulerStats.rebuildDepth);
+        out[QStringLiteral("bulkheadDropQueueFull")] =
+            static_cast<qint64>(schedulerStats.droppedQueueFull);
+        out[QStringLiteral("bulkheadDropMemorySoft")] =
+            static_cast<qint64>(schedulerStats.droppedMemorySoft);
+        out[QStringLiteral("bulkheadDropMemoryHard")] =
+            static_cast<qint64>(schedulerStats.droppedMemoryHard);
+        out[QStringLiteral("bulkheadDropWriterLag")] =
+            static_cast<qint64>(schedulerStats.droppedWriterLag);
+        out[QStringLiteral("schedulerDispatchLive")] =
+            static_cast<qint64>(schedulerStats.dispatchedLive);
+        out[QStringLiteral("schedulerDispatchRebuild")] =
+            static_cast<qint64>(schedulerStats.dispatchedRebuild);
+    }
+    if (m_telemetryActor) {
+        const QJsonObject telemetry = m_telemetryActor->snapshot();
+        for (auto it = telemetry.begin(); it != telemetry.end(); ++it) {
+            out[it.key()] = it.value();
+        }
+    }
+    return out;
+}
+
+QString Pipeline::actorModeString() const
+{
+    switch (m_actorMode) {
+    case ActorMode::Legacy:
+        return QStringLiteral("legacy");
+    case ActorMode::Dual:
+        return QStringLiteral("dual");
+    case ActorMode::ActorPrimary:
+        return QStringLiteral("actor_primary");
+    }
+    return QStringLiteral("dual");
 }
 
 // ── Scan thread ─────────────────────────────────────────────
@@ -557,7 +714,8 @@ void Pipeline::scanEntry()
             WorkItem item;
             item.type = WorkItem::Type::NewFile;
             item.filePath = std::move(meta.filePath);
-            if (!enqueuePrimaryWorkItem(item)) {
+            item.rebuildLane = true;
+            if (!enqueueLaneWorkItem(item, PipelineLane::Rebuild)) {
                 m_failedCount.fetch_add(1);
             }
         }
@@ -571,6 +729,26 @@ void Pipeline::scanEntry()
 
 std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkItem& item)
 {
+    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+        const auto actorTask = m_pathStateActor->onIngress(item);
+        if (!actorTask.has_value()) {
+            if (m_schedulerActor) {
+                m_schedulerActor->recordCoalesced();
+            }
+            if (m_telemetryActor) {
+                m_telemetryActor->recordCoalesced();
+            }
+            m_coalescedCount.fetch_add(1);
+            return std::nullopt;
+        }
+
+        PrepTask task;
+        task.item = actorTask->item;
+        task.generation = actorTask->generation;
+        task.lane = actorTask->item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
+        return task;
+    }
+
     std::lock_guard<std::mutex> lock(m_coordMutex);
 
     PathCoordinatorState& state = m_pathCoordinator[item.filePath];
@@ -582,6 +760,7 @@ std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkIte
         } else {
             state.pendingMergedType = item.type;
         }
+        state.pendingRebuildLane = state.pendingRebuildLane || item.rebuildLane;
 
         m_coalescedCount.fetch_add(1);
         LOG_DEBUG(bsIndex, "Coordinator coalesced path=%s gen=%lld",
@@ -591,15 +770,29 @@ std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkIte
     }
 
     state.inPrep = true;
+    state.pendingRebuildLane = false;
 
     PrepTask task;
     task.item = item;
     task.generation = state.latestGeneration;
+    task.lane = item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
     return task;
 }
 
 std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& prepared)
 {
+    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+        const auto actorTask = m_pathStateActor->onPrepCompleted(prepared);
+        if (!actorTask.has_value()) {
+            return std::nullopt;
+        }
+        PrepTask task;
+        task.item = actorTask->item;
+        task.generation = actorTask->generation;
+        task.lane = actorTask->item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
+        return task;
+    }
+
     const std::string path = prepared.path.toStdString();
 
     std::lock_guard<std::mutex> lock(m_coordMutex);
@@ -613,9 +806,12 @@ std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& 
         PrepTask task;
         task.item.type = state.pendingMergedType.value();
         task.item.filePath = path;
+        task.item.rebuildLane = state.pendingRebuildLane;
         task.generation = state.latestGeneration;
+        task.lane = state.pendingRebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
 
         state.pendingMergedType.reset();
+        state.pendingRebuildLane = false;
         state.inPrep = true;
         return task;
     }
@@ -626,6 +822,10 @@ std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& 
 
 bool Pipeline::isStalePreparedWork(const PreparedWork& prepared) const
 {
+    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+        return m_pathStateActor->isStalePrepared(prepared);
+    }
+
     const std::string path = prepared.path.toStdString();
 
     std::lock_guard<std::mutex> lock(m_coordMutex);
@@ -648,16 +848,57 @@ void Pipeline::prepDispatcherLoop()
         if ((policyTick++ % 32) == 0) {
             updatePrepConcurrencyPolicy();
         }
-        auto item = m_workQueue.dequeue();
-        if (!item.has_value()) {
+
+        std::optional<WorkItem> ingressItem;
+        if (m_actorMode == ActorMode::ActorPrimary && m_schedulerActor) {
+            auto scheduled = m_schedulerActor->dequeueBlocking(m_stopping, m_paused);
+            if (scheduled.has_value()) {
+                ingressItem = scheduled->item;
+                if (scheduled->lane == PipelineLane::Live) {
+                    const size_t pending = m_livePending.load();
+                    if (pending > 0) {
+                        m_livePending.fetch_sub(1);
+                    }
+                } else {
+                    const size_t pending = m_rebuildPending.load();
+                    if (pending > 0) {
+                        m_rebuildPending.fetch_sub(1);
+                    }
+                }
+            }
+        } else {
+            auto queued = m_workQueue.dequeue();
+            if (queued.has_value()) {
+                ingressItem = queued.value();
+                if (ingressItem->rebuildLane) {
+                    const size_t pending = m_rebuildPending.load();
+                    if (pending > 0) {
+                        m_rebuildPending.fetch_sub(1);
+                    }
+                } else {
+                    const size_t pending = m_livePending.load();
+                    if (pending > 0) {
+                        m_livePending.fetch_sub(1);
+                    }
+                }
+                // Drain actorized scheduler in dual mode to keep shadow path bounded.
+                if (m_actorMode == ActorMode::Dual && m_schedulerActor) {
+                    (void)m_schedulerActor->tryDequeue();
+                }
+            }
+        }
+
+        if (!ingressItem.has_value()) {
             if (m_stopping.load() || !m_running.load()) {
                 break;
             }
             continue;
         }
 
-        auto prepTask = tryDispatchFromIngress(item.value());
-        m_workQueue.markItemComplete();
+        auto prepTask = tryDispatchFromIngress(ingressItem.value());
+        if (m_actorMode != ActorMode::ActorPrimary) {
+            m_workQueue.markItemComplete();
+        }
 
         if (!prepTask.has_value()) {
             continue;
@@ -708,11 +949,16 @@ void Pipeline::prepWorkerLoop(size_t workerIndex)
 
         m_preparingCount.fetch_add(1);
         PreparedWork prepared = m_indexer->prepareWorkItem(task.item, task.generation);
+        prepared.rebuildLane = (task.lane == PipelineLane::Rebuild);
         m_preparingCount.fetch_sub(1);
 
         {
             std::lock_guard<std::mutex> lock(m_preparedMutex);
-            m_preparedQueue.push_back(prepared);
+            if (prepared.rebuildLane) {
+                m_preparedRebuildQueue.push_back(prepared);
+            } else {
+                m_preparedLiveQueue.push_back(prepared);
+            }
         }
         m_preparedCv.notify_one();
 
@@ -733,6 +979,7 @@ void Pipeline::writerLoop()
 
     bool inTransaction = false;
     int batchCount = 0;
+    int writerDispatchCycle = 0;
     QElapsedTimer batchTimer;
 
     auto commitBatch = [this, &inTransaction, &batchCount]() {
@@ -746,6 +993,9 @@ void Pipeline::writerLoop()
         m_committedCount.fetch_add(static_cast<size_t>(batchCount));
         batchCount = 0;
         m_writerBatchDepth.store(0);
+        if (m_telemetryActor) {
+            m_telemetryActor->recordWriterBatchDepth(0);
+        }
 
         const int processed = m_processedCount.load();
         const int total = processed + static_cast<int>(totalPendingDepth());
@@ -761,10 +1011,12 @@ void Pipeline::writerLoop()
         {
             std::unique_lock<std::mutex> lock(m_preparedMutex);
             m_preparedCv.wait_for(lock, std::chrono::milliseconds(50), [this] {
-                return !m_preparedQueue.empty() || m_stopping.load();
+                return !m_preparedLiveQueue.empty()
+                    || !m_preparedRebuildQueue.empty()
+                    || m_stopping.load();
             });
 
-            if (m_preparedQueue.empty()) {
+            if (m_preparedLiveQueue.empty() && m_preparedRebuildQueue.empty()) {
                 bool prepQueueEmpty = false;
                 {
                     std::lock_guard<std::mutex> prepLock(m_prepMutex);
@@ -779,8 +1031,21 @@ void Pipeline::writerLoop()
                     shouldCommitIdleBatch = true;
                 }
             } else {
-                prepared = std::move(m_preparedQueue.front());
-                m_preparedQueue.pop_front();
+                const bool hasLive = !m_preparedLiveQueue.empty();
+                const bool hasRebuild = !m_preparedRebuildQueue.empty();
+                bool pickLive = hasLive;
+                if (hasLive && hasRebuild) {
+                    const int slot = writerDispatchCycle % 100;
+                    pickLive = (slot < 70);
+                    ++writerDispatchCycle;
+                }
+                if (pickLive) {
+                    prepared = std::move(m_preparedLiveQueue.front());
+                    m_preparedLiveQueue.pop_front();
+                } else {
+                    prepared = std::move(m_preparedRebuildQueue.front());
+                    m_preparedRebuildQueue.pop_front();
+                }
                 hasPreparedWork = true;
             }
         }
@@ -803,9 +1068,17 @@ void Pipeline::writerLoop()
         }
 
         m_writingCount.store(1);
+        const PipelineLane lane =
+            prepared.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
 
         if (isStalePreparedWork(prepared)) {
             m_staleDroppedCount.fetch_add(1);
+            if (m_schedulerActor) {
+                m_schedulerActor->recordStaleDropped();
+            }
+            if (m_telemetryActor) {
+                m_telemetryActor->recordStaleDrop();
+            }
             LOG_DEBUG(bsIndex, "Writer dropped stale work path=%s gen=%lld",
                       qUtf8Printable(prepared.path),
                       static_cast<long long>(prepared.generation));
@@ -827,7 +1100,10 @@ void Pipeline::writerLoop()
                         m_runtimeConfig.retryBackoffCapMs);
                     std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
 
-                    if (m_workQueue.enqueue(retryItem)) {
+                    if (enqueueLaneWorkItem(
+                            retryItem,
+                            prepared.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live,
+                            80)) {
                         m_retriedCount.fetch_add(1);
                         LOG_INFO(bsIndex, "Re-enqueued for retry (%d/%d): %s",
                                  retryItem.retryCount,
@@ -847,6 +1123,10 @@ void Pipeline::writerLoop()
 
             ++batchCount;
             m_writerBatchDepth.store(static_cast<size_t>(batchCount));
+            if (m_telemetryActor) {
+                m_telemetryActor->recordWriterDispatch(lane);
+                m_telemetryActor->recordWriterBatchDepth(static_cast<size_t>(batchCount));
+            }
 
             LOG_DEBUG(bsIndex,
                       "Writer applied path=%s gen=%lld status=%d prep=%dms write=%dms",
@@ -868,12 +1148,15 @@ void Pipeline::writerLoop()
         bool preparedQueueEmpty = false;
         {
             std::lock_guard<std::mutex> preparedLock(m_preparedMutex);
-            preparedQueueEmpty = m_preparedQueue.empty();
+            preparedQueueEmpty = m_preparedLiveQueue.empty()
+                && m_preparedRebuildQueue.empty();
         }
 
         const bool queueDrained = prepQueueEmpty
             && m_preparingCount.load() == 0
-            && m_workQueue.size() == 0
+            && ((m_actorMode == ActorMode::ActorPrimary && m_schedulerActor)
+                    ? (m_schedulerActor->totalDepth() == 0)
+                    : (m_workQueue.size() == 0))
             && preparedQueueEmpty
             && pendingMergedCount() == 0;
 
@@ -913,14 +1196,15 @@ void Pipeline::onFileSystemEvents(const std::vector<WorkItem>& items)
         if (validation == ValidationResult::Exclude) {
             continue;
         }
+        const PipelineLane lane = item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
         if (item.type == WorkItem::Type::NewFile
             || item.type == WorkItem::Type::ModifiedContent) {
-            if (enqueuePrimaryWorkItem(item, 80)) {
+            if (enqueueLaneWorkItem(item, lane, 80)) {
                 ++enqueued;
             } else {
                 m_failedCount.fetch_add(1);
             }
-        } else if (m_workQueue.enqueue(item)) {
+        } else if (enqueueLaneWorkItem(item, lane, 80)) {
             ++enqueued;
         }
     }

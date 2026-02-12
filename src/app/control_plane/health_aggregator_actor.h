@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QTimer>
+#include <functional>
 #include <memory>
 
 namespace bs {
@@ -29,8 +30,14 @@ signals:
 
 private:
     void refreshNow();
-    QJsonObject fetchQueryHealth();
-    QJsonObject fetchIndexerQueue();
+    void fetchQueryHealthAsync(std::function<void(QJsonObject)> callback);
+    void fetchIndexerQueueAsync(std::function<void(QJsonObject)> callback);
+    void fetchInferenceHealthAsync(std::function<void(QJsonObject)> callback);
+    void fetchExtractorHealthAsync(std::function<void(QJsonObject)> callback);
+    void buildAndPublishSnapshot(const QJsonObject& queryHealth,
+                                 const QJsonObject& indexerQueue,
+                                 const QJsonObject& inferenceHealth,
+                                 const QJsonObject& extractorHealth);
     bool isManagedServiceReady(const QString& serviceName) const;
     QString managedServiceState(const QString& serviceName) const;
     static QString computeOverallState(const QJsonArray& services,
@@ -44,8 +51,13 @@ private:
     QJsonArray m_managedServices;
     qint64 m_lastSnapshotTimeMs = 0;
     bool m_running = false;
+    bool m_refreshInFlight = false;
+    bool m_refreshPending = false;
 
     std::unique_ptr<SocketClient> m_queryClient;
+    std::unique_ptr<SocketClient> m_indexerClient;
+    std::unique_ptr<SocketClient> m_inferenceClient;
+    std::unique_ptr<SocketClient> m_extractorClient;
 };
 
 } // namespace bs

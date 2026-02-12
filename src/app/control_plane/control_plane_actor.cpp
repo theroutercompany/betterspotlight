@@ -106,25 +106,42 @@ bool ControlPlaneActor::startAll()
     if (!ensureSupervisorInitialized()) {
         return false;
     }
-    if (!m_servicesConfigured) {
-        LOG_WARN(bsCore, "ControlPlaneActor: startAll ignored (services not configured)");
-        return false;
-    }
-    if (m_started && !m_stopping) {
-        return true;
+    QString commandKey;
+    if (!beginCommand(QString(),
+                      QStringLiteral("start_all"),
+                      QStringLiteral("manual"),
+                      &commandKey)) {
+        return m_started && !m_stopping;
     }
 
-    m_stopping = false;
-    m_lifecyclePhase = AppLifecyclePhase::Running;
-    emit lifecyclePhaseChanged(appLifecyclePhaseToString(m_lifecyclePhase));
-    m_started = m_supervisor->startAll();
+    bool started = false;
+    if (!m_servicesConfigured) {
+        LOG_WARN(bsCore, "ControlPlaneActor: startAll ignored (services not configured)");
+    } else if (m_started && !m_stopping) {
+        started = true;
+    } else {
+        m_stopping = false;
+        m_lifecyclePhase = AppLifecyclePhase::Running;
+        emit lifecyclePhaseChanged(appLifecyclePhaseToString(m_lifecyclePhase));
+        m_started = m_supervisor->startAll();
+        started = m_started;
+    }
+
     publishSnapshot();
-    return m_started;
+    endCommand(commandKey);
+    return started;
 }
 
 void ControlPlaneActor::stopAll()
 {
     if (!m_supervisor || m_stopping) {
+        return;
+    }
+    QString commandKey;
+    if (!beginCommand(QString(),
+                      QStringLiteral("stop_all"),
+                      QStringLiteral("manual"),
+                      &commandKey)) {
         return;
     }
 
@@ -137,6 +154,51 @@ void ControlPlaneActor::stopAll()
     m_lifecyclePhase = AppLifecyclePhase::Stopped;
     emit lifecyclePhaseChanged(appLifecyclePhaseToString(m_lifecyclePhase));
     publishSnapshot();
+    endCommand(commandKey);
+}
+
+bool ControlPlaneActor::restartService(const QString& serviceName, const QString& reason)
+{
+    const QString trimmedName = serviceName.trimmed();
+    if (trimmedName.isEmpty() || !ensureSupervisorInitialized()) {
+        return false;
+    }
+
+    QString commandKey;
+    if (!beginCommand(trimmedName, QStringLiteral("restart"), reason, &commandKey)) {
+        return false;
+    }
+
+    const bool restarted = m_supervisor->restartService(trimmedName);
+    if (!restarted) {
+        emit serviceError(trimmedName, QStringLiteral("restart_failed"));
+    }
+    publishSnapshot();
+    endCommand(commandKey);
+    return restarted;
+}
+
+void ControlPlaneActor::shutdown(const QString& reason)
+{
+    QString commandKey;
+    if (!beginCommand(QString(), QStringLiteral("shutdown"), reason, &commandKey)) {
+        return;
+    }
+    if (!m_supervisor || m_stopping) {
+        endCommand(commandKey);
+        return;
+    }
+
+    m_stopping = true;
+    m_lifecyclePhase = AppLifecyclePhase::ShuttingDown;
+    emit lifecyclePhaseChanged(appLifecyclePhaseToString(m_lifecyclePhase));
+    m_supervisor->stopAll();
+    m_started = false;
+    m_stopping = false;
+    m_lifecyclePhase = AppLifecyclePhase::Stopped;
+    emit lifecyclePhaseChanged(appLifecyclePhaseToString(m_lifecyclePhase));
+    publishSnapshot();
+    endCommand(commandKey);
 }
 
 void ControlPlaneActor::setLifecyclePhase(const QString& phase)
@@ -265,6 +327,62 @@ void ControlPlaneActor::updateServiceState(const QString& name, const QString& s
         emit serviceStatusChanged(name, status);
     }
     publishSnapshot();
+}
+
+QString ControlPlaneActor::makeCommandKey(const QString& service,
+                                          const QString& verb,
+                                          const QString& reason) const
+{
+    return QStringLiteral("%1|%2|%3")
+        .arg(service.trimmed().toLower(),
+             verb.trimmed().toLower(),
+             reason.trimmed().toLower());
+}
+
+bool ControlPlaneActor::beginCommand(const QString& service,
+                                     const QString& verb,
+                                     const QString& reason,
+                                     QString* commandKeyOut)
+{
+    const QString commandKey = makeCommandKey(service, verb, reason);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    for (auto it = m_recentCommandMs.begin(); it != m_recentCommandMs.end();) {
+        if ((now - it.value()) > kCommandDedupeWindowMs) {
+            it = m_recentCommandMs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (!m_activeCommandKey.isEmpty()) {
+        LOG_DEBUG(bsCore,
+                  "ControlPlaneActor: command '%s' ignored (active=%s)",
+                  qPrintable(commandKey),
+                  qPrintable(m_activeCommandKey));
+        return false;
+    }
+    if (m_recentCommandMs.contains(commandKey)) {
+        LOG_DEBUG(bsCore,
+                  "ControlPlaneActor: dedup command '%s' (recently completed)",
+                  qPrintable(commandKey));
+        return false;
+    }
+
+    m_activeCommandKey = commandKey;
+    m_recentCommandMs.insert(commandKey, now);
+    if (commandKeyOut) {
+        *commandKeyOut = commandKey;
+    }
+    return true;
+}
+
+void ControlPlaneActor::endCommand(const QString& commandKey)
+{
+    if (m_activeCommandKey == commandKey) {
+        m_activeCommandKey.clear();
+    }
+    m_recentCommandMs.insert(commandKey, QDateTime::currentMSecsSinceEpoch());
 }
 
 } // namespace bs

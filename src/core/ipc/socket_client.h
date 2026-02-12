@@ -25,6 +25,12 @@ public:
                                             const QJsonObject& params = {},
                                             int timeoutMs = 30000);
 
+    using RequestCallback = std::function<void(const std::optional<QJsonObject>& response)>;
+    void sendRequestAsync(const QString& method,
+                          const QJsonObject& params,
+                          int timeoutMs,
+                          RequestCallback callback);
+
     // Send a notification (no response expected)
     bool sendNotification(const QString& method, const QJsonObject& params = {});
 

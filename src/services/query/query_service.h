@@ -48,6 +48,7 @@ private:
     QJsonObject handleSearch(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetAnswerSnippet(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetHealth(uint64_t id);
+    QJsonObject handleGetQueryHealthV3(uint64_t id);
     QJsonObject handleGetHealthDetails(uint64_t id, const QJsonObject& params);
     QJsonObject handleRecordFeedback(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetFrequency(uint64_t id, const QJsonObject& params);
@@ -164,6 +165,7 @@ private:
     QJsonObject bsignoreStatusJson() const;
     QJsonObject processStatsForService(const QString& serviceName) const;
     QJsonObject queryStatsSnapshot() const;
+    QJsonObject handleGetHealthInternal(uint64_t id, bool includeIndexerQueueProbe);
     bool m_m2Initialized = false;
     bool m_typoLexiconBuildAttempted = false;
     bool m_typoLexiconReady = false;

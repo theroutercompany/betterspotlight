@@ -1,4 +1,6 @@
 #include "inference_service.h"
+#include "inference_supervisor_actor.h"
+#include "inference_worker_actor.h"
 
 #include "core/embedding/embedding_manager.h"
 #include "core/models/model_manifest.h"
@@ -82,6 +84,17 @@ QJsonArray toJsonEmbeddings(const std::vector<std::vector<float>>& embeddings)
 InferenceService::InferenceService(QObject* parent)
     : ServiceBase(QStringLiteral("inference"), parent)
 {
+    const QString mode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INFERENCE_SUPERVISOR_MODE")
+            .trimmed()
+            .toLower();
+    if (mode == QLatin1String("legacy")
+        || mode == QLatin1String("dual")
+        || mode == QLatin1String("actor_primary")) {
+        m_supervisorMode = mode;
+    }
+    m_supervisorActor = std::make_unique<InferenceSupervisorActor>();
+    m_workerActor = std::make_unique<InferenceWorkerActor>();
     initWorkers();
 }
 
@@ -453,12 +466,21 @@ void InferenceService::workerLoop(Worker& worker)
             worker.completed.fetch_add(1);
             worker.consecutiveFailures = 0;
             worker.degraded = placeholderResponse;
+            if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+                m_supervisorActor->recordSuccess(worker.roleName);
+            }
         } else if (status == QLatin1String("timeout")) {
             worker.timedOut.fetch_add(1);
             worker.consecutiveFailures = 0;
+            if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+                m_supervisorActor->recordTimeout(worker.roleName);
+            }
         } else if (status == QLatin1String("cancelled")) {
             worker.cancelled.fetch_add(1);
             worker.consecutiveFailures = 0;
+            if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+                m_supervisorActor->recordTimeout(worker.roleName);
+            }
         } else {
             worker.failed.fetch_add(1);
             worker.consecutiveFailures += 1;
@@ -531,9 +553,15 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
 
     if (worker.available) {
         worker.degraded = false;
+        if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+            m_supervisorActor->resetRole(worker.roleName);
+        }
         LOG_INFO(bsIpc, "InferenceService: worker '%s' initialized",
                  qUtf8Printable(worker.roleName));
     } else {
+        if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+            m_supervisorActor->markRoleUnavailable(worker.roleName);
+        }
         LOG_WARN(bsIpc, "InferenceService: worker '%s' unavailable",
                  qUtf8Printable(worker.roleName));
     }
@@ -543,6 +571,42 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
 
 void InferenceService::maybeRecoverWorker(Worker& worker)
 {
+    if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+        const auto decision = m_supervisorActor->recordFailure(worker.roleName);
+        worker.consecutiveFailures = decision.consecutiveFailures;
+        worker.restartAttempts = decision.restartAttempts;
+        if (decision.givingUp) {
+            worker.degraded = true;
+            LOG_WARN(bsIpc,
+                     "InferenceService: worker '%s' giving up after restart budget exhausted",
+                     qUtf8Printable(worker.roleName));
+            return;
+        }
+
+        if (!decision.restartRequested) {
+            return;
+        }
+
+        if (decision.backoffMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(decision.backoffMs));
+        }
+
+        LOG_WARN(bsIpc,
+                 "InferenceService: recovering worker '%s' with actorized backoff (attempt=%d, backoffMs=%d)",
+                 qUtf8Printable(worker.roleName),
+                 decision.restartAttempts,
+                 decision.backoffMs);
+        initializeWorkerModel(worker);
+        if (worker.available) {
+            m_supervisorActor->recordSuccess(worker.roleName);
+        } else {
+            m_supervisorActor->markRoleUnavailable(worker.roleName);
+            worker.degraded = true;
+        }
+        worker.consecutiveFailures = 0;
+        return;
+    }
+
     if (worker.consecutiveFailures < kWorkerRestartThreshold) {
         return;
     }
@@ -720,12 +784,17 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
 {
     QJsonObject result;
     result[QStringLiteral("connected")] = true;
+    result[QStringLiteral("supervisorMode")] = m_supervisorMode;
+    result[QStringLiteral("globalQueueLimitLive")] = kGlobalQueueLimitLive;
+    result[QStringLiteral("globalQueueLimitRebuild")] = kGlobalQueueLimitRebuild;
 
     QJsonObject roleStatus;
     QJsonObject queueDepth;
     QJsonObject timeoutCounts;
     QJsonObject failureCounts;
     QJsonObject restartCounts;
+    int globalLiveDepth = 0;
+    int globalRebuildDepth = 0;
 
     {
         std::lock_guard<std::mutex> lock(m_workersMutex);
@@ -739,8 +808,12 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
             QJsonObject depth;
             {
                 std::lock_guard<std::mutex> workerLock(worker->mutex);
-                depth[QStringLiteral("live")] = static_cast<qint64>(worker->liveQueue.size());
-                depth[QStringLiteral("rebuild")] = static_cast<qint64>(worker->rebuildQueue.size());
+                const qint64 liveDepth = static_cast<qint64>(worker->liveQueue.size());
+                const qint64 rebuildDepth = static_cast<qint64>(worker->rebuildQueue.size());
+                depth[QStringLiteral("live")] = liveDepth;
+                depth[QStringLiteral("rebuild")] = rebuildDepth;
+                globalLiveDepth += static_cast<int>(liveDepth);
+                globalRebuildDepth += static_cast<int>(rebuildDepth);
             }
             queueDepth[role] = depth;
 
@@ -752,9 +825,22 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
 
     result[QStringLiteral("roleStatusByModel")] = roleStatus;
     result[QStringLiteral("queueDepthByRole")] = queueDepth;
+    result[QStringLiteral("globalQueueDepthLive")] = globalLiveDepth;
+    result[QStringLiteral("globalQueueDepthRebuild")] = globalRebuildDepth;
     result[QStringLiteral("timeoutCountByRole")] = timeoutCounts;
     result[QStringLiteral("failureCountByRole")] = failureCounts;
-    result[QStringLiteral("restartCountByRole")] = restartCounts;
+    if (m_supervisorMode == QLatin1String("legacy") || !m_supervisorActor) {
+        result[QStringLiteral("restartCountByRole")] = restartCounts;
+        result[QStringLiteral("supervisorStateByRole")] = roleStatus;
+        result[QStringLiteral("backoffMsByRole")] = QJsonObject();
+        result[QStringLiteral("restartBudgetExhaustedByRole")] = QJsonObject();
+    } else {
+        result[QStringLiteral("restartCountByRole")] = m_supervisorActor->restartCountByRole();
+        result[QStringLiteral("supervisorStateByRole")] = m_supervisorActor->supervisorStateByRole();
+        result[QStringLiteral("backoffMsByRole")] = m_supervisorActor->backoffMsByRole();
+        result[QStringLiteral("restartBudgetExhaustedByRole")] =
+            m_supervisorActor->restartBudgetExhaustedByRole();
+    }
 
     return IpcMessage::makeResponse(id, result);
 }
@@ -766,10 +852,22 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                                                       int waitTimeoutMs)
 {
     Worker* worker = workerForRole(role);
-    const Worker* workerConst = static_cast<const InferenceService*>(this)->workerForRole(role);
-    if (!worker || !workerConst) {
+    if (!worker) {
         return std::nullopt;
     }
+
+    const bool rebuildRole = isRebuildRole(role);
+    const int globalLaneDepth = [&]() -> int {
+        std::lock_guard<std::mutex> lock(m_workersMutex);
+        int depth = 0;
+        for (const auto& candidate : m_workers) {
+            std::lock_guard<std::mutex> workerLock(candidate->mutex);
+            depth += static_cast<int>(
+                rebuildRole ? candidate->rebuildQueue.size() : candidate->liveQueue.size());
+        }
+        return depth;
+    }();
+    const int globalLaneLimit = rebuildRole ? kGlobalQueueLimitRebuild : kGlobalQueueLimitLive;
 
     auto task = std::make_shared<Task>();
     task->method = method;
@@ -780,22 +878,50 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
 
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
-        const bool rebuildRole = isRebuildRole(role);
         const bool liveRole = isLiveRole(role);
         auto& queue = rebuildRole ? worker->rebuildQueue : worker->liveQueue;
         const int queueLimit = rebuildRole ? kWorkerQueueLimitRebuild
                                            : (liveRole ? kWorkerQueueLimitLive
                                                        : kWorkerQueueLimitRebuild);
-        if (static_cast<int>(queue.size()) >= queueLimit) {
-            QJsonObject queueError = makeStatusPayload(
+        const int laneDepth = static_cast<int>(queue.size());
+        const auto actorDecision = rebuildRole
+            ? InferenceWorkerActor::admitRebuild(
+                laneDepth, queueLimit, globalLaneDepth, globalLaneLimit)
+            : InferenceWorkerActor::admitLive(
+                laneDepth, queueLimit, globalLaneDepth, globalLaneLimit);
+
+        const bool legacyAccepted = laneDepth < queueLimit;
+        bool accepted = legacyAccepted;
+        if (m_supervisorMode == QLatin1String("actor_primary")) {
+            accepted = actorDecision.accepted;
+        } else if (m_supervisorMode == QLatin1String("dual")
+                   && legacyAccepted != actorDecision.accepted) {
+            LOG_WARN(bsIpc,
+                     "InferenceService dual-path divergence role=%s method=%s legacyAccepted=%d actorAccepted=%d reason=%s",
+                     qUtf8Printable(worker->roleName),
+                     qUtf8Printable(method),
+                     legacyAccepted ? 1 : 0,
+                     actorDecision.accepted ? 1 : 0,
+                     qUtf8Printable(actorDecision.reason));
+        }
+
+        if (!accepted) {
+            QJsonObject overload = makeStatusPayload(
                 QStringLiteral("degraded"),
                 worker->roleName,
                 QString(),
                 /*elapsedMs=*/0,
-                {},
-                QStringLiteral("queue_full"));
-            return queueError;
+                InferenceWorkerActor::toJson(actorDecision),
+                actorDecision.reason);
+            overload[QStringLiteral("overload")] = true;
+            overload[QStringLiteral("lane")] =
+                rebuildRole ? QStringLiteral("rebuild") : QStringLiteral("live");
+            overload[QStringLiteral("mode")] = m_supervisorMode;
+            overload[QStringLiteral("globalQueueDepth")] = globalLaneDepth;
+            overload[QStringLiteral("globalQueueLimit")] = globalLaneLimit;
+            return overload;
         }
+
         queue.push_back(task);
         worker->submitted.fetch_add(1);
     }

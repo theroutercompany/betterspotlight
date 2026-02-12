@@ -22,6 +22,8 @@ class EmbeddingManager;
 class CrossEncoderReranker;
 class QaExtractiveModel;
 class ModelRegistry;
+class InferenceSupervisorActor;
+class InferenceWorkerActor;
 
 class InferenceService final : public ServiceBase {
     Q_OBJECT
@@ -133,8 +135,14 @@ private:
 
     std::atomic<uint64_t> m_requestSeq{1};
 
+    std::unique_ptr<InferenceSupervisorActor> m_supervisorActor;
+    std::unique_ptr<InferenceWorkerActor> m_workerActor;
+    QString m_supervisorMode = QStringLiteral("dual");
+
     static constexpr int kWorkerQueueLimitLive = 64;
     static constexpr int kWorkerQueueLimitRebuild = 512;
+    static constexpr int kGlobalQueueLimitLive = 512;
+    static constexpr int kGlobalQueueLimitRebuild = 4096;
     static constexpr int kWorkerRestartThreshold = 3;
     static constexpr int kWorkerRestartBudget = 4;
 };

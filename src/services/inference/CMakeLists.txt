@@ -1,6 +1,8 @@
 add_executable(betterspotlight-inference
     main.cpp
     inference_service.cpp
+    inference_supervisor_actor.cpp
+    inference_worker_actor.cpp
 )
 
 target_link_libraries(betterspotlight-inference PRIVATE

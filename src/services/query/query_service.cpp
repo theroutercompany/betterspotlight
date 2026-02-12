@@ -586,6 +586,7 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
         || method == QLatin1String("get_answer_snippet")) return handleGetAnswerSnippet(id, params);
     if (method == QLatin1String("getHealth"))        return handleGetHealth(id);
     if (method == QLatin1String("getHealthV2"))      return handleGetHealth(id);
+    if (method == QLatin1String("getQueryHealthV3")) return handleGetQueryHealthV3(id);
     if (method == QLatin1String("getHealthDetails")) return handleGetHealthDetails(id, params);
     if (method == QLatin1String("recordFeedback"))   return handleRecordFeedback(id, params);
     if (method == QLatin1String("getFrequency"))     return handleGetFrequency(id, params);
@@ -784,6 +785,9 @@ QJsonObject QueryService::inferenceHealthSnapshot()
     snapshot[QStringLiteral("inferenceServiceTimeoutCountByRole")] = QJsonObject{};
     snapshot[QStringLiteral("inferenceServiceFailureCountByRole")] = QJsonObject{};
     snapshot[QStringLiteral("inferenceServiceRestartCountByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceSupervisorStateByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceBackoffMsByRole")] = QJsonObject{};
+    snapshot[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] = QJsonObject{};
 
     QJsonObject timeoutCounts;
     QJsonObject fallbackCounts;
@@ -830,6 +834,12 @@ QJsonObject QueryService::inferenceHealthSnapshot()
         payload.value(QStringLiteral("failureCountByRole")).toObject();
     snapshot[QStringLiteral("inferenceServiceRestartCountByRole")] =
         payload.value(QStringLiteral("restartCountByRole")).toObject();
+    snapshot[QStringLiteral("inferenceSupervisorStateByRole")] =
+        payload.value(QStringLiteral("supervisorStateByRole")).toObject();
+    snapshot[QStringLiteral("inferenceBackoffMsByRole")] =
+        payload.value(QStringLiteral("backoffMsByRole")).toObject();
+    snapshot[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
+        payload.value(QStringLiteral("restartBudgetExhaustedByRole")).toObject();
     recordInferenceConnected(snapshot.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
     return snapshot;
 }
@@ -3669,6 +3679,16 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
 
 QJsonObject QueryService::handleGetHealth(uint64_t id)
 {
+    return handleGetHealthInternal(id, /*includeIndexerQueueProbe=*/true);
+}
+
+QJsonObject QueryService::handleGetQueryHealthV3(uint64_t id)
+{
+    return handleGetHealthInternal(id, /*includeIndexerQueueProbe=*/false);
+}
+
+QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndexerQueueProbe)
+{
     if (!ensureStoreOpen()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
@@ -3783,12 +3803,13 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     int queueStaleDropped = 0;
     int queuePrepWorkers = 0;
     int queueWriterBatchDepth = 0;
+    QString queueActorMode = QStringLiteral("legacy");
+    QJsonObject queueBulkhead;
     QString queueSource = QStringLiteral("unavailable");
     QJsonArray queueRoots;
 
-    {
-        // Use a short-lived client per request to avoid reentrant contention with other
-        // synchronous IPC paths and to keep health RPC bounded under load.
+    if (includeIndexerQueueProbe) {
+        // Compatibility path (legacy getHealth/getHealthV2): pull direct queue status from indexer.
         SocketClient indexerClient;
         const QString indexerSocketPath = ServiceBase::socketPath(QStringLiteral("indexer"));
         if (indexerClient.connectToServer(indexerSocketPath, 75)) {
@@ -3820,10 +3841,15 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                 queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
                 queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
                 queueWriterBatchDepth = queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
+                queueActorMode = queueResult.value(QStringLiteral("actorMode")).toString(QStringLiteral("legacy"));
+                queueBulkhead = queueResult.value(QStringLiteral("bulkhead")).toObject();
                 queueRoots = queueResult.value(QStringLiteral("roots")).toArray();
                 queueSource = QStringLiteral("indexer_rpc");
             }
         }
+    } else {
+        queueSource = QStringLiteral("peer_data_unavailable");
+        queueRebuildStatus = QStringLiteral("unknown");
     }
 
     const QJsonObject inferenceHealth = inferenceHealthSnapshot();
@@ -3833,9 +3859,11 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         || health.totalIndexedItems == 0) {
         overallStatus = QStringLiteral("rebuilding");
         healthStatusReason = QStringLiteral("rebuilding");
-    } else if (queueSource != QLatin1String("indexer_rpc")) {
+    } else if (includeIndexerQueueProbe && queueSource != QLatin1String("indexer_rpc")) {
         overallStatus = QStringLiteral("degraded");
         healthStatusReason = QStringLiteral("indexer_unavailable");
+    } else if (!includeIndexerQueueProbe) {
+        healthStatusReason = QStringLiteral("peer_data_state_unavailable");
     } else if (health.criticalFailures > 0) {
         overallStatus = QStringLiteral("degraded");
         healthStatusReason = QStringLiteral("degraded_critical_failures");
@@ -3873,7 +3901,15 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
     indexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
     indexHealth[QStringLiteral("queueWriterBatchDepth")] = queueWriterBatchDepth;
+    indexHealth[QStringLiteral("pipelineActorMode")] = queueActorMode;
+    indexHealth[QStringLiteral("pipelineBulkhead")] = queueBulkhead;
     indexHealth[QStringLiteral("queueSource")] = queueSource;
+    indexHealth[QStringLiteral("peerDataState")] =
+        includeIndexerQueueProbe
+            ? (queueSource == QLatin1String("indexer_rpc")
+                ? QStringLiteral("fresh")
+                : QStringLiteral("unavailable"))
+            : QStringLiteral("unavailable");
     indexHealth[QStringLiteral("inferenceServiceConnected")] =
         inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     indexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
@@ -3890,6 +3926,12 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         inferenceHealth.value(QStringLiteral("inferenceServiceFailureCountByRole")).toObject();
     indexHealth[QStringLiteral("inferenceServiceRestartCountByRole")] =
         inferenceHealth.value(QStringLiteral("inferenceServiceRestartCountByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceSupervisorStateByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorStateByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceBackoffMsByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceBackoffMsByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
+        inferenceHealth.value(QStringLiteral("inferenceRestartBudgetExhaustedByRole")).toObject();
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;

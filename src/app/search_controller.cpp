@@ -1,4 +1,6 @@
 #include "search_controller.h"
+#include "service_manager.h"
+#include "core/ipc/service_base.h"
 #include "core/ipc/supervisor.h"
 #include "core/shared/logging.h"
 
@@ -14,8 +16,25 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <chrono>
 
 namespace bs {
+
+namespace {
+
+bool envFlagEnabledInternal(const char* key, bool fallback = false)
+{
+    const QString value = qEnvironmentVariable(key).trimmed().toLower();
+    if (value.isEmpty()) {
+        return fallback;
+    }
+    return value == QLatin1String("1")
+        || value == QLatin1String("true")
+        || value == QLatin1String("yes")
+        || value == QLatin1String("on");
+}
+
+} // namespace
 
 SearchController::SearchController(QObject* parent)
     : QObject(parent)
@@ -40,6 +59,35 @@ SearchController::~SearchController() = default;
 void SearchController::setSupervisor(Supervisor* supervisor)
 {
     m_supervisor = supervisor;
+}
+
+void SearchController::setServiceManager(ServiceManager* serviceManager)
+{
+    if (m_serviceManager == serviceManager) {
+        return;
+    }
+
+    if (m_serviceManager) {
+        disconnect(m_serviceManager, nullptr, this, nullptr);
+    }
+
+    m_serviceManager = serviceManager;
+    if (m_serviceManager) {
+        connect(m_serviceManager, &ServiceManager::healthSnapshotUpdated,
+                this, &SearchController::onHealthSnapshotUpdated);
+        m_lastHealthSnapshot = m_serviceManager->latestHealthSnapshot();
+        m_lastHealthSnapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
+    }
+}
+
+void SearchController::onHealthSnapshotUpdated(const QJsonObject& snapshot)
+{
+    const QVariantMap map = snapshot.toVariantMap();
+    if (map.isEmpty()) {
+        return;
+    }
+    m_lastHealthSnapshot = map;
+    m_lastHealthSnapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
 }
 
 void SearchController::setClipboardSignalsEnabled(bool enabled)
@@ -149,17 +197,15 @@ void SearchController::openResult(int index)
     QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 
     // Record feedback via IPC (fire and forget)
-    if (m_supervisor) {
-        SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
-        if (client && client->isConnected()) {
-            QJsonObject params;
-            QVariantMap item = m_results.at(resultIndex).toMap();
-            params[QStringLiteral("itemId")] = item.value(QStringLiteral("itemId")).toLongLong();
-            params[QStringLiteral("action")] = QStringLiteral("open");
-            params[QStringLiteral("query")] = m_query;
-            params[QStringLiteral("position")] = resultIndex;
-            client->sendNotification(QStringLiteral("recordFeedback"), params);
-        }
+    SocketClient* client = ensureQueryClient(250);
+    if (client && client->isConnected()) {
+        QJsonObject params;
+        QVariantMap item = m_results.at(resultIndex).toMap();
+        params[QStringLiteral("itemId")] = item.value(QStringLiteral("itemId")).toLongLong();
+        params[QStringLiteral("action")] = QStringLiteral("open");
+        params[QStringLiteral("query")] = m_query;
+        params[QStringLiteral("position")] = resultIndex;
+        client->sendNotification(QStringLiteral("recordFeedback"), params);
     }
 }
 
@@ -199,11 +245,7 @@ QVariantMap SearchController::requestAnswerSnippet(int index)
         return responseSummary;
     }
 
-    if (!m_supervisor) {
-        responseSummary[QStringLiteral("reason")] = QStringLiteral("supervisor_unavailable");
-        return responseSummary;
-    }
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
+    SocketClient* client = ensureQueryClient(250);
     if (!client || !client->isConnected()) {
         responseSummary[QStringLiteral("reason")] = QStringLiteral("query_service_unavailable");
         return responseSummary;
@@ -318,6 +360,35 @@ void SearchController::moveSelection(int delta)
     setSelectedIndex(nextSelectableRow(m_selectedIndex, delta > 0 ? 1 : -1));
 }
 
+bool SearchController::envFlagEnabled(const char* key, bool fallback)
+{
+    return envFlagEnabledInternal(key, fallback);
+}
+
+SocketClient* SearchController::ensureQueryClient(int timeoutMs)
+{
+    if (!m_queryClient) {
+        m_queryClient = std::make_unique<SocketClient>(this);
+    }
+    if (!m_queryClient->isConnected()) {
+        m_queryClient->connectToServer(ServiceBase::socketPath(QStringLiteral("query")),
+                                       timeoutMs);
+    }
+    return m_queryClient.get();
+}
+
+SocketClient* SearchController::ensureIndexerClient(int timeoutMs)
+{
+    if (!m_indexerClient) {
+        m_indexerClient = std::make_unique<SocketClient>(this);
+    }
+    if (!m_indexerClient->isConnected()) {
+        m_indexerClient->connectToServer(ServiceBase::socketPath(QStringLiteral("indexer")),
+                                         timeoutMs);
+    }
+    return m_indexerClient.get();
+}
+
 QVariantMap SearchController::getHealthSync()
 {
     const auto staleSnapshot = [&](const QString& reason) -> QVariantMap {
@@ -325,11 +396,11 @@ QVariantMap SearchController::getHealthSync()
         if (!m_lastHealthSnapshot.isEmpty()) {
             QVariantMap stale = m_lastHealthSnapshot;
             stale[QStringLiteral("snapshotState")] = QStringLiteral("stale");
+            stale[QStringLiteral("overallStatus")] = QStringLiteral("stale");
             stale[QStringLiteral("healthStatusReason")] = reason;
             stale[QStringLiteral("staleReason")] = reason;
             stale[QStringLiteral("stalenessMs")] =
                 std::max<qint64>(0, now - m_lastHealthSnapshotTimeMs);
-            stale[QStringLiteral("overallStatus")] = QStringLiteral("stale");
             return stale;
         }
 
@@ -340,75 +411,52 @@ QVariantMap SearchController::getHealthSync()
         unavailable[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
         unavailable[QStringLiteral("instanceId")] =
             qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
-        if (m_supervisor) {
-            unavailable[QStringLiteral("supervisorServices")] =
-                m_supervisor->serviceSnapshot().toVariantList();
-        }
         return unavailable;
     };
 
-    if (!m_supervisor) {
-        LOG_WARN(bsCore, "SearchController: no supervisor set");
-        return staleSnapshot(QStringLiteral("supervisor_unavailable"));
+    const QString mode = qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE")
+                             .trimmed()
+                             .toLower();
+    const bool actorPreferred = mode != QLatin1String("legacy");
+    const bool actorOnly = mode == QLatin1String("aggregator_primary");
+
+    if (actorPreferred && m_serviceManager) {
+        QVariantMap latest = m_serviceManager->latestHealthSnapshot();
+        if (latest.isEmpty()) {
+            latest = m_lastHealthSnapshot;
+        }
+        if (!latest.isEmpty()) {
+            m_lastHealthSnapshot = latest;
+            m_lastHealthSnapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
+            return m_lastHealthSnapshot;
+        }
+        if (actorOnly) {
+            return staleSnapshot(QStringLiteral("health_aggregator_unavailable"));
+        }
     }
 
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
+    SocketClient* client = ensureQueryClient(250);
     if (!client || !client->isConnected()) {
-        LOG_WARN(bsCore, "SearchController: query service not connected");
         return staleSnapshot(QStringLiteral("query_unavailable"));
     }
 
-    auto response = client->sendRequest(QStringLiteral("getHealthV2"), {}, kSearchTimeoutMs);
+    auto response = client->sendRequest(QStringLiteral("getHealthV2"), {}, 1200);
     if (!response) {
-        response = client->sendRequest(QStringLiteral("getHealth"), {}, kSearchTimeoutMs);
+        response = client->sendRequest(QStringLiteral("getHealth"), {}, 1200);
     }
-    if (!response) {
-        LOG_WARN(bsCore, "SearchController: health request timed out");
-        return staleSnapshot(QStringLiteral("health_rpc_timeout"));
-    }
-
-    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        LOG_WARN(bsCore, "SearchController: health request returned error");
+    if (!response || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
         return staleSnapshot(QStringLiteral("health_rpc_error"));
     }
 
     QJsonObject result = response->value(QStringLiteral("result")).toObject();
-
-    // Prefer extended endpoint when available.
-    auto detailResponse = client->sendRequest(QStringLiteral("getHealthDetails"), {}, kSearchTimeoutMs);
-    if (detailResponse && detailResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
-        result = detailResponse->value(QStringLiteral("result")).toObject();
-    }
-
     QJsonObject indexHealth = result.value(QStringLiteral("indexHealth")).toObject();
     if (indexHealth.isEmpty()) {
         indexHealth = result;
     }
 
-    const QJsonObject details = result.value(QStringLiteral("details")).toObject();
-    if (!details.isEmpty()) {
-        indexHealth[QStringLiteral("detailedFailures")] = details.value(QStringLiteral("failures")).toArray();
-        indexHealth[QStringLiteral("criticalFailureRows")] =
-            details.value(QStringLiteral("criticalFailureRows")).toInt();
-        indexHealth[QStringLiteral("expectedGapFailureRows")] =
-            details.value(QStringLiteral("expectedGapFailureRows")).toInt();
-        indexHealth[QStringLiteral("processStats")] = details.value(QStringLiteral("processStats")).toObject();
-        indexHealth[QStringLiteral("queryStats")] = details.value(QStringLiteral("queryStats")).toObject();
-        indexHealth[QStringLiteral("bsignoreDetails")] = details.value(QStringLiteral("bsignore")).toObject();
-    }
-
-    indexHealth[QStringLiteral("supervisorServices")] = m_supervisor->serviceSnapshot();
-    if (!indexHealth.contains(QStringLiteral("contentCoveragePct"))) {
-        const qint64 totalIndexed = indexHealth.value(QStringLiteral("totalIndexedItems")).toInteger();
-        const qint64 withoutContent = indexHealth.value(QStringLiteral("itemsWithoutContent")).toInteger();
-        if (totalIndexed > 0) {
-            const double coverage = 100.0 * static_cast<double>(totalIndexed - withoutContent)
-                                    / static_cast<double>(totalIndexed);
-            indexHealth[QStringLiteral("contentCoveragePct")] = coverage;
-        }
-    }
-
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    indexHealth[QStringLiteral("snapshotState")] = QStringLiteral("fresh");
+    indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
     if (!indexHealth.contains(QStringLiteral("snapshotTimeMs"))) {
         indexHealth[QStringLiteral("snapshotTimeMs")] = now;
     }
@@ -416,19 +464,18 @@ QVariantMap SearchController::getHealthSync()
         indexHealth[QStringLiteral("instanceId")] =
             qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
     }
-    indexHealth[QStringLiteral("snapshotState")] = QStringLiteral("fresh");
-    indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
     if (!indexHealth.contains(QStringLiteral("overallStatus"))) {
         indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("unavailable");
     }
 
     const QVariantMap healthMap = indexHealth.toVariantMap();
-    if (!healthMap.isEmpty()) {
-        m_lastHealthSnapshot = healthMap;
-        m_lastHealthSnapshotTimeMs = now;
-        return m_lastHealthSnapshot;
+    if (healthMap.isEmpty()) {
+        return staleSnapshot(QStringLiteral("empty_health_payload"));
     }
-    return staleSnapshot(QStringLiteral("empty_health_payload"));
+
+    m_lastHealthSnapshot = healthMap;
+    m_lastHealthSnapshotTimeMs = now;
+    return m_lastHealthSnapshot;
 }
 
 void SearchController::executeSearch()
@@ -438,18 +485,13 @@ void SearchController::executeSearch()
         return;
     }
 
-    if (!m_supervisor) {
-        LOG_WARN(bsCore, "SearchController: no supervisor set, cannot search");
-        return;
-    }
-
-    SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
+    SocketClient* client = ensureQueryClient(300);
     if (!client || !client->isConnected()) {
         LOG_WARN(bsCore, "SearchController: query service not connected");
         return;
     }
 
-    SocketClient* indexerClient = m_supervisor->clientFor(QStringLiteral("indexer"));
+    SocketClient* indexerClient = ensureIndexerClient(200);
     const auto setIndexerActive = [indexerClient](bool active) {
         if (!indexerClient || !indexerClient->isConnected()) {
             return;

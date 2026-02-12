@@ -59,6 +59,7 @@ struct PreparedWork {
 
     std::optional<PreparedFailure> failure;
     int prepDurationMs = 0;
+    bool rebuildLane = false;
 };
 
 // Indexer — coordinates per-file processing through pipeline stages 3-7.

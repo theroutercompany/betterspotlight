@@ -1539,7 +1539,12 @@ Window {
                         var next = searchController.getHealthSync()
                         if (next && Object.keys(next).length > 0) {
                             healthTab.healthData = next
-                            healthTab.diagnosticsData = next["supervisorServices"] || []
+                            var processes = next["processes"] || ({})
+                            var managed = processes["managed"]
+                            if (!managed || managed.length === 0) {
+                                managed = next["supervisorServices"] || []
+                            }
+                            healthTab.diagnosticsData = managed
                             healthTab.loaded = true
                             healthTab.syncModelDownloadSelection()
                         } else if (!healthTab.loaded) {
