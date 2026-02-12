@@ -33,6 +33,7 @@ Icon?
 
 # IDE
 .idea/
+./
 *.xcworkspace/
 !*.xcworkspace/contents.xcworkspacedata
 
@@ -58,3 +59,6 @@ Icon?
 
 # Downloaded embedding assets
 data/models/
+
+# Local debug logs
+firebase-debug.log
