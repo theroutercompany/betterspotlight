@@ -13,6 +13,25 @@
 
 namespace bs {
 
+namespace {
+
+QString defaultRuntimeRoot()
+{
+    const uid_t uid = getuid();
+    return QStringLiteral("/tmp/betterspotlight-%1").arg(uid);
+}
+
+QString normalizedEnvPath(const char* envName)
+{
+    const QString value = qEnvironmentVariable(envName).trimmed();
+    if (value.isEmpty()) {
+        return {};
+    }
+    return QDir::cleanPath(value);
+}
+
+} // namespace
+
 ServiceBase::ServiceBase(const QString& serviceName, QObject* parent)
     : QObject(parent)
     , m_serviceName(serviceName)
@@ -55,17 +74,41 @@ int ServiceBase::run()
 
 QString ServiceBase::socketPath(const QString& serviceName)
 {
-    const QString customSocketDir =
-        qEnvironmentVariable("BETTERSPOTLIGHT_SOCKET_DIR").trimmed();
-    if (!customSocketDir.isEmpty()) {
-        return QDir::cleanPath(customSocketDir + QLatin1Char('/') + serviceName
-                               + QStringLiteral(".sock"));
-    }
+    return QDir::cleanPath(socketDirectory() + QLatin1Char('/')
+                           + serviceName + QStringLiteral(".sock"));
+}
 
-    uid_t uid = getuid();
-    return QStringLiteral("/tmp/betterspotlight-%1/%2.sock")
-        .arg(uid)
-        .arg(serviceName);
+QString ServiceBase::runtimeDirectory()
+{
+    const QString runtimeDir = normalizedEnvPath("BETTERSPOTLIGHT_RUNTIME_DIR");
+    if (!runtimeDir.isEmpty()) {
+        return runtimeDir;
+    }
+    return defaultRuntimeRoot();
+}
+
+QString ServiceBase::socketDirectory()
+{
+    const QString socketDir = normalizedEnvPath("BETTERSPOTLIGHT_SOCKET_DIR");
+    if (!socketDir.isEmpty()) {
+        return socketDir;
+    }
+    return runtimeDirectory();
+}
+
+QString ServiceBase::pidDirectory()
+{
+    const QString pidDir = normalizedEnvPath("BETTERSPOTLIGHT_PID_DIR");
+    if (!pidDir.isEmpty()) {
+        return pidDir;
+    }
+    return runtimeDirectory();
+}
+
+QString ServiceBase::pidPath(const QString& serviceName)
+{
+    return QDir::cleanPath(pidDirectory() + QLatin1Char('/')
+                           + serviceName + QStringLiteral(".pid"));
 }
 
 QJsonObject ServiceBase::handleRequest(const QJsonObject& request)

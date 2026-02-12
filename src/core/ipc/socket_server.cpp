@@ -6,6 +6,22 @@
 
 namespace bs {
 
+namespace {
+
+bool socketHasActivePeer(const QString& socketPath)
+{
+    QLocalSocket probe;
+    probe.connectToServer(socketPath);
+    const bool connected = probe.waitForConnected(150);
+    if (connected) {
+        probe.disconnectFromServer();
+        probe.waitForDisconnected(50);
+    }
+    return connected;
+}
+
+} // namespace
+
 SocketServer::SocketServer(QObject* parent)
     : QObject(parent)
     , m_server(std::make_unique<QLocalServer>(this))
@@ -21,20 +37,39 @@ SocketServer::~SocketServer()
 
 bool SocketServer::listen(const QString& socketPath)
 {
-    // Remove stale socket file if it exists
-    if (QFile::exists(socketPath)) {
-        qCInfo(bsIpc, "Removing stale socket: %s", qPrintable(socketPath));
-        QFile::remove(socketPath);
-    }
-
     m_server->setSocketOptions(QLocalServer::UserAccessOption);
 
     if (!m_server->listen(socketPath)) {
-        QString err = m_server->errorString();
-        qCCritical(bsIpc, "Failed to listen on %s: %s",
-                   qPrintable(socketPath), qPrintable(err));
-        emit errorOccurred(err);
-        return false;
+        const auto serverError = m_server->serverError();
+        const bool addressInUse =
+            serverError == QAbstractSocket::AddressInUseError;
+
+        if (addressInUse) {
+            if (socketHasActivePeer(socketPath)) {
+                const QString err = QStringLiteral(
+                    "Socket already in use by an active service: %1").arg(socketPath);
+                qCCritical(bsIpc, "%s", qPrintable(err));
+                emit errorOccurred(err);
+                return false;
+            }
+
+            qCWarning(bsIpc, "Detected stale socket, attempting safe cleanup: %s",
+                      qPrintable(socketPath));
+            QLocalServer::removeServer(socketPath);
+            if (!m_server->listen(socketPath)) {
+                const QString err = m_server->errorString();
+                qCCritical(bsIpc, "Failed to listen on %s after stale cleanup: %s",
+                           qPrintable(socketPath), qPrintable(err));
+                emit errorOccurred(err);
+                return false;
+            }
+        } else {
+            const QString err = m_server->errorString();
+            qCCritical(bsIpc, "Failed to listen on %s: %s",
+                       qPrintable(socketPath), qPrintable(err));
+            emit errorOccurred(err);
+            return false;
+        }
     }
 
     qCInfo(bsIpc, "Listening on %s", qPrintable(socketPath));
@@ -43,20 +78,34 @@ bool SocketServer::listen(const QString& socketPath)
 
 void SocketServer::close()
 {
-    // Disconnect and clean up all clients
-    for (auto* client : m_clients) {
-        client->disconnect(this);
-        client->disconnectFromServer();
-        client->deleteLater();
+    if (m_closing) {
+        return;
     }
+    m_closing = true;
+
+    // Two-phase shutdown: detach client bookkeeping first, then disconnect sockets.
+    const QList<QLocalSocket*> clients = m_clients;
     m_clients.clear();
     m_readBuffers.clear();
+
+    for (QLocalSocket* client : clients) {
+        if (!client) {
+            continue;
+        }
+        client->disconnect(this);
+        if (client->state() != QLocalSocket::UnconnectedState) {
+            client->disconnectFromServer();
+        }
+        client->deleteLater();
+    }
 
     if (m_server->isListening()) {
         QString path = m_server->fullServerName();
         m_server->close();
         qCInfo(bsIpc, "Server closed: %s", qPrintable(path));
     }
+
+    m_closing = false;
 }
 
 bool SocketServer::isListening() const
@@ -106,18 +155,19 @@ void SocketServer::onNewConnection()
 void SocketServer::onClientReadyRead()
 {
     auto* client = qobject_cast<QLocalSocket*>(sender());
-    if (!client) return;
+    if (!client || !m_readBuffers.contains(client)) return;
 
     m_readBuffers[client].append(client->readAll());
 
     if (m_readBuffers[client].size() > kMaxReadBufferSize) {
         qCCritical(bsIpc, "Client read buffer exceeded %d bytes, disconnecting client",
                    kMaxReadBufferSize);
-        m_readBuffers.remove(client);
-        m_clients.removeOne(client);
+        const bool wasTracked = detachClient(client);
         client->disconnectFromServer();
-        client->deleteLater();
-        emit clientDisconnected();
+        if (wasTracked) {
+            client->deleteLater();
+            emit clientDisconnected();
+        }
         return;
     }
 
@@ -129,17 +179,32 @@ void SocketServer::onClientDisconnected()
     auto* client = qobject_cast<QLocalSocket*>(sender());
     if (!client) return;
 
-    qCInfo(bsIpc, "Client disconnected");
+    if (detachClient(client)) {
+        qCInfo(bsIpc, "Client disconnected");
+        client->deleteLater();
+        emit clientDisconnected();
+    } else {
+        qCDebug(bsIpc, "Ignoring duplicate disconnect callback for client");
+    }
+}
 
-    m_clients.removeOne(client);
-    m_readBuffers.remove(client);
-    client->deleteLater();
+bool SocketServer::detachClient(QLocalSocket* client)
+{
+    if (!client) {
+        return false;
+    }
 
-    emit clientDisconnected();
+    const bool removedClient = m_clients.removeOne(client);
+    const bool removedBuffer = m_readBuffers.remove(client) > 0;
+    return removedClient || removedBuffer;
 }
 
 void SocketServer::processBuffer(QLocalSocket* client)
 {
+    if (!m_readBuffers.contains(client)) {
+        return;
+    }
+
     QByteArray& buffer = m_readBuffers[client];
 
     while (true) {

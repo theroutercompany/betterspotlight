@@ -1,4 +1,6 @@
 #include "service_manager.h"
+#include "app/control_plane/control_plane_actor.h"
+#include "app/control_plane/health_aggregator_actor.h"
 #include "core/models/model_manifest.h"
 #include "core/models/model_registry.h"
 #include "core/shared/logging.h"
@@ -15,6 +17,8 @@
 #include <QSet>
 #include <QStandardPaths>
 #include <QUrl>
+#include <QMetaObject>
+#include <QThread>
 
 #include <algorithm>
 
@@ -357,7 +361,13 @@ Supervisor* ServiceManager::supervisor() const
 
 void ServiceManager::start()
 {
+    if (m_started && !m_stopping) {
+        LOG_INFO(bsCore, "ServiceManager: start ignored (already started)");
+        return;
+    }
+
     LOG_INFO(bsCore, "ServiceManager: starting services");
+    m_stopping = false;
     m_initialIndexingStarted = false;
     m_indexingActive = false;
     m_lastQueueRebuildRunning = false;
@@ -393,14 +403,22 @@ void ServiceManager::start()
     if (!m_supervisor->startAll()) {
         LOG_WARN(bsCore, "ServiceManager: not all services started cleanly");
     }
+    m_started = true;
     updateTrayState();
 }
 
 void ServiceManager::stop()
 {
+    if (m_stopping) {
+        return;
+    }
+    m_stopping = true;
+
     joinModelDownloadThreadIfNeeded();
     LOG_INFO(bsCore, "ServiceManager: stopping services");
-    m_supervisor->stopAll();
+    if (m_started) {
+        m_supervisor->stopAll();
+    }
 
     m_allReady = false;
     m_initialIndexingStarted = false;
@@ -417,10 +435,15 @@ void ServiceManager::stop()
     m_inferenceStatus = QStringLiteral("stopped");
     emit serviceStatusChanged();
     updateTrayState();
+    m_started = false;
+    m_stopping = false;
 }
 
 void ServiceManager::onServiceStarted(const QString& name)
 {
+    if (m_stopping) {
+        return;
+    }
     LOG_INFO(bsCore, "ServiceManager: service '%s' started", qPrintable(name));
     updateServiceStatus(name, QStringLiteral("running"));
 }
@@ -438,6 +461,9 @@ void ServiceManager::onServiceStopped(const QString& name)
 
 void ServiceManager::onServiceCrashed(const QString& name, int crashCount)
 {
+    if (m_stopping) {
+        return;
+    }
     LOG_WARN(bsCore, "ServiceManager: service '%s' crashed (count=%d)",
              qPrintable(name), crashCount);
     m_allReady = false;
@@ -452,6 +478,9 @@ void ServiceManager::onServiceCrashed(const QString& name, int crashCount)
 
 void ServiceManager::onAllServicesReady()
 {
+    if (m_stopping) {
+        return;
+    }
     LOG_INFO(bsCore, "ServiceManager: all services ready");
     m_allReady = true;
     emit serviceStatusChanged();
@@ -926,6 +955,9 @@ void ServiceManager::updateServiceStatus(const QString& name, const QString& sta
     } else if (name == QLatin1String("inference")) {
         m_inferenceStatus = status;
     }
+    if (m_stopping) {
+        return;
+    }
     emit serviceStatusChanged();
     updateTrayState();
 }
@@ -970,7 +1002,7 @@ void ServiceManager::updateTrayState()
 
 void ServiceManager::refreshIndexerQueueStatus()
 {
-    if (!m_allReady || !m_supervisor) {
+    if (m_stopping || !m_allReady || !m_supervisor) {
         return;
     }
 

@@ -31,6 +31,21 @@ QString statusOr(const QString& value, const QString& fallback)
     return value.isEmpty() ? fallback : value;
 }
 
+bool envFlagEnabled(const QString& value)
+{
+    const QString normalized = value.trimmed().toLower();
+    return normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes")
+        || normalized == QLatin1String("on");
+}
+
+bool deterministicPlaceholderWorkersEnabled()
+{
+    return envFlagEnabled(qEnvironmentVariable("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"))
+        || envFlagEnabled(qEnvironmentVariable("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"));
+}
+
 std::vector<QString> parseTextArray(const QJsonArray& array)
 {
     std::vector<QString> out;
@@ -240,9 +255,13 @@ void InferenceService::workerLoop(Worker& worker)
 
         if (!worker.available || worker.degraded) {
             status = QStringLiteral("degraded");
-            fallbackReason = worker.available
-                ? QStringLiteral("actor_degraded")
-                : QStringLiteral("model_unavailable");
+            if (deterministicPlaceholderWorkersEnabled()) {
+                fallbackReason = QStringLiteral("placeholder_worker");
+            } else {
+                fallbackReason = worker.available
+                    ? QStringLiteral("actor_degraded")
+                    : QStringLiteral("model_unavailable");
+            }
         } else {
             try {
                 if (task->method == QLatin1String("embed_query")) {
@@ -426,10 +445,14 @@ void InferenceService::workerLoop(Worker& worker)
             }
         }
 
-        if (status == QLatin1String("ok")) {
+        const bool placeholderResponse =
+            (status == QLatin1String("degraded")
+             && fallbackReason == QLatin1String("placeholder_worker"));
+
+        if (status == QLatin1String("ok") || placeholderResponse) {
             worker.completed.fetch_add(1);
             worker.consecutiveFailures = 0;
-            worker.degraded = false;
+            worker.degraded = placeholderResponse;
         } else if (status == QLatin1String("timeout")) {
             worker.timedOut.fetch_add(1);
             worker.consecutiveFailures = 0;
@@ -454,14 +477,25 @@ void InferenceService::workerLoop(Worker& worker)
 
 bool InferenceService::initializeWorkerModel(Worker& worker)
 {
+    const bool placeholderWorkers = deterministicPlaceholderWorkersEnabled();
+
+    worker.registry.reset();
     worker.embedding.reset();
     worker.reranker.reset();
     worker.qa.reset();
     worker.available = false;
+    worker.degraded = false;
 
-    if (!worker.registry) {
-        worker.registry = std::make_unique<ModelRegistry>(ModelRegistry::resolveModelsDir());
+    if (placeholderWorkers) {
+        worker.available = true;
+        worker.degraded = true;
+        LOG_INFO(bsIpc,
+                 "InferenceService: worker '%s' running in deterministic placeholder mode",
+                 qUtf8Printable(worker.roleName));
+        return true;
     }
+
+    worker.registry = std::make_unique<ModelRegistry>(ModelRegistry::resolveModelsDir());
 
     const auto initializeEmbedding = [&](const char* role) {
         worker.embedding = std::make_unique<EmbeddingManager>(worker.registry.get(), role);

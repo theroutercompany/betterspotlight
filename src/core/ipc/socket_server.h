@@ -45,7 +45,9 @@ private:
     QList<QLocalSocket*> m_clients;
     RequestHandler m_handler;
     QMap<QLocalSocket*, QByteArray> m_readBuffers;
+    bool m_closing = false;
 
+    bool detachClient(QLocalSocket* client);
     void processBuffer(QLocalSocket* client);
 };
 

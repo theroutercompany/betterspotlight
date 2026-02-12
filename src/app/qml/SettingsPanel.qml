@@ -1421,6 +1421,18 @@ Window {
                     property bool actionStatusIsError: false
                     property var modelDownloadSelection: ({})
                     property bool includeExistingModelDownloads: false
+                    property bool snapshotFresh: {
+                        if (!healthData) return false
+                        var snapshotState = String(healthData["snapshotState"] || "")
+                        return snapshotState !== "stale" && snapshotState !== "unavailable"
+                    }
+                    property bool controlsReady: {
+                        if (!healthData) return false
+                        if (!snapshotFresh) return false
+                        var overall = String(healthData["overallStatus"] || "")
+                        if (overall === "unavailable" || overall === "stale") return false
+                        return serviceReady("indexer") && serviceReady("query")
+                    }
                     property bool vectorRebuildRunning: {
                         if (!healthData) return false
                         return (healthData["vectorRebuildStatus"] || "idle") === "running"
@@ -1433,6 +1445,16 @@ Window {
                         var writing = Number(healthData["queueWriting"] || 0)
                         var rebuildAll = healthData["queueRebuildRunning"] === true
                         return pending > 0 || inProgress > 0 || preparing > 0 || writing > 0 || rebuildAll
+                    }
+
+                    function serviceReady(name) {
+                        var services = healthTab.diagnosticsData || []
+                        for (var i = 0; i < services.length; ++i) {
+                            var row = services[i] || ({})
+                            if (String(row.name || "") !== String(name)) continue
+                            return row.running === true && row.ready === true
+                        }
+                        return false
                     }
 
                     function copySelectionMap(source) {
@@ -1517,13 +1539,12 @@ Window {
                         var next = searchController.getHealthSync()
                         if (next && Object.keys(next).length > 0) {
                             healthTab.healthData = next
+                            healthTab.diagnosticsData = next["supervisorServices"] || []
                             healthTab.loaded = true
                             healthTab.syncModelDownloadSelection()
                         } else if (!healthTab.loaded) {
                             healthTab.healthData = ({})
-                        }
-                        if (serviceManager && serviceManager.serviceDiagnostics) {
-                            healthTab.diagnosticsData = serviceManager.serviceDiagnostics()
+                            healthTab.diagnosticsData = []
                         }
 
                         if (healthTab.vectorRebuildRunning
@@ -1568,6 +1589,8 @@ Window {
                                 if (s === "healthy") return "#E8F5E9"
                                 if (s === "degraded") return "#FFF8E1"
                                 if (s === "rebuilding") return "#E3F2FD"
+                                if (s === "stale") return "#FFF3E0"
+                                if (s === "unavailable") return "#F5F5F5"
                                 return "#FFEBEE"
                             }
                             border.width: 1
@@ -1577,6 +1600,8 @@ Window {
                                 if (s === "healthy") return "#2E7D32"
                                 if (s === "degraded") return "#F57F17"
                                 if (s === "rebuilding") return "#1565C0"
+                                if (s === "stale") return "#EF6C00"
+                                if (s === "unavailable") return "#9E9E9E"
                                 return "#C62828"
                             }
 
@@ -1593,6 +1618,8 @@ Window {
                                         if (s === "healthy") return "#2E7D32"
                                         if (s === "degraded") return "#F57F17"
                                         if (s === "rebuilding") return "#1565C0"
+                                        if (s === "stale") return "#EF6C00"
+                                        if (s === "unavailable") return "#9E9E9E"
                                         return "#C62828"
                                     }
                                 }
@@ -1604,6 +1631,8 @@ Window {
                                         if (s === "healthy") return qsTr("Index Healthy")
                                         if (s === "degraded") return qsTr("Index Degraded")
                                         if (s === "rebuilding") return qsTr("Index Rebuilding")
+                                        if (s === "stale") return qsTr("Index Status Stale")
+                                        if (s === "unavailable") return qsTr("Index Unavailable")
                                         return qsTr("Index Error")
                                     }
                                     font.pixelSize: 14; font.weight: Font.DemiBold; color: "#1A1A1A"
@@ -1744,8 +1773,15 @@ Window {
                                             Layout.preferredWidth: 90
                                         }
                                         Label {
-                                            text: (modelData.running ? qsTr("running") : qsTr("stopped"))
-                                                  + (modelData.ready ? qsTr(" / ready") : qsTr(" / not-ready"))
+                                            text: {
+                                                var base = (modelData.running ? qsTr("running") : qsTr("stopped"))
+                                                         + (modelData.ready ? qsTr(" / ready") : qsTr(" / not-ready"))
+                                                var state = String(modelData.state || "")
+                                                if (state.length > 0) {
+                                                    return base + qsTr(" / ") + state
+                                                }
+                                                return base
+                                            }
                                             font.pixelSize: 11
                                             color: modelData.running ? "#2E7D32" : "#999999"
                                             Layout.preferredWidth: 130
@@ -1790,7 +1826,6 @@ Window {
                                         { label: qsTr("Writing"), key: "queueWriting", format: "int" },
                                         { label: qsTr("Failed"), key: "queueFailed", format: "int" },
                                         { label: qsTr("Dropped"), key: "queueDropped", format: "int" },
-                                        { label: qsTr("Embedding Queue"), key: "queueEmbedding", format: "int" },
                                         { label: qsTr("Scanned"), key: "queueScanned", format: "int" },
                                         { label: qsTr("Total"), key: "queueTotal", format: "int" },
                                         { label: qsTr("Scan Progress"), key: "queueProgressPct", format: "percent" },
@@ -2831,14 +2866,26 @@ Window {
                                     Layout.fillWidth: true
                                     spacing: 12
 
-                                    Button { text: qsTr("Reindex Folder\u2026"); onClicked: reindexFolderDialog.open() }
-                                    Button { text: qsTr("Rebuild All"); onClicked: rebuildAllDialog.open() }
+                                    Button {
+                                        text: qsTr("Reindex Folder\u2026")
+                                        enabled: healthTab.controlsReady
+                                        onClicked: reindexFolderDialog.open()
+                                    }
+                                    Button {
+                                        text: qsTr("Rebuild All")
+                                        enabled: healthTab.controlsReady
+                                        onClicked: rebuildAllDialog.open()
+                                    }
                                     Button {
                                         text: qsTr("Rebuild Vector Index")
-                                        enabled: !healthTab.vectorRebuildRunning
+                                        enabled: healthTab.controlsReady && !healthTab.vectorRebuildRunning
                                         onClicked: rebuildVectorDialog.open()
                                     }
-                                    Button { text: qsTr("Clear Cache"); onClicked: clearCacheDialog.open() }
+                                    Button {
+                                        text: qsTr("Clear Cache")
+                                        enabled: healthTab.controlsReady
+                                        onClicked: clearCacheDialog.open()
+                                    }
                                 }
 
                                 Label {

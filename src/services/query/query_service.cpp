@@ -585,6 +585,7 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
     if (method == QLatin1String("getAnswerSnippet")
         || method == QLatin1String("get_answer_snippet")) return handleGetAnswerSnippet(id, params);
     if (method == QLatin1String("getHealth"))        return handleGetHealth(id);
+    if (method == QLatin1String("getHealthV2"))      return handleGetHealth(id);
     if (method == QLatin1String("getHealthDetails")) return handleGetHealthDetails(id, params);
     if (method == QLatin1String("recordFeedback"))   return handleRecordFeedback(id, params);
     if (method == QLatin1String("getFrequency"))     return handleGetFrequency(id, params);
@@ -3768,9 +3769,16 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
 
     int queuePending = 0;
     int queueInProgress = 0;
+    int queueFailed = 0;
     int queueDropped = 0;
+    int queueScanned = 0;
+    int queueTotal = 0;
+    double queueProgressPct = 0.0;
+    bool queuePaused = false;
     int queuePreparing = 0;
     int queueWriting = 0;
+    bool queueRebuildRunning = false;
+    QString queueRebuildStatus = QStringLiteral("idle");
     int queueCoalesced = 0;
     int queueStaleDropped = 0;
     int queuePrepWorkers = 0;
@@ -3791,9 +3799,23 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
                 const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
                 queuePending = queueResult.value(QStringLiteral("pending")).toInt();
                 queueInProgress = queueResult.value(QStringLiteral("processing")).toInt();
+                queueFailed = queueResult.value(QStringLiteral("failed")).toInt();
                 queueDropped = queueResult.value(QStringLiteral("dropped")).toInt();
+                queuePaused = queueResult.value(QStringLiteral("paused")).toBool(false);
                 queuePreparing = queueResult.value(QStringLiteral("preparing")).toInt();
                 queueWriting = queueResult.value(QStringLiteral("writing")).toInt();
+                queueRebuildRunning =
+                    queueResult.value(QStringLiteral("rebuildRunning")).toBool(false);
+                queueRebuildStatus =
+                    queueResult.value(QStringLiteral("rebuildStatus")).toString(queueRebuildStatus);
+                const QJsonObject lastProgress =
+                    queueResult.value(QStringLiteral("lastProgressReport")).toObject();
+                queueScanned = lastProgress.value(QStringLiteral("scanned")).toInt();
+                queueTotal = lastProgress.value(QStringLiteral("total")).toInt();
+                queueProgressPct = queueTotal > 0
+                    ? (100.0 * static_cast<double>(queueScanned)
+                       / static_cast<double>(queueTotal))
+                    : 0.0;
                 queueCoalesced = queueResult.value(QStringLiteral("coalesced")).toInt();
                 queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
                 queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
@@ -3837,10 +3859,16 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
     indexHealth[QStringLiteral("itemsWithoutContent")] = static_cast<qint64>(health.itemsWithoutContent);
     indexHealth[QStringLiteral("queuePending")] = queuePending;
     indexHealth[QStringLiteral("queueInProgress")] = queueInProgress;
-    indexHealth[QStringLiteral("queueEmbedding")] = 0;
+    indexHealth[QStringLiteral("queueFailed")] = queueFailed;
     indexHealth[QStringLiteral("queueDropped")] = queueDropped;
+    indexHealth[QStringLiteral("queueScanned")] = queueScanned;
+    indexHealth[QStringLiteral("queueTotal")] = queueTotal;
+    indexHealth[QStringLiteral("queueProgressPct")] = queueProgressPct;
+    indexHealth[QStringLiteral("queuePaused")] = queuePaused;
     indexHealth[QStringLiteral("queuePreparing")] = queuePreparing;
     indexHealth[QStringLiteral("queueWriting")] = queueWriting;
+    indexHealth[QStringLiteral("queueRebuildRunning")] = queueRebuildRunning;
+    indexHealth[QStringLiteral("queueRebuildStatus")] = queueRebuildStatus;
     indexHealth[QStringLiteral("queueCoalesced")] = queueCoalesced;
     indexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
     indexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
@@ -4587,10 +4615,21 @@ QJsonObject QueryService::handleGetHealth(uint64_t id)
         inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     serviceHealth[QStringLiteral("uptime")] = 0;
 
+    const qint64 snapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
+    indexHealth[QStringLiteral("snapshotId")] = QStringLiteral("%1:%2")
+        .arg(qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID"),
+             QString::number(snapshotTimeMs));
+    indexHealth[QStringLiteral("snapshotTimeMs")] = snapshotTimeMs;
+    indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    indexHealth[QStringLiteral("instanceId")] =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+    indexHealth[QStringLiteral("snapshotVersion")] = 2;
+
     QJsonObject result;
     result[QStringLiteral("indexHealth")] = indexHealth;
     result[QStringLiteral("serviceHealth")] = serviceHealth;
     result[QStringLiteral("issues")] = QJsonArray();
+    result[QStringLiteral("snapshotVersion")] = 2;
     return IpcMessage::makeResponse(id, result);
 }
 

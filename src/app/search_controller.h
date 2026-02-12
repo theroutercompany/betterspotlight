@@ -76,6 +76,7 @@ private:
     bool m_isSearching = false;
     int m_selectedIndex = -1;
     QVariantMap m_lastHealthSnapshot;
+    qint64 m_lastHealthSnapshotTimeMs = 0;
     bool m_clipboardSignalsEnabled = false;
     std::optional<QString> m_clipboardBasenameSignal;
     std::optional<QString> m_clipboardDirnameSignal;

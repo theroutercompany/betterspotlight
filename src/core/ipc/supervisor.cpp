@@ -6,6 +6,8 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonObject>
+#include <QProcessEnvironment>
+#include <QRandomGenerator>
 
 #include <sys/types.h>
 #include <unistd.h>
@@ -27,13 +29,61 @@ Supervisor::~Supervisor()
     stopAll();
 }
 
+QString Supervisor::stateToString(ServiceLifecycleState state)
+{
+    switch (state) {
+    case ServiceLifecycleState::Registered:
+        return QStringLiteral("registered");
+    case ServiceLifecycleState::Starting:
+        return QStringLiteral("starting");
+    case ServiceLifecycleState::Ready:
+        return QStringLiteral("ready");
+    case ServiceLifecycleState::Backoff:
+        return QStringLiteral("backoff");
+    case ServiceLifecycleState::Crashed:
+        return QStringLiteral("crashed");
+    case ServiceLifecycleState::Stopped:
+        return QStringLiteral("stopped");
+    case ServiceLifecycleState::GivingUp:
+        return QStringLiteral("giving_up");
+    }
+    return QStringLiteral("unknown");
+}
+
+void Supervisor::transitionState(ManagedService& svc, ServiceLifecycleState nextState)
+{
+    if (svc.info.state == nextState) {
+        return;
+    }
+    svc.info.state = nextState;
+    emit serviceStateChanged(svc.info.name, stateToString(nextState));
+}
+
 void Supervisor::addService(const QString& name, const QString& execPath)
 {
+    if (ManagedService* existing = findService(name)) {
+        if (existing->info.executablePath != execPath) {
+            qCWarning(bsIpc,
+                      "Service '%s' already registered, updating executable path to %s",
+                      qPrintable(name), qPrintable(execPath));
+            existing->info.executablePath = execPath;
+        } else {
+            qCInfo(bsIpc, "Service '%s' already registered, skipping duplicate", qPrintable(name));
+        }
+        existing->info.crashCount = 0;
+        existing->info.lastCrashTime = 0;
+        existing->info.firstCrashTime = 0;
+        transitionState(*existing, ServiceLifecycleState::Registered);
+        return;
+    }
+
     auto svc = std::make_unique<ManagedService>();
     svc->info.name = name;
     svc->info.executablePath = execPath;
     svc->info.crashCount = 0;
     svc->info.lastCrashTime = 0;
+    svc->info.firstCrashTime = 0;
+    svc->info.state = ServiceLifecycleState::Registered;
     svc->ready = false;
 
     qCInfo(bsIpc, "Registered service '%s' -> %s",
@@ -44,7 +94,8 @@ void Supervisor::addService(const QString& name, const QString& execPath)
 
 bool Supervisor::startAll()
 {
-    createSocketDirectory();
+    createRuntimeDirectories();
+    m_stopping = false;
 
     bool allStarted = true;
     for (auto& svc : m_services) {
@@ -62,6 +113,10 @@ bool Supervisor::startAll()
 
 void Supervisor::stopAll()
 {
+    if (m_stopping) {
+        return;
+    }
+    m_stopping = true;
     m_heartbeatTimer->stop();
 
     for (auto& svc : m_services) {
@@ -91,15 +146,21 @@ void Supervisor::stopAll()
         }
 
         svc->ready = false;
+        transitionState(*svc, ServiceLifecycleState::Stopped);
 
         // Remove PID file
-        QString pidPath = QStringLiteral("/tmp/betterspotlight-%1/%2.pid")
-                              .arg(getuid())
-                              .arg(svc->info.name);
+        const QString pidPath = ServiceBase::pidPath(svc->info.name);
         QFile::remove(pidPath);
+
+        // Prevent late finished/error signals from re-entering lifecycle logic.
+        svc->process->disconnect(this);
+        svc->client.reset();
+        svc->process.reset();
 
         emit serviceStopped(svc->info.name);
     }
+
+    m_stopping = false;
 }
 
 SocketClient* Supervisor::clientFor(const QString& serviceName)
@@ -124,6 +185,7 @@ QJsonArray Supervisor::serviceSnapshot() const
         entry[QStringLiteral("ready")] = svc->ready;
         entry[QStringLiteral("running")] =
             (svc->process && svc->process->state() == QProcess::Running);
+        entry[QStringLiteral("state")] = stateToString(svc->info.state);
         entry[QStringLiteral("pid")] =
             svc->process ? static_cast<qint64>(svc->process->processId()) : static_cast<qint64>(0);
         services.append(entry);
@@ -147,8 +209,13 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
     if (!svc) return;
 
     svc->ready = false;
+    if (m_stopping) {
+        transitionState(*svc, ServiceLifecycleState::Stopped);
+        return;
+    }
 
     if (status == QProcess::CrashExit || exitCode != 0) {
+        transitionState(*svc, ServiceLifecycleState::Crashed);
         int64_t now = QDateTime::currentSecsSinceEpoch();
 
         if (svc->info.crashCount == 0 || now - svc->info.firstCrashTime > kCrashWindowSeconds) {
@@ -169,15 +236,20 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
             qCCritical(bsIpc, "Service '%s' crashed %d times in %ds, giving up",
                        qPrintable(svc->info.name),
                        svc->info.crashCount, kCrashWindowSeconds);
+            transitionState(*svc, ServiceLifecycleState::GivingUp);
             return;
         }
 
         // Schedule restart with backoff
         int delay = restartDelayMs(svc->info.crashCount);
+        transitionState(*svc, ServiceLifecycleState::Backoff);
         qCInfo(bsIpc, "Restarting service '%s' in %dms",
                qPrintable(svc->info.name), delay);
 
         QTimer::singleShot(delay, this, [this, name = svc->info.name]() {
+            if (m_stopping) {
+                return;
+            }
             ManagedService* s = findService(name);
             if (s) {
                 restartService(*s);
@@ -186,6 +258,7 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
     } else {
         qCInfo(bsIpc, "Service '%s' exited normally (code=%d)",
                qPrintable(svc->info.name), exitCode);
+        transitionState(*svc, ServiceLifecycleState::Stopped);
         emit serviceStopped(svc->info.name);
     }
 }
@@ -212,6 +285,11 @@ void Supervisor::heartbeat()
 
     for (auto& svc : m_services) {
         if (!svc->process || svc->process->state() != QProcess::Running) {
+            if (svc->info.crashCount >= kMaxCrashesBeforeGiveUp) {
+                transitionState(*svc, ServiceLifecycleState::GivingUp);
+            } else {
+                transitionState(*svc, ServiceLifecycleState::Stopped);
+            }
             allReady = false;
             continue;
         }
@@ -226,6 +304,7 @@ void Supervisor::heartbeat()
             if (svc->client->connectToServer(path, 1000)) {
                 qCInfo(bsIpc, "Connected to service '%s'", qPrintable(svc->info.name));
             } else {
+                transitionState(*svc, ServiceLifecycleState::Starting);
                 allReady = false;
                 continue;
             }
@@ -239,6 +318,7 @@ void Supervisor::heartbeat()
             if (svc->ready) {
                 svc->ready = false;
                 anyChanged = true;
+                transitionState(*svc, ServiceLifecycleState::Starting);
             }
             allReady = false;
             continue;
@@ -251,6 +331,7 @@ void Supervisor::heartbeat()
             if (svc->ready) {
                 svc->ready = false;
                 anyChanged = true;
+                transitionState(*svc, ServiceLifecycleState::Starting);
             }
             allReady = false;
             continue;
@@ -259,6 +340,7 @@ void Supervisor::heartbeat()
         if (!svc->ready) {
             svc->ready = true;
             anyChanged = true;
+            transitionState(*svc, ServiceLifecycleState::Ready);
             qCInfo(bsIpc, "Service '%s' is ready", qPrintable(svc->info.name));
             emit serviceStarted(svc->info.name);
         }
@@ -272,11 +354,13 @@ void Supervisor::heartbeat()
 
 void Supervisor::startService(ManagedService& svc)
 {
+    transitionState(svc, ServiceLifecycleState::Starting);
     qCInfo(bsIpc, "Starting service '%s': %s",
            qPrintable(svc.info.name), qPrintable(svc.info.executablePath));
 
     svc.process = std::make_unique<QProcess>(this);
     svc.process->setProgram(svc.info.executablePath);
+    svc.process->setProcessEnvironment(QProcessEnvironment::systemEnvironment());
 
     // Forward service stdout/stderr to the parent process
     svc.process->setProcessChannelMode(QProcess::ForwardedChannels);
@@ -291,6 +375,7 @@ void Supervisor::startService(ManagedService& svc)
         qCCritical(bsIpc, "Failed to start service '%s': %s",
                    qPrintable(svc.info.name),
                    qPrintable(svc.process->errorString()));
+        transitionState(svc, ServiceLifecycleState::Stopped);
         svc.process.reset();
         return;
     }
@@ -299,9 +384,7 @@ void Supervisor::startService(ManagedService& svc)
            qPrintable(svc.info.name), svc.process->processId());
 
     // Write PID file so external tools can identify our child processes
-    QString pidPath = QStringLiteral("/tmp/betterspotlight-%1/%2.pid")
-                          .arg(getuid())
-                          .arg(svc.info.name);
+    const QString pidPath = ServiceBase::pidPath(svc.info.name);
     QFile pidFile(pidPath);
     if (pidFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         pidFile.write(QByteArray::number(static_cast<qint64>(svc.process->processId())));
@@ -320,6 +403,7 @@ void Supervisor::startService(ManagedService& svc)
         QString path = ServiceBase::socketPath(name);
         if (s->client->connectToServer(path, 3000)) {
             s->ready = true;
+            transitionState(*s, ServiceLifecycleState::Ready);
             qCInfo(bsIpc, "Initial connection to service '%s' succeeded", qPrintable(name));
             emit serviceStarted(name);
 
@@ -340,6 +424,9 @@ void Supervisor::startService(ManagedService& svc)
 
 void Supervisor::restartService(ManagedService& svc)
 {
+    if (m_stopping) {
+        return;
+    }
     qCInfo(bsIpc, "Restarting service '%s'", qPrintable(svc.info.name));
 
     // Clean up existing client
@@ -359,11 +446,10 @@ void Supervisor::restartService(ManagedService& svc)
     }
 
     svc.ready = false;
+    transitionState(svc, ServiceLifecycleState::Starting);
 
     // Remove stale PID file before restarting
-    QString pidPath = QStringLiteral("/tmp/betterspotlight-%1/%2.pid")
-                          .arg(getuid())
-                          .arg(svc.info.name);
+    const QString pidPath = ServiceBase::pidPath(svc.info.name);
     QFile::remove(pidPath);
 
     startService(svc);
@@ -371,26 +457,38 @@ void Supervisor::restartService(ManagedService& svc)
 
 int Supervisor::restartDelayMs(int crashCount) const
 {
-    // Exponential backoff: 0ms, 1000ms, 2000ms, 4000ms, ... capped at 30000ms
-    if (crashCount <= 1) return 0;
+    // Exponential backoff with bounded jitter to avoid synchronized restart storms.
+    if (crashCount <= 1) {
+        return QRandomGenerator::global()->bounded(125);
+    }
 
-    int delay = 1000 * (1 << (crashCount - 2));  // 1s, 2s, 4s, 8s, ...
-    return std::min(delay, 30000);
+    int baseDelay = 1000;
+    for (int attempt = 2; attempt < crashCount && baseDelay < kMaxRestartBackoffMs; ++attempt) {
+        baseDelay = std::min(baseDelay * 2, kMaxRestartBackoffMs);
+    }
+    const int jitter = QRandomGenerator::global()->bounded(std::max(1, baseDelay / 4 + 1));
+    return std::min(baseDelay + jitter, kMaxRestartBackoffMs);
 }
 
-void Supervisor::createSocketDirectory()
+void Supervisor::createRuntimeDirectories()
 {
-    uid_t uid = getuid();
-    QString dirPath = QStringLiteral("/tmp/betterspotlight-%1").arg(uid);
+    const QStringList requiredDirectories = {
+        ServiceBase::runtimeDirectory(),
+        ServiceBase::socketDirectory(),
+        ServiceBase::pidDirectory(),
+    };
 
-    QDir dir(dirPath);
-    if (!dir.exists()) {
-        if (!dir.mkpath(QStringLiteral("."))) {
-            qCCritical(bsIpc, "Failed to create socket directory: %s",
-                       qPrintable(dirPath));
-            return;
+    for (const QString& dirPath : requiredDirectories) {
+        QDir dir(dirPath);
+        if (dir.exists()) {
+            continue;
         }
-        qCInfo(bsIpc, "Created socket directory: %s", qPrintable(dirPath));
+        if (!dir.mkpath(QStringLiteral("."))) {
+            qCCritical(bsIpc, "Failed to create runtime directory: %s",
+                       qPrintable(dirPath));
+            continue;
+        }
+        qCInfo(bsIpc, "Created runtime directory: %s", qPrintable(dirPath));
     }
 }
 

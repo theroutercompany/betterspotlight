@@ -10,16 +10,30 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QIcon>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLockFile>
 #include <QMenu>
 #include <QPainter>
 #include <QPixmap>
+#include <QPointer>
+#include <QProcess>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QTimer>
+#include <QUuid>
 #include <QtGui/QStyleHints>
 #include <QSystemTrayIcon>
+
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace {
 
@@ -28,6 +42,245 @@ enum class TrayGlyphVariant {
     IndexingA,
     IndexingB,
     Error,
+};
+
+struct RuntimeContext {
+    QString instanceId;
+    QString runtimeRoot;
+    QString runtimeDir;
+    QString socketDir;
+    QString pidDir;
+    QString metadataPath;
+    QString lockPath;
+};
+
+QString runtimeRootPath()
+{
+    const uid_t uid = getuid();
+    return QStringLiteral("/tmp/betterspotlight-%1").arg(uid);
+}
+
+QString makeInstanceId()
+{
+    return QStringLiteral("%1-%2-%3")
+        .arg(QDateTime::currentMSecsSinceEpoch())
+        .arg(QCoreApplication::applicationPid())
+        .arg(QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+}
+
+bool processIsAlive(qint64 pid)
+{
+    if (pid <= 0) {
+        return false;
+    }
+    return ::kill(static_cast<pid_t>(pid), 0) == 0;
+}
+
+bool ensureDirectory(const QString& path, QString* error)
+{
+    QDir dir(path);
+    if (dir.exists()) {
+        return true;
+    }
+    if (!dir.mkpath(QStringLiteral("."))) {
+        if (error) {
+            *error = QStringLiteral("Failed to create directory: %1").arg(path);
+        }
+        return false;
+    }
+    return true;
+}
+
+void cleanupOrphanRuntimeDirectories(const RuntimeContext& context)
+{
+    QDir root(context.runtimeRoot);
+    const QFileInfoList entries = root.entryInfoList(
+        QDir::Dirs | QDir::NoDotAndDotDot,
+        QDir::Name | QDir::IgnoreCase);
+
+    for (const QFileInfo& entry : entries) {
+        if (!entry.isDir()) {
+            continue;
+        }
+        if (entry.absoluteFilePath() == context.runtimeDir) {
+            continue;
+        }
+
+        const QString instancePath = entry.absoluteFilePath();
+        const QString metadataPath = QDir(instancePath).filePath(QStringLiteral("instance.json"));
+        QFile metadataFile(metadataPath);
+        if (!metadataFile.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        const QJsonDocument metadataDoc = QJsonDocument::fromJson(metadataFile.readAll());
+        metadataFile.close();
+        if (!metadataDoc.isObject()) {
+            continue;
+        }
+
+        const QJsonObject metadata = metadataDoc.object();
+        const qint64 appPid = metadata.value(QStringLiteral("app_pid")).toInteger();
+        if (processIsAlive(appPid)) {
+            continue;
+        }
+
+        QDir staleDir(instancePath);
+        if (staleDir.removeRecursively()) {
+            qInfo() << "Removed stale runtime directory:" << instancePath;
+        } else {
+            qWarning() << "Failed to remove stale runtime directory:" << instancePath;
+        }
+    }
+}
+
+bool writeRuntimeMetadata(const RuntimeContext& context, QString* error)
+{
+    QJsonObject metadata;
+    metadata[QStringLiteral("instance_id")] = context.instanceId;
+    metadata[QStringLiteral("app_pid")] = static_cast<qint64>(QCoreApplication::applicationPid());
+    metadata[QStringLiteral("started_at")] =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    metadata[QStringLiteral("version")] = QCoreApplication::applicationVersion();
+    metadata[QStringLiteral("runtime_dir")] = context.runtimeDir;
+    metadata[QStringLiteral("socket_dir")] = context.socketDir;
+    metadata[QStringLiteral("pid_dir")] = context.pidDir;
+
+    QFile metadataFile(context.metadataPath);
+    if (!metadataFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (error) {
+            *error = QStringLiteral("Failed to write runtime metadata: %1")
+                         .arg(context.metadataPath);
+        }
+        return false;
+    }
+    metadataFile.write(QJsonDocument(metadata).toJson(QJsonDocument::Indented));
+    metadataFile.close();
+    return true;
+}
+
+bool initRuntimeContext(RuntimeContext* context, QString* error)
+{
+    if (!context) {
+        if (error) {
+            *error = QStringLiteral("Runtime context output is null");
+        }
+        return false;
+    }
+
+    const QString envRuntimeDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_RUNTIME_DIR").trimmed();
+    const QString envSocketDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_SOCKET_DIR").trimmed();
+    const QString envPidDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_PID_DIR").trimmed();
+    const QString envInstanceId =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID").trimmed();
+
+    context->runtimeRoot = runtimeRootPath();
+    if (!ensureDirectory(context->runtimeRoot, error)) {
+        return false;
+    }
+    context->lockPath = QDir(context->runtimeRoot).filePath(QStringLiteral("app.lock"));
+
+    context->instanceId = envInstanceId.isEmpty() ? makeInstanceId() : envInstanceId;
+    context->runtimeDir = envRuntimeDir.isEmpty()
+        ? QDir(context->runtimeRoot).filePath(context->instanceId)
+        : QDir::cleanPath(envRuntimeDir);
+    context->socketDir = envSocketDir.isEmpty()
+        ? QDir(context->runtimeDir).filePath(QStringLiteral("sockets"))
+        : QDir::cleanPath(envSocketDir);
+    context->pidDir = envPidDir.isEmpty()
+        ? QDir(context->runtimeDir).filePath(QStringLiteral("pids"))
+        : QDir::cleanPath(envPidDir);
+    context->metadataPath = QDir(context->runtimeDir).filePath(QStringLiteral("instance.json"));
+
+    if (!ensureDirectory(context->runtimeDir, error)
+        || !ensureDirectory(context->socketDir, error)
+        || !ensureDirectory(context->pidDir, error)) {
+        return false;
+    }
+
+    qputenv("BETTERSPOTLIGHT_INSTANCE_ID", context->instanceId.toUtf8());
+    qputenv("BETTERSPOTLIGHT_RUNTIME_DIR", context->runtimeDir.toUtf8());
+    qputenv("BETTERSPOTLIGHT_SOCKET_DIR", context->socketDir.toUtf8());
+    qputenv("BETTERSPOTLIGHT_PID_DIR", context->pidDir.toUtf8());
+    return writeRuntimeMetadata(*context, error);
+}
+
+class TrayStateController : public QObject {
+public:
+    TrayStateController(QSystemTrayIcon* trayIcon,
+                        bs::ServiceManager* serviceManager,
+                        const QIcon& idleIcon,
+                        const QIcon& indexingIconA,
+                        const QIcon& indexingIconB,
+                        const QIcon& errorIcon,
+                        QObject* parent = nullptr)
+        : QObject(parent)
+        , m_trayIcon(trayIcon)
+        , m_serviceManager(serviceManager)
+        , m_idleIcon(idleIcon)
+        , m_indexingIconA(indexingIconA)
+        , m_indexingIconB(indexingIconB)
+        , m_errorIcon(errorIcon)
+    {
+        m_pulseTimer.setInterval(700);
+        connect(&m_pulseTimer, &QTimer::timeout,
+                this, &TrayStateController::updatePresentation);
+        connect(m_serviceManager, &bs::ServiceManager::trayStateChanged,
+                this, &TrayStateController::updatePresentation);
+        connect(m_serviceManager, &bs::ServiceManager::serviceStatusChanged,
+                this, &TrayStateController::updatePresentation);
+    }
+
+    void quiesce()
+    {
+        m_stopping = true;
+        m_pulseTimer.stop();
+    }
+
+    void updatePresentation()
+    {
+        if (m_stopping || !m_trayIcon || !m_serviceManager) {
+            return;
+        }
+
+        const QString state = m_serviceManager->trayState();
+        if (state == QLatin1String("error")) {
+            m_pulseTimer.stop();
+            m_trayIcon->setIcon(m_errorIcon);
+            m_trayIcon->setToolTip(
+                QStringLiteral("BetterSpotlight - Error (click to open Index Health)"));
+            return;
+        }
+        if (state == QLatin1String("indexing")) {
+            m_trayIcon->setIcon(m_pulseFlip ? m_indexingIconA : m_indexingIconB);
+            m_pulseFlip = !m_pulseFlip;
+            m_trayIcon->setToolTip(
+                QStringLiteral("BetterSpotlight - Indexing in progress (click to open Index Health)"));
+            if (!m_pulseTimer.isActive()) {
+                m_pulseTimer.start();
+            }
+            return;
+        }
+
+        m_pulseTimer.stop();
+        m_trayIcon->setIcon(m_idleIcon);
+        m_trayIcon->setToolTip(
+            QStringLiteral("BetterSpotlight - Ready (idle, click to open Index Health)"));
+    }
+
+private:
+    QPointer<QSystemTrayIcon> m_trayIcon;
+    QPointer<bs::ServiceManager> m_serviceManager;
+    QIcon m_idleIcon;
+    QIcon m_indexingIconA;
+    QIcon m_indexingIconB;
+    QIcon m_errorIcon;
+    QTimer m_pulseTimer;
+    bool m_pulseFlip = false;
+    bool m_stopping = false;
 };
 
 QIcon fallbackTrayStateIcon(TrayGlyphVariant variant)
@@ -112,6 +365,48 @@ int main(int argc, char* argv[])
     // Critical: app runs in background as a status bar app -- no dock icon,
     // no quit when last window closes.
     app.setQuitOnLastWindowClosed(false);
+
+    const QString allowMultiInstanceEnv =
+        qEnvironmentVariable("BETTERSPOTLIGHT_ALLOW_MULTI_INSTANCE").trimmed().toLower();
+    const bool allowMultiInstance =
+        allowMultiInstanceEnv == QLatin1String("1")
+        || allowMultiInstanceEnv == QLatin1String("true")
+        || allowMultiInstanceEnv == QLatin1String("yes")
+        || allowMultiInstanceEnv == QLatin1String("on");
+
+    RuntimeContext runtimeContext;
+    QString runtimeError;
+    if (!initRuntimeContext(&runtimeContext, &runtimeError)) {
+        qCritical() << "Failed to initialize runtime context:" << runtimeError;
+        return 1;
+    }
+
+    std::unique_ptr<QLockFile> singleInstanceLock;
+    if (!allowMultiInstance) {
+        singleInstanceLock = std::make_unique<QLockFile>(runtimeContext.lockPath);
+        singleInstanceLock->setStaleLockTime(0);
+        if (!singleInstanceLock->tryLock(0)) {
+            const bool staleRecovered = singleInstanceLock->removeStaleLockFile()
+                                        && singleInstanceLock->tryLock(0);
+            if (!staleRecovered) {
+                qint64 ownerPid = 0;
+                QString ownerHost;
+                QString ownerApp;
+                singleInstanceLock->getLockInfo(&ownerPid, &ownerHost, &ownerApp);
+                qWarning() << "Another BetterSpotlight instance is already running"
+                           << "(pid:" << ownerPid << "host:" << ownerHost
+                           << "app:" << ownerApp << ").";
+                QProcess::startDetached(QStringLiteral("/usr/bin/open"),
+                                        QStringList{
+                                            QStringLiteral("-b"),
+                                            QStringLiteral("com.betterspotlight.app"),
+                                        });
+                return 0;
+            }
+        }
+    }
+
+    cleanupOrphanRuntimeDirectories(runtimeContext);
 
     qInfo() << "BetterSpotlight app starting...";
 
@@ -237,7 +532,6 @@ int main(int argc, char* argv[])
 
     QObject::connect(quitAction, &QAction::triggered, [&]() {
         qInfo() << "Quit requested from tray menu";
-        serviceManager.stop();
         app.quit();
     });
 
@@ -252,38 +546,14 @@ int main(int argc, char* argv[])
 
     // --- Connect service status to tray icon state ---
 
-    QTimer trayPulseTimer;
-    trayPulseTimer.setInterval(700);
-    bool trayPulseFlip = false;
-    const auto updateTrayPresentation = [&]() {
-        const QString state = serviceManager.trayState();
-        if (state == QLatin1String("error")) {
-            trayPulseTimer.stop();
-            trayIcon.setIcon(errorTrayIcon);
-            trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Error (click to open Index Health)"));
-            return;
-        }
-        if (state == QLatin1String("indexing")) {
-            trayIcon.setIcon(trayPulseFlip ? indexingTrayIconA : indexingTrayIconB);
-            trayPulseFlip = !trayPulseFlip;
-            trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Indexing in progress (click to open Index Health)"));
-            if (!trayPulseTimer.isActive()) {
-                trayPulseTimer.start();
-            }
-            return;
-        }
+    TrayStateController trayStateController(
+        &trayIcon, &serviceManager, idleTrayIcon, indexingTrayIconA, indexingTrayIconB, errorTrayIcon, &app);
+    trayStateController.updatePresentation();
 
-        trayPulseTimer.stop();
-        trayIcon.setIcon(idleTrayIcon);
-        trayIcon.setToolTip(QStringLiteral("BetterSpotlight - Ready (idle, click to open Index Health)"));
-    };
-
-    QObject::connect(&trayPulseTimer, &QTimer::timeout, &app, updateTrayPresentation);
-    QObject::connect(&serviceManager, &bs::ServiceManager::trayStateChanged,
-                     &app, updateTrayPresentation);
-    QObject::connect(&serviceManager, &bs::ServiceManager::serviceStatusChanged,
-                     &app, updateTrayPresentation);
-    updateTrayPresentation();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&]() {
+        trayStateController.quiesce();
+        serviceManager.stop();
+    });
 
     QObject::connect(&serviceManager, &bs::ServiceManager::serviceError,
                      [&](const QString& name, const QString& error) {

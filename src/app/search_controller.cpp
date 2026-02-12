@@ -3,6 +3,7 @@
 #include "core/shared/logging.h"
 
 #include <QClipboard>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QGuiApplication>
@@ -11,6 +12,8 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QUrl>
+
+#include <algorithm>
 
 namespace bs {
 
@@ -317,36 +320,56 @@ void SearchController::moveSelection(int delta)
 
 QVariantMap SearchController::getHealthSync()
 {
-    QVariantMap emptyResult;
-    const auto cachedOrEmpty = [&]() -> QVariantMap {
+    const auto staleSnapshot = [&](const QString& reason) -> QVariantMap {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
         if (!m_lastHealthSnapshot.isEmpty()) {
-            return m_lastHealthSnapshot;
+            QVariantMap stale = m_lastHealthSnapshot;
+            stale[QStringLiteral("snapshotState")] = QStringLiteral("stale");
+            stale[QStringLiteral("healthStatusReason")] = reason;
+            stale[QStringLiteral("staleReason")] = reason;
+            stale[QStringLiteral("stalenessMs")] =
+                std::max<qint64>(0, now - m_lastHealthSnapshotTimeMs);
+            stale[QStringLiteral("overallStatus")] = QStringLiteral("stale");
+            return stale;
         }
-        return emptyResult;
+
+        QVariantMap unavailable;
+        unavailable[QStringLiteral("overallStatus")] = QStringLiteral("unavailable");
+        unavailable[QStringLiteral("snapshotState")] = QStringLiteral("unavailable");
+        unavailable[QStringLiteral("healthStatusReason")] = reason;
+        unavailable[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+        unavailable[QStringLiteral("instanceId")] =
+            qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+        if (m_supervisor) {
+            unavailable[QStringLiteral("supervisorServices")] =
+                m_supervisor->serviceSnapshot().toVariantList();
+        }
+        return unavailable;
     };
 
     if (!m_supervisor) {
         LOG_WARN(bsCore, "SearchController: no supervisor set");
-        return cachedOrEmpty();
+        return staleSnapshot(QStringLiteral("supervisor_unavailable"));
     }
 
     SocketClient* client = m_supervisor->clientFor(QStringLiteral("query"));
     if (!client || !client->isConnected()) {
         LOG_WARN(bsCore, "SearchController: query service not connected");
-        return cachedOrEmpty();
+        return staleSnapshot(QStringLiteral("query_unavailable"));
     }
 
-    auto response = client->sendRequest(QStringLiteral("getHealth"), {}, kSearchTimeoutMs);
+    auto response = client->sendRequest(QStringLiteral("getHealthV2"), {}, kSearchTimeoutMs);
     if (!response) {
-        LOG_WARN(bsCore, "SearchController: getHealth request failed");
-        return cachedOrEmpty();
+        response = client->sendRequest(QStringLiteral("getHealth"), {}, kSearchTimeoutMs);
+    }
+    if (!response) {
+        LOG_WARN(bsCore, "SearchController: health request timed out");
+        return staleSnapshot(QStringLiteral("health_rpc_timeout"));
     }
 
-    // Check for error
-    QString type = response->value(QStringLiteral("type")).toString();
-    if (type == QLatin1String("error")) {
-        LOG_WARN(bsCore, "SearchController: getHealth returned error");
-        return cachedOrEmpty();
+    if (response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        LOG_WARN(bsCore, "SearchController: health request returned error");
+        return staleSnapshot(QStringLiteral("health_rpc_error"));
     }
 
     QJsonObject result = response->value(QStringLiteral("result")).toObject();
@@ -357,9 +380,11 @@ QVariantMap SearchController::getHealthSync()
         result = detailResponse->value(QStringLiteral("result")).toObject();
     }
 
-    // The query service nests health stats under "indexHealth".
-    // Flatten it so QML can access keys like healthData["totalIndexedItems"] directly.
     QJsonObject indexHealth = result.value(QStringLiteral("indexHealth")).toObject();
+    if (indexHealth.isEmpty()) {
+        indexHealth = result;
+    }
+
     const QJsonObject details = result.value(QStringLiteral("details")).toObject();
     if (!details.isEmpty()) {
         indexHealth[QStringLiteral("detailedFailures")] = details.value(QStringLiteral("failures")).toArray();
@@ -372,120 +397,7 @@ QVariantMap SearchController::getHealthSync()
         indexHealth[QStringLiteral("bsignoreDetails")] = details.value(QStringLiteral("bsignore")).toObject();
     }
 
-    // Merge queue/runtime stats from the indexer service.
-    SocketClient* indexerClient = m_supervisor->clientFor(QStringLiteral("indexer"));
-    if (indexerClient && indexerClient->isConnected()) {
-        auto queueResponse = indexerClient->sendRequest(QStringLiteral("getQueueStatus"), {},
-                                                        kSearchTimeoutMs);
-        if (queueResponse
-            && queueResponse->value(QStringLiteral("type")).toString() != QLatin1String("error")) {
-            const QJsonObject queueResult = queueResponse->value(QStringLiteral("result")).toObject();
-            const int pending = queueResult.value(QStringLiteral("pending")).toInt();
-            const int processing = queueResult.value(QStringLiteral("processing")).toInt();
-            const int failed = queueResult.value(QStringLiteral("failed")).toInt();
-            const int dropped = queueResult.value(QStringLiteral("dropped")).toInt();
-            const bool paused = queueResult.value(QStringLiteral("paused")).toBool();
-            const int preparing = queueResult.value(QStringLiteral("preparing")).toInt();
-            const int writing = queueResult.value(QStringLiteral("writing")).toInt();
-            const bool rebuildRunning = queueResult.value(QStringLiteral("rebuildRunning")).toBool();
-            const QJsonObject lastProgress =
-                queueResult.value(QStringLiteral("lastProgressReport")).toObject();
-            const int scanned = lastProgress.value(QStringLiteral("scanned")).toInt();
-            const int total = lastProgress.value(QStringLiteral("total")).toInt();
-            const double progressPct = total > 0
-                ? (100.0 * static_cast<double>(scanned) / static_cast<double>(total))
-                : 0.0;
-
-            indexHealth[QStringLiteral("queuePending")] = pending;
-            indexHealth[QStringLiteral("queueInProgress")] = processing;
-            indexHealth[QStringLiteral("queueFailed")] = failed;
-            indexHealth[QStringLiteral("queueDropped")] = dropped;
-            indexHealth[QStringLiteral("queuePaused")] = paused;
-            indexHealth[QStringLiteral("queueScanned")] = scanned;
-            indexHealth[QStringLiteral("queueTotal")] = total;
-            indexHealth[QStringLiteral("queueProgressPct")] = progressPct;
-            indexHealth[QStringLiteral("queueRebuildRunning")] = rebuildRunning;
-            indexHealth[QStringLiteral("queueRebuildStatus")] =
-                queueResult.value(QStringLiteral("rebuildStatus")).toString();
-            indexHealth[QStringLiteral("queueRebuildStartedAtMs")] =
-                queueResult.value(QStringLiteral("rebuildStartedAtMs")).toInteger();
-            indexHealth[QStringLiteral("queueRebuildFinishedAtMs")] =
-                queueResult.value(QStringLiteral("rebuildFinishedAtMs")).toInteger();
-            indexHealth[QStringLiteral("queueSource")] = QStringLiteral("indexer_rpc");
-            indexHealth[QStringLiteral("queuePreparing")] = preparing;
-            indexHealth[QStringLiteral("queueWriting")] = writing;
-            indexHealth[QStringLiteral("queueCoalesced")] =
-                queueResult.value(QStringLiteral("coalesced")).toInt();
-            indexHealth[QStringLiteral("queueStaleDropped")] =
-                queueResult.value(QStringLiteral("staleDropped")).toInt();
-            indexHealth[QStringLiteral("queuePrepWorkers")] =
-                queueResult.value(QStringLiteral("prepWorkers")).toInt();
-            indexHealth[QStringLiteral("queueWriterBatchDepth")] =
-                queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
-            if (queueResult.contains(QStringLiteral("bsignorePath"))) {
-                indexHealth[QStringLiteral("bsignorePath")] =
-                    queueResult.value(QStringLiteral("bsignorePath")).toString();
-            }
-            if (queueResult.contains(QStringLiteral("bsignoreFileExists"))) {
-                indexHealth[QStringLiteral("bsignoreFileExists")] =
-                    queueResult.value(QStringLiteral("bsignoreFileExists")).toBool();
-            }
-            if (queueResult.contains(QStringLiteral("bsignoreLoaded"))) {
-                indexHealth[QStringLiteral("bsignoreLoaded")] =
-                    queueResult.value(QStringLiteral("bsignoreLoaded")).toBool();
-            }
-            if (queueResult.contains(QStringLiteral("bsignorePatternCount"))) {
-                indexHealth[QStringLiteral("bsignorePatternCount")] =
-                    queueResult.value(QStringLiteral("bsignorePatternCount")).toInt();
-            }
-            if (queueResult.contains(QStringLiteral("bsignoreLastLoadedAtMs"))) {
-                indexHealth[QStringLiteral("bsignoreLastLoadedAtMs")] =
-                    queueResult.value(QStringLiteral("bsignoreLastLoadedAtMs")).toInteger();
-            }
-
-            const QJsonArray roots = queueResult.value(QStringLiteral("roots")).toArray();
-            if (!roots.isEmpty()) {
-                QJsonArray rootStatus;
-                const bool activeWork =
-                    pending > 0 || processing > 0 || preparing > 0 || writing > 0 || rebuildRunning;
-                const QString status = paused
-                    ? QStringLiteral("paused")
-                    : (activeWork ? QStringLiteral("scanning") : QStringLiteral("idle"));
-                for (const QJsonValue& root : roots) {
-                    QJsonObject rootEntry;
-                    rootEntry[QStringLiteral("path")] = root.toString();
-                    rootEntry[QStringLiteral("status")] = status;
-                    rootStatus.append(rootEntry);
-                }
-                indexHealth[QStringLiteral("indexRoots")] = rootStatus;
-            }
-
-            if (indexHealth.value(QStringLiteral("healthStatusReason")).toString()
-                == QLatin1String("indexer_unavailable")) {
-                const bool rebuilding =
-                    indexHealth.value(QStringLiteral("overallStatus")).toString()
-                        == QLatin1String("rebuilding")
-                    || indexHealth.value(QStringLiteral("vectorRebuildStatus")).toString()
-                        == QLatin1String("running")
-                    || indexHealth.value(QStringLiteral("totalIndexedItems")).toInteger() == 0;
-                const int criticalFailures =
-                    indexHealth.value(QStringLiteral("criticalFailures")).toInt();
-
-                if (rebuilding) {
-                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("rebuilding");
-                    indexHealth[QStringLiteral("healthStatusReason")] = QStringLiteral("rebuilding");
-                } else if (criticalFailures > 0) {
-                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("degraded");
-                    indexHealth[QStringLiteral("healthStatusReason")] =
-                        QStringLiteral("degraded_critical_failures");
-                } else {
-                    indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("healthy");
-                    indexHealth[QStringLiteral("healthStatusReason")] = QStringLiteral("healthy");
-                }
-            }
-        }
-    }
-
+    indexHealth[QStringLiteral("supervisorServices")] = m_supervisor->serviceSnapshot();
     if (!indexHealth.contains(QStringLiteral("contentCoveragePct"))) {
         const qint64 totalIndexed = indexHealth.value(QStringLiteral("totalIndexedItems")).toInteger();
         const qint64 withoutContent = indexHealth.value(QStringLiteral("itemsWithoutContent")).toInteger();
@@ -496,11 +408,27 @@ QVariantMap SearchController::getHealthSync()
         }
     }
 
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!indexHealth.contains(QStringLiteral("snapshotTimeMs"))) {
+        indexHealth[QStringLiteral("snapshotTimeMs")] = now;
+    }
+    if (!indexHealth.contains(QStringLiteral("instanceId"))) {
+        indexHealth[QStringLiteral("instanceId")] =
+            qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+    }
+    indexHealth[QStringLiteral("snapshotState")] = QStringLiteral("fresh");
+    indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    if (!indexHealth.contains(QStringLiteral("overallStatus"))) {
+        indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("unavailable");
+    }
+
     const QVariantMap healthMap = indexHealth.toVariantMap();
     if (!healthMap.isEmpty()) {
         m_lastHealthSnapshot = healthMap;
+        m_lastHealthSnapshotTimeMs = now;
+        return m_lastHealthSnapshot;
     }
-    return cachedOrEmpty();
+    return staleSnapshot(QStringLiteral("empty_health_payload"));
 }
 
 void SearchController::executeSearch()

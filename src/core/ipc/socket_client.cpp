@@ -1,12 +1,29 @@
 #include "core/ipc/socket_client.h"
 #include "core/shared/logging.h"
-#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTimer>
 
+#include <algorithm>
+
 namespace bs {
+
+namespace {
+
+bool isTransientConnectError(QLocalSocket::LocalSocketError error)
+{
+    switch (error) {
+    case QLocalSocket::ServerNotFoundError:
+    case QLocalSocket::ConnectionRefusedError:
+    case QLocalSocket::SocketTimeoutError:
+        return true;
+    default:
+        return false;
+    }
+}
+
+} // namespace
 
 SocketClient::SocketClient(QObject* parent)
     : QObject(parent)
@@ -25,22 +42,52 @@ SocketClient::~SocketClient()
 
 bool SocketClient::connectToServer(const QString& socketPath, int timeoutMs)
 {
-    if (m_socket->state() == QLocalSocket::ConnectedState) {
-        return true;
-    }
-
-    qCDebug(bsIpc, "Connecting to %s (timeout=%dms)", qPrintable(socketPath), timeoutMs);
-
-    m_socket->connectToServer(socketPath);
-    if (!m_socket->waitForConnected(timeoutMs)) {
-        QString err = m_socket->errorString();
-        qCWarning(bsIpc, "Failed to connect to %s: %s",
-                  qPrintable(socketPath), qPrintable(err));
+    const QString normalizedSocketPath = socketPath.trimmed();
+    if (normalizedSocketPath.isEmpty()) {
+        const QString err = QStringLiteral("Invalid socket path: empty");
+        qCCritical(bsIpc, "%s", qPrintable(err));
         emit errorOccurred(err);
         return false;
     }
 
-    qCInfo(bsIpc, "Connected to %s", qPrintable(socketPath));
+    if (timeoutMs <= 0) {
+        const QString err = QStringLiteral("Invalid connect timeout: %1ms").arg(timeoutMs);
+        qCCritical(bsIpc, "%s", qPrintable(err));
+        emit errorOccurred(err);
+        return false;
+    }
+
+    if (m_socket->state() == QLocalSocket::ConnectedState
+        && m_socket->serverName() == normalizedSocketPath) {
+        return true;
+    }
+
+    // Always abort before reconnect attempts to clear stale state.
+    if (m_socket->state() != QLocalSocket::UnconnectedState) {
+        m_socket->abort();
+    }
+    m_socket->abort();
+    m_readBuffer.clear();
+    m_pending.clear();
+
+    qCDebug(bsIpc, "Connecting to %s (timeout=%dms)", qPrintable(normalizedSocketPath), timeoutMs);
+
+    m_socket->connectToServer(normalizedSocketPath);
+    if (!m_socket->waitForConnected(timeoutMs)) {
+        const auto error = m_socket->error();
+        const QString err = m_socket->errorString();
+        if (isTransientConnectError(error)) {
+            qCDebug(bsIpc, "Service not ready at %s yet: %s",
+                    qPrintable(normalizedSocketPath), qPrintable(err));
+        } else {
+            qCCritical(bsIpc, "Hard connect failure for %s: %s (error=%d)",
+                       qPrintable(normalizedSocketPath), qPrintable(err), static_cast<int>(error));
+            emit errorOccurred(err);
+        }
+        return false;
+    }
+
+    qCInfo(bsIpc, "Connected to %s", qPrintable(normalizedSocketPath));
     return true;
 }
 
@@ -86,15 +133,23 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
     m_socket->write(encoded);
     m_socket->flush();
 
-    // Block-wait for response, processing events to allow readyRead signals
+    // Block-wait for response without pumping the global event loop.
+    // This avoids re-entrancy side effects when callers invoke synchronous RPC on UI paths.
     QElapsedTimer timer;
     timer.start();
 
     while (!pending->completed && timer.elapsed() < timeoutMs) {
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        const int remainingMs = std::max(0, timeoutMs - static_cast<int>(timer.elapsed()));
+        if (remainingMs == 0) {
+            break;
+        }
 
-        // Also try reading directly in case signals are not delivered
-        if (m_socket->bytesAvailable() > 0) {
+        if (m_socket->bytesAvailable() == 0) {
+            const int waitMs = std::min(remainingMs, 50);
+            m_socket->waitForReadyRead(waitMs);
+        }
+
+        if (m_socket->bytesAvailable() > 0 || m_socket->state() != QLocalSocket::ConnectedState) {
             onReadyRead();
         }
     }

@@ -2,6 +2,13 @@ find_package(Qt6 REQUIRED COMPONENTS Qml Quick QuickControls2 Widgets)
 
 qt_add_executable(betterspotlight
     main.cpp
+    control_plane/control_plane_types.h
+    control_plane/health_snapshot_v2.h
+    control_plane/health_snapshot_v2.cpp
+    control_plane/control_plane_actor.h
+    control_plane/control_plane_actor.cpp
+    control_plane/health_aggregator_actor.h
+    control_plane/health_aggregator_actor.cpp
     service_manager.h
     service_manager.cpp
     hotkey_manager.h

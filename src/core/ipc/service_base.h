@@ -18,6 +18,10 @@ public:
 
     // Get the socket path for this service
     static QString socketPath(const QString& serviceName);
+    static QString runtimeDirectory();
+    static QString socketDirectory();
+    static QString pidDirectory();
+    static QString pidPath(const QString& serviceName);
 
 protected:
     // Override to handle specific methods

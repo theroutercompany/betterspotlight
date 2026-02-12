@@ -1,17 +1,22 @@
 #pragma once
 
-#include "core/ipc/supervisor.h"
 #include <QObject>
-#include <QString>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QString>
+#include <QThread>
 #include <QTimer>
 #include <QVariantList>
-#include <mutex>
+
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace bs {
+
+class ControlPlaneActor;
+class HealthAggregatorActor;
+class Supervisor;
 
 class ServiceManager : public QObject {
     Q_OBJECT
@@ -25,6 +30,7 @@ class ServiceManager : public QObject {
     Q_PROPERTY(bool modelDownloadRunning READ modelDownloadRunning NOTIFY modelDownloadStateChanged)
     Q_PROPERTY(QString modelDownloadStatus READ modelDownloadStatus NOTIFY modelDownloadStateChanged)
     Q_PROPERTY(bool modelDownloadHasError READ modelDownloadHasError NOTIFY modelDownloadStateChanged)
+    Q_PROPERTY(QVariantMap healthSnapshot READ healthSnapshot NOTIFY healthSnapshotChanged)
 
 public:
     enum class TrayState {
@@ -46,8 +52,9 @@ public:
     bool modelDownloadRunning() const;
     QString modelDownloadStatus() const;
     bool modelDownloadHasError() const;
+    QVariantMap healthSnapshot() const;
 
-    // Access to the underlying supervisor (e.g., for SearchController to get clients)
+    // Legacy accessor retained for compatibility.
     Supervisor* supervisor() const;
 
     Q_INVOKABLE void start();
@@ -62,6 +69,8 @@ public:
     Q_INVOKABLE bool downloadModels(const QStringList& roles, bool includeExisting = false);
     Q_INVOKABLE QVariantList serviceDiagnostics() const;
     Q_INVOKABLE void triggerInitialIndexing();
+    Q_INVOKABLE QVariantMap latestHealthSnapshot() const;
+    Q_INVOKABLE void requestHealthRefresh();
 
 signals:
     void serviceStatusChanged();
@@ -69,14 +78,26 @@ signals:
     void serviceError(const QString& serviceName, const QString& error);
     void trayStateChanged();
     void modelDownloadStateChanged();
+    void healthSnapshotChanged();
+    void healthSnapshotUpdated(const QJsonObject& snapshot);
 
 private slots:
     void onServiceStarted(const QString& name);
     void onServiceStopped(const QString& name);
     void onServiceCrashed(const QString& name, int crashCount);
     void onAllServicesReady();
+    void onControlPlaneServicesUpdated(const QJsonArray& services);
+    void onHealthSnapshotUpdated(const QJsonObject& snapshot);
 
 private:
+    struct ServiceRequestResult {
+        bool ok = false;
+        QString error;
+        QJsonObject response;
+    };
+
+    static bool envFlagEnabled(const char* key, bool fallback = false);
+
     QString findServiceBinary(const QString& name) const;
     void updateServiceStatus(const QString& name, const QString& status);
     void updateTrayState();
@@ -91,11 +112,28 @@ private:
     bool sendServiceRequest(const QString& serviceName,
                             const QString& method,
                             const QJsonObject& params = {});
+    ServiceRequestResult sendServiceRequestSync(const QString& serviceName,
+                                                const QString& method,
+                                                const QJsonObject& params = {},
+                                                int timeoutMs = 10000);
     bool sendIndexerRequest(const QString& method, const QJsonObject& params = {});
     QJsonArray loadIndexRoots() const;
     QJsonArray loadEmbeddingRoots() const;
 
-    std::unique_ptr<Supervisor> m_supervisor;
+    void startControlPlaneThread();
+    void stopControlPlaneThread();
+    void startHealthThread();
+    void stopHealthThread();
+
+    QThread m_controlPlaneThread;
+    QThread m_healthThread;
+    ControlPlaneActor* m_controlPlaneActor = nullptr;
+    HealthAggregatorActor* m_healthAggregatorActor = nullptr;
+
+    QJsonArray m_cachedServiceSnapshot;
+    QJsonObject m_latestHealthSnapshot;
+    bool m_controlPlaneModeLegacy = false;
+    bool m_healthModeLegacy = false;
 
     QString m_indexerStatus;
     QString m_extractorStatus;
@@ -110,6 +148,8 @@ private:
     qint64 m_lastQueueRebuildFinishedAtMs = 0;
     bool m_pendingPostRebuildVectorRefresh = false;
     int m_pendingPostRebuildVectorRefreshAttempts = 0;
+    bool m_started = false;
+    bool m_stopping = false;
     std::thread m_modelDownloadThread;
     mutable std::mutex m_modelDownloadMutex;
     bool m_modelDownloadRunning = false;
