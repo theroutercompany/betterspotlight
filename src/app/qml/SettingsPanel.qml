@@ -1641,8 +1641,23 @@ Window {
                                     delegate: RowLayout {
                                         required property var modelData
                                         spacing: 12; Layout.fillWidth: true
-                                        Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
-                                        Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            elide: Text.ElideRight
+                                            Layout.preferredWidth: 260
+                                            Layout.maximumWidth: 260
+                                        }
+                                        Label {
+                                            text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format)
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            horizontalAlignment: Text.AlignRight
+                                            elide: Text.ElideLeft
+                                        }
                                     }
                                 }
                             }
@@ -1786,8 +1801,23 @@ Window {
                                     delegate: RowLayout {
                                         required property var modelData
                                         spacing: 12; Layout.fillWidth: true
-                                        Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
-                                        Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            elide: Text.ElideRight
+                                            Layout.preferredWidth: 260
+                                            Layout.maximumWidth: 260
+                                        }
+                                        Label {
+                                            text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format)
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            horizontalAlignment: Text.AlignRight
+                                            elide: Text.ElideLeft
+                                        }
                                     }
                                 }
                             }
@@ -2677,8 +2707,23 @@ Window {
                                     delegate: RowLayout {
                                         required property var modelData
                                         spacing: 12; Layout.fillWidth: true
-                                        Label { text: modelData.label + ":"; font.weight: Font.DemiBold; font.pixelSize: 13; color: "#1A1A1A"; Layout.preferredWidth: 160 }
-                                        Label { text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format); font.pixelSize: 13; color: "#1A1A1A" }
+                                        Label {
+                                            text: modelData.label + ":"
+                                            font.weight: Font.DemiBold
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            elide: Text.ElideRight
+                                            Layout.preferredWidth: 260
+                                            Layout.maximumWidth: 260
+                                        }
+                                        Label {
+                                            text: formatHealthValue(healthTab.healthData, modelData.key, modelData.format)
+                                            font.pixelSize: 13
+                                            color: "#1A1A1A"
+                                            Layout.fillWidth: true
+                                            horizontalAlignment: Text.AlignRight
+                                            elide: Text.ElideLeft
+                                        }
                                     }
                                 }
 
