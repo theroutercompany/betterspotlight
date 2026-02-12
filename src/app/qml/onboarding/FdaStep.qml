@@ -8,6 +8,8 @@ Item {
     signal next()
     signal back()
 
+    Component.onCompleted: onboardingControllerObj.checkFda()
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 32
@@ -66,13 +68,13 @@ Item {
                 }
 
                 Label {
-                    text: qsTr("2. Find BetterSpotlight in the list")
+                    text: qsTr("2. If BetterSpotlight appears, enable its switch")
                     font.pixelSize: 13
                     color: "#666666"
                 }
 
                 Label {
-                    text: qsTr("3. Toggle the switch to enable access")
+                    text: qsTr("3. If it does not appear, click '+' and add BetterSpotlight.app")
                     font.pixelSize: 13
                     color: "#666666"
                 }
@@ -112,7 +114,7 @@ Item {
                 }
 
                 onClicked: {
-                    Qt.openUrlExternally("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                    onboardingControllerObj.openFdaSystemSettings()
                 }
             }
 
@@ -143,6 +145,18 @@ Item {
                     onboardingControllerObj.checkFda()
                 }
             }
+        }
+
+        Label {
+            Layout.alignment: Qt.AlignHCenter
+            Layout.maximumWidth: 460
+            horizontalAlignment: Text.AlignHCenter
+            text: qsTr("System Settings may not list BetterSpotlight immediately. " +
+                       "If it is missing, use '+' to add the app, then enable the toggle.")
+            font.pixelSize: 11
+            color: "#888888"
+            wrapMode: Text.WordWrap
+            lineHeight: 1.3
         }
 
         // Status indicator

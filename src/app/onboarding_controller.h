@@ -20,6 +20,7 @@ public:
     QVariantList homeDirectories() const;
 
     Q_INVOKABLE void checkFda();
+    Q_INVOKABLE void openFdaSystemSettings();
     Q_INVOKABLE void saveHomeMap(const QVariantList& directories);
     Q_INVOKABLE void completeOnboarding();
 

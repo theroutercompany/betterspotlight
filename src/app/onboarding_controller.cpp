@@ -6,7 +6,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QProcess>
 #include <QStandardPaths>
+
+#include <cerrno>
+#include <dirent.h>
 
 namespace bs {
 
@@ -70,6 +74,26 @@ QString iconForDir(const QString& name)
     return icons.value(name, QStringLiteral("\U0001F4C1"));  // default: folder
 }
 
+bool tryOpenDirectory(const QString& path, bool* accessDenied)
+{
+    if (accessDenied) {
+        *accessDenied = false;
+    }
+
+    const QByteArray nativePath = QFile::encodeName(path);
+    errno = 0;
+    DIR* dir = ::opendir(nativePath.constData());
+    if (dir != nullptr) {
+        ::closedir(dir);
+        return true;
+    }
+
+    if (accessDenied && (errno == EACCES || errno == EPERM)) {
+        *accessDenied = true;
+    }
+    return false;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -114,24 +138,51 @@ QVariantList OnboardingController::homeDirectories() const
 
 void OnboardingController::checkFda()
 {
-    // Probe a path that requires Full Disk Access.
-    // ~/Library/Mail is protected on macOS Mojave+; readability indicates FDA.
-    const QString protectedPath = QDir::homePath() + QStringLiteral("/Library/Mail");
-    QFileInfo info(protectedPath);
+    // Probe several protected directories. This both detects FDA and primes
+    // System Settings to list the app for manual toggling.
+    const QString home = QDir::homePath();
+    const QStringList protectedPaths = {
+        home + QStringLiteral("/Library/Mail"),
+        home + QStringLiteral("/Library/Safari"),
+        home + QStringLiteral("/Library/Messages"),
+        home + QStringLiteral("/Library/Calendars"),
+        home + QStringLiteral("/Library/AddressBook"),
+        home + QStringLiteral("/Library/Autosave Information")
+    };
 
-    bool accessible = info.exists() && info.isReadable();
+    bool accessible = false;
+    bool sawDenied = false;
+    for (const QString& path : protectedPaths) {
+        bool denied = false;
+        if (tryOpenDirectory(path, &denied)) {
+            accessible = true;
+            break;
+        }
+        sawDenied = sawDenied || denied;
+    }
 
-    // Fallback: try another protected directory if Mail doesn't exist
-    if (!info.exists()) {
-        const QString altPath = QDir::homePath() + QStringLiteral("/Library/Safari");
-        QFileInfo altInfo(altPath);
-        accessible = altInfo.exists() && altInfo.isReadable();
+    // Preserve previous heuristic for users with sparse protected directories.
+    if (!accessible && !sawDenied) {
+        const QString legacyPath = home + QStringLiteral("/Library/Mail");
+        QFileInfo info(legacyPath);
+        if (info.exists() && info.isReadable()) {
+            accessible = true;
+        }
     }
 
     if (accessible != m_fdaGranted) {
         m_fdaGranted = accessible;
         emit fdaGrantedChanged();
     }
+}
+
+void OnboardingController::openFdaSystemSettings()
+{
+    // Prime FDA registration before jumping to settings.
+    checkFda();
+    QProcess::startDetached(
+        QStringLiteral("open"),
+        {QStringLiteral("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")});
 }
 
 void OnboardingController::saveHomeMap(const QVariantList& directories)
