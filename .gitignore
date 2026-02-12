@@ -5,6 +5,8 @@ DerivedData/
 Build/
 build/
 build-local/
+build-release/
+dist/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 xcuserdata/
