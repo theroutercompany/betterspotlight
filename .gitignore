@@ -39,6 +39,8 @@ Icon?
 *.xcarchive
 *.dSYM
 *.dSYM.zip
+*.profraw
+*.profdata
 
 # Build products
 *.app
