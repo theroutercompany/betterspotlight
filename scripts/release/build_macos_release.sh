@@ -10,6 +10,7 @@ APP_NAME="${BS_RELEASE_APP_NAME:-BetterSpotlight}"
 
 ENABLE_SPARKLE="${BS_ENABLE_SPARKLE:-0}"
 RUN_MACDEPLOYQT="${BS_RUN_MACDEPLOYQT:-1}"
+MACDEPLOYQT_INCLUDE_QMLDIR="${BS_MACDEPLOYQT_INCLUDE_QMLDIR:-1}"
 CREATE_DMG="${BS_CREATE_DMG:-1}"
 SIGN_ARTIFACTS="${BS_SIGN:-0}"
 NOTARIZE="${BS_NOTARIZE:-0}"
@@ -149,6 +150,15 @@ function verify_bundle_contents() {
     done
 }
 
+function verify_qt_platform_plugins() {
+    local cocoa_plugin="$APP_STAGE_PATH/Contents/PlugIns/platforms/libqcocoa.dylib"
+    if [[ ! -f "$cocoa_plugin" ]]; then
+        echo "Error: required Qt platform plugin missing: $cocoa_plugin" >&2
+        echo "Hint: ensure macdeployqt runs successfully and Qt plugins are available." >&2
+        exit 1
+    fi
+}
+
 function maybe_run_macdeployqt() {
     if ! bool_is_true "$RUN_MACDEPLOYQT"; then
         return 0
@@ -162,7 +172,7 @@ function maybe_run_macdeployqt() {
 
     local deploy_args=("$APP_STAGE_PATH" -always-overwrite -no-strip)
     local qml_dir="$ROOT_DIR/src/app/qml"
-    if [[ -d "$qml_dir" ]]; then
+    if bool_is_true "$MACDEPLOYQT_INCLUDE_QMLDIR" && [[ -d "$qml_dir" ]]; then
         deploy_args+=("-qmldir=$qml_dir")
     fi
 
@@ -326,7 +336,10 @@ def desired_install_id(path: pathlib.Path) -> str | None:
         return f"@rpath/{fw_part}/Versions/A/{bin_name}"
     return f"@rpath/{path.name}"
 
-machos = [p for p in app.rglob("*") if p.is_file() and is_macho(p)]
+# Framework bundles often contain top-level symlinked binaries (e.g. Foo.framework/Foo
+# -> Versions/Current/Foo). Rewriting install names via the symlink path can produce
+# incorrect @loader_path relative links. Only operate on real Mach-O files.
+machos = [p for p in app.rglob("*") if p.is_file() and not p.is_symlink() and is_macho(p)]
 unresolved_abs = []
 unresolved_rpath = []
 
@@ -384,9 +397,10 @@ for macho in machos:
         subprocess.call(["install_name_tool", "-delete_rpath", rpath, str(macho)])
 
 if unresolved_rpath:
-    print("Warning: unresolved @rpath dependencies remain (left unchanged):", file=sys.stderr)
+    print("Unresolved non-framework @rpath dependencies remain after sanitization:", file=sys.stderr)
     for macho, dep in unresolved_rpath:
         print(f"- {macho} -> {dep}", file=sys.stderr)
+    sys.exit(1)
 
 if unresolved_abs:
     print("Unresolved non-system dependencies remain after sanitization:", file=sys.stderr)
@@ -406,6 +420,8 @@ import subprocess
 import sys
 
 app = pathlib.Path(sys.argv[1]).resolve()
+frameworks_dir = app / "Contents" / "Frameworks"
+main_executable_dir = app / "Contents" / "MacOS"
 
 def is_macho(path: pathlib.Path) -> bool:
     try:
@@ -424,6 +440,46 @@ def bad_dep(dep: str) -> bool:
         return False
     # Any other absolute path is not portable for distribution.
     return dep.startswith("/")
+
+def resolve_bundle_rpath_target(dep: str) -> pathlib.Path | None:
+    if not dep.startswith("@rpath/"):
+        return None
+    suffix = dep[len("@rpath/"):]
+    suffix_path = pathlib.Path(suffix)
+    direct = frameworks_dir / suffix_path
+    if direct.exists():
+        return direct
+
+    flattened = frameworks_dir / suffix_path.name
+    if flattened.exists():
+        return flattened
+
+    marker = ".framework/"
+    suffix_posix = suffix_path.as_posix()
+    if marker in suffix_posix:
+        fw_root = suffix_posix.split(marker, 1)[0] + ".framework"
+        fw_name = pathlib.Path(fw_root).name
+        bin_name = suffix_path.name
+        candidates = [
+            frameworks_dir / fw_name / "Versions" / "A" / bin_name,
+            frameworks_dir / fw_name / bin_name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+    return None
+
+def resolve_loader_path_target(dep: str, macho_path: pathlib.Path) -> pathlib.Path:
+    suffix = dep[len("@loader_path/"):]
+    return (macho_path.resolve().parent / suffix).resolve()
+
+def resolve_executable_path_targets(dep: str, macho_path: pathlib.Path):
+    suffix = dep[len("@executable_path/"):]
+    # Primary process executable path.
+    primary = (main_executable_dir / suffix).resolve()
+    # Helper/service process executable path (for helper-local loads).
+    secondary = (macho_path.resolve().parent / suffix).resolve()
+    return [primary, secondary]
 
 def parse_deps(path: pathlib.Path):
     out = subprocess.check_output(["otool", "-L", str(path)], text=True)
@@ -477,8 +533,30 @@ for p in app.rglob("*"):
     except subprocess.CalledProcessError:
         continue
     install_id = parse_install_id(p)
+    try:
+        rel_parts = p.relative_to(app).parts
+    except ValueError:
+        rel_parts = ()
+    strict_missing_checks = (
+        rel_parts[:2] == ("Contents", "MacOS")
+        or rel_parts[:2] == ("Contents", "Helpers")
+        or rel_parts[:2] == ("Contents", "Frameworks")
+        or rel_parts[:3] == ("Contents", "PlugIns", "platforms")
+    )
     for dep in deps:
         if install_id and dep == install_id:
+            continue
+        if dep.startswith("@loader_path/"):
+            if strict_missing_checks and not resolve_loader_path_target(dep, p).exists():
+                bad.append((str(p), "missing_loader_path_dep", dep))
+            continue
+        if dep.startswith("@executable_path/"):
+            if strict_missing_checks and not any(target.exists() for target in resolve_executable_path_targets(dep, p)):
+                bad.append((str(p), "missing_executable_path_dep", dep))
+            continue
+        if dep.startswith("@rpath/"):
+            if strict_missing_checks and resolve_bundle_rpath_target(dep) is None:
+                bad.append((str(p), "missing_rpath_dep", dep))
             continue
         if bad_dep(dep):
             bad.append((str(p), "dep", dep))
@@ -510,6 +588,7 @@ function prepare_staged_app() {
     ensure_helpers_in_bundle
     verify_bundle_contents
     maybe_run_macdeployqt
+    verify_qt_platform_plugins
     sanitize_bundle_binary_references
     verify_portable_bundle
     xattr -cr "$APP_STAGE_PATH" || true

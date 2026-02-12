@@ -11,6 +11,8 @@ This script builds/stages a production-style macOS artifact with:
 - Bootstrap model assets only in `Contents/Resources/models/`
 - Optional `macdeployqt` framework deployment (main app + helper executables)
 - Post-deploy Mach-O sanitization (`install_name_tool`) to remove non-portable refs
+- Hard fail if unresolved non-framework `@rpath` dependencies remain after sanitization
+- Hard fail if Qt Cocoa platform plugin is missing (`Contents/PlugIns/platforms/libqcocoa.dylib`)
 - Hard portability gate (fails build if non-system absolute deps/rpaths remain)
 - Optional code signing
 - Default ad-hoc signing for unsigned local builds (prevents invalid-page crashes
@@ -53,7 +55,7 @@ scripts/release/build_macos_release.sh
 - `BS_RELEASE_BUILD_TYPE` (default: `Release`)
 - `BS_ENABLE_SPARKLE` (`0|1`, default `0`)
 - `BS_RUN_MACDEPLOYQT` (`0|1`, default `1`)
-- `BS_MACDEPLOYQT_TIMEOUT_SEC` (default: `180`)
+- `BS_MACDEPLOYQT_TIMEOUT_SEC` (default: `600`)
 - `BS_SKIP_BUILD` (`0|1`, default `0`)
 - `BS_SIGN` (`0|1`, default `0`)
 - `BS_ADHOC_SIGN_WHEN_UNSIGNED` (`0|1`, default `1`)
