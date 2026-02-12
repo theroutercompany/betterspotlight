@@ -13,6 +13,8 @@ This script builds/stages a production-style macOS artifact with:
 - Post-deploy Mach-O sanitization (`install_name_tool`) to remove non-portable refs
 - Hard portability gate (fails build if non-system absolute deps/rpaths remain)
 - Optional code signing
+- Default ad-hoc signing for unsigned local builds (prevents invalid-page crashes
+  after Mach-O install-name rewrites)
 - Optional notarization + stapling
 - Optional DMG creation
 
@@ -54,6 +56,7 @@ scripts/release/build_macos_release.sh
 - `BS_MACDEPLOYQT_TIMEOUT_SEC` (default: `180`)
 - `BS_SKIP_BUILD` (`0|1`, default `0`)
 - `BS_SIGN` (`0|1`, default `0`)
+- `BS_ADHOC_SIGN_WHEN_UNSIGNED` (`0|1`, default `1`)
 - `BS_NOTARIZE` (`0|1`, default `0`)
 - `BS_CREATE_DMG` (`0|1`, default `1`)
 - `BS_ENTITLEMENTS_PATH` (default: `packaging/macos/entitlements.plist`)

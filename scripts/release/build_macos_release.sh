@@ -15,6 +15,7 @@ SIGN_ARTIFACTS="${BS_SIGN:-0}"
 NOTARIZE="${BS_NOTARIZE:-0}"
 SKIP_BUILD="${BS_SKIP_BUILD:-0}"
 MACDEPLOYQT_TIMEOUT_SEC="${BS_MACDEPLOYQT_TIMEOUT_SEC:-180}"
+ADHOC_SIGN_WHEN_UNSIGNED="${BS_ADHOC_SIGN_WHEN_UNSIGNED:-1}"
 
 APP_BUILD_PATH="$BUILD_DIR/src/app/betterspotlight.app"
 APP_STAGE_PATH="$OUTPUT_DIR/${APP_NAME}.app"
@@ -444,21 +445,24 @@ function prepare_staged_app() {
 }
 
 function codesign_args_base() {
-    local args=(--force --options runtime --sign "$DEVELOPER_ID")
-    if [[ "$DEVELOPER_ID" != "-" ]]; then
-        args+=(--timestamp)
+    local identity="$1"
+    local args=(--force --sign "$identity")
+    if [[ "$identity" != "-" ]]; then
+        args+=(--options runtime --timestamp)
     fi
     printf '%s\n' "${args[@]}"
 }
 
 function sign_path() {
     local target="$1"
+    local identity="$2"
+    shift
     shift
 
     local args=()
     while IFS= read -r line; do
         args+=("$line")
-    done < <(codesign_args_base)
+    done < <(codesign_args_base "$identity")
 
     if [[ "$#" -gt 0 ]]; then
         args+=("$@")
@@ -468,31 +472,38 @@ function sign_path() {
 }
 
 function sign_staged_app() {
-    if ! bool_is_true "$SIGN_ARTIFACTS" && ! bool_is_true "$NOTARIZE"; then
-        return 0
-    fi
-
     require_cmd codesign
-    require_env DEVELOPER_ID
-
-    if [[ ! -f "$ENTITLEMENTS_PATH" ]]; then
-        echo "Error: entitlements file not found: $ENTITLEMENTS_PATH" >&2
-        exit 1
+    local identity="-"
+    local use_entitlements="0"
+    if bool_is_true "$SIGN_ARTIFACTS" || bool_is_true "$NOTARIZE"; then
+        require_env DEVELOPER_ID
+        identity="$DEVELOPER_ID"
+        use_entitlements="1"
+        if [[ ! -f "$ENTITLEMENTS_PATH" ]]; then
+            echo "Error: entitlements file not found: $ENTITLEMENTS_PATH" >&2
+            exit 1
+        fi
+    elif ! bool_is_true "$ADHOC_SIGN_WHEN_UNSIGNED"; then
+        return 0
     fi
 
     local frameworks_dir="$APP_STAGE_PATH/Contents/Frameworks"
     if [[ -d "$frameworks_dir" ]]; then
         while IFS= read -r path; do
             [[ -z "$path" ]] && continue
-            sign_path "$path"
+            sign_path "$path" "$identity"
         done < <(find "$frameworks_dir" -type f \( -name "*.dylib" -o -perm -u+x \) | LC_ALL=C sort)
+        while IFS= read -r framework; do
+            [[ -z "$framework" ]] && continue
+            sign_path "$framework" "$identity"
+        done < <(find "$frameworks_dir" -type d -name "*.framework" | LC_ALL=C sort)
     fi
 
     local plugins_dir="$APP_STAGE_PATH/Contents/PlugIns"
     if [[ -d "$plugins_dir" ]]; then
         while IFS= read -r path; do
             [[ -z "$path" ]] && continue
-            sign_path "$path"
+            sign_path "$path" "$identity"
         done < <(find "$plugins_dir" -type f \( -name "*.dylib" -o -perm -u+x \) | LC_ALL=C sort)
     fi
 
@@ -500,12 +511,21 @@ function sign_staged_app() {
     if [[ -d "$helpers_dir" ]]; then
         while IFS= read -r helper; do
             [[ -z "$helper" ]] && continue
-            sign_path "$helper" --entitlements "$ENTITLEMENTS_PATH"
+            if [[ "$use_entitlements" == "1" ]]; then
+                sign_path "$helper" "$identity" --entitlements "$ENTITLEMENTS_PATH"
+            else
+                sign_path "$helper" "$identity"
+            fi
         done < <(find "$helpers_dir" -type f -perm -u+x | LC_ALL=C sort)
     fi
 
-    sign_path "$APP_STAGE_PATH/Contents/MacOS/betterspotlight" --entitlements "$ENTITLEMENTS_PATH"
-    sign_path "$APP_STAGE_PATH" --entitlements "$ENTITLEMENTS_PATH"
+    if [[ "$use_entitlements" == "1" ]]; then
+        sign_path "$APP_STAGE_PATH/Contents/MacOS/betterspotlight" "$identity" --entitlements "$ENTITLEMENTS_PATH"
+        sign_path "$APP_STAGE_PATH" "$identity" --entitlements "$ENTITLEMENTS_PATH"
+    else
+        sign_path "$APP_STAGE_PATH/Contents/MacOS/betterspotlight" "$identity"
+        sign_path "$APP_STAGE_PATH" "$identity"
+    fi
 
     codesign --verify --deep --strict --verbose=2 "$APP_STAGE_PATH"
 }
