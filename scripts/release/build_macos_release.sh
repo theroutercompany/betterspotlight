@@ -14,7 +14,7 @@ CREATE_DMG="${BS_CREATE_DMG:-1}"
 SIGN_ARTIFACTS="${BS_SIGN:-0}"
 NOTARIZE="${BS_NOTARIZE:-0}"
 SKIP_BUILD="${BS_SKIP_BUILD:-0}"
-MACDEPLOYQT_TIMEOUT_SEC="${BS_MACDEPLOYQT_TIMEOUT_SEC:-180}"
+MACDEPLOYQT_TIMEOUT_SEC="${BS_MACDEPLOYQT_TIMEOUT_SEC:-600}"
 ADHOC_SIGN_WHEN_UNSIGNED="${BS_ADHOC_SIGN_WHEN_UNSIGNED:-1}"
 
 APP_BUILD_PATH="$BUILD_DIR/src/app/betterspotlight.app"
@@ -161,6 +161,10 @@ function maybe_run_macdeployqt() {
     fi
 
     local deploy_args=("$APP_STAGE_PATH" -always-overwrite -no-strip)
+    local qml_dir="$ROOT_DIR/src/app/qml"
+    if [[ -d "$qml_dir" ]]; then
+        deploy_args+=("-qmldir=$qml_dir")
+    fi
 
     local helper_exec
     for helper_exec in \
@@ -174,9 +178,12 @@ function maybe_run_macdeployqt() {
     done
     local deploy_log
     deploy_log="$(mktemp)"
-    if ! run_command_with_timeout "$MACDEPLOYQT_TIMEOUT_SEC" "$deploy_log" \
-        "$macdeployqt_bin" "${deploy_args[@]}"; then
-        local status="$?"
+    set +e
+    run_command_with_timeout "$MACDEPLOYQT_TIMEOUT_SEC" "$deploy_log" \
+        "$macdeployqt_bin" "${deploy_args[@]}"
+    local status="$?"
+    set -e
+    if [[ "$status" -ne 0 ]]; then
         if [[ "$status" -eq 124 ]]; then
             echo "Error: macdeployqt timed out after ${MACDEPLOYQT_TIMEOUT_SEC}s." >&2
         fi
@@ -257,6 +264,31 @@ def is_system_dep(dep: str) -> bool:
     return dep.startswith("/System/") or dep.startswith("/usr/lib/")
 
 def find_bundled_target(dep: str) -> pathlib.Path | None:
+    if dep.startswith("@rpath/"):
+        suffix = dep[len("@rpath/"):]
+        suffix_path = pathlib.Path(suffix)
+        direct = frameworks_dir / suffix_path
+        if direct.exists():
+            return direct
+        # Fallback for flattened dylib names.
+        by_name = frameworks_dir / suffix_path.name
+        if by_name.exists():
+            return by_name
+        marker = ".framework/"
+        suffix_posix = suffix_path.as_posix()
+        if marker in suffix_posix:
+            fw_root = suffix_posix.split(marker, 1)[0] + ".framework"
+            fw_name = pathlib.Path(fw_root).name
+            bin_name = suffix_path.name
+            candidates = [
+                frameworks_dir / fw_name / "Versions" / "A" / bin_name,
+                frameworks_dir / fw_name / bin_name,
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    return candidate
+        return None
+
     dep_path = pathlib.Path(dep)
     marker = ".framework/"
     dep_posix = dep_path.as_posix()
@@ -277,6 +309,9 @@ def find_bundled_target(dep: str) -> pathlib.Path | None:
         return candidate
     return None
 
+def is_framework_rpath(dep: str) -> bool:
+    return dep.startswith("@rpath/") and ".framework/" in dep
+
 def desired_install_id(path: pathlib.Path) -> str | None:
     try:
         rel = path.relative_to(frameworks_dir)
@@ -292,7 +327,8 @@ def desired_install_id(path: pathlib.Path) -> str | None:
     return f"@rpath/{path.name}"
 
 machos = [p for p in app.rglob("*") if p.is_file() and is_macho(p)]
-unresolved = []
+unresolved_abs = []
+unresolved_rpath = []
 
 for macho in machos:
     install_id = parse_install_id(macho)
@@ -306,13 +342,27 @@ for macho in machos:
     except subprocess.CalledProcessError:
         continue
     for dep in deps:
+        if install_id and dep == install_id:
+            continue
         if not dep.startswith("/"):
+            if dep.startswith("@rpath/"):
+                # Keep framework-style @rpath links intact (Qt frameworks rely on them).
+                if is_framework_rpath(dep):
+                    continue
+                target = find_bundled_target(dep)
+                if target is None:
+                    unresolved_rpath.append((str(macho), dep))
+                    continue
+                rel = os.path.relpath(str(target), str(macho.parent))
+                new_dep = f"@loader_path/{rel}"
+                if dep != new_dep:
+                    subprocess.check_call(["install_name_tool", "-change", dep, new_dep, str(macho)])
             continue
         if is_system_dep(dep):
             continue
         target = find_bundled_target(dep)
         if target is None:
-            unresolved.append((str(macho), dep))
+            unresolved_abs.append((str(macho), dep))
             continue
         rel = os.path.relpath(str(target), str(macho.parent))
         new_dep = f"@loader_path/{rel}"
@@ -324,15 +374,23 @@ for macho in machos:
     except subprocess.CalledProcessError:
         rpaths = []
     for rpath in rpaths:
+        if rpath in ("@loader_path/../lib", "@executable_path/../lib"):
+            subprocess.call(["install_name_tool", "-delete_rpath", rpath, str(macho)])
+            continue
         if not rpath.startswith("/"):
             continue
         if rpath.startswith("/System/") or rpath.startswith("/usr/lib/"):
             continue
         subprocess.call(["install_name_tool", "-delete_rpath", rpath, str(macho)])
 
-if unresolved:
+if unresolved_rpath:
+    print("Warning: unresolved @rpath dependencies remain (left unchanged):", file=sys.stderr)
+    for macho, dep in unresolved_rpath:
+        print(f"- {macho} -> {dep}", file=sys.stderr)
+
+if unresolved_abs:
     print("Unresolved non-system dependencies remain after sanitization:", file=sys.stderr)
-    for macho, dep in unresolved:
+    for macho, dep in unresolved_abs:
         print(f"- {macho} -> {dep}", file=sys.stderr)
     sys.exit(1)
 
@@ -398,6 +456,16 @@ def parse_rpaths(path: pathlib.Path):
         i += 1
     return rpaths
 
+def parse_install_id(path: pathlib.Path):
+    try:
+        out = subprocess.check_output(["otool", "-D", str(path)], text=True)
+    except subprocess.CalledProcessError:
+        return None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    return lines[1]
+
 bad = []
 for p in app.rglob("*"):
     if not p.is_file():
@@ -408,7 +476,10 @@ for p in app.rglob("*"):
         deps = parse_deps(p)
     except subprocess.CalledProcessError:
         continue
+    install_id = parse_install_id(p)
     for dep in deps:
+        if install_id and dep == install_id:
+            continue
         if bad_dep(dep):
             bad.append((str(p), "dep", dep))
     try:
@@ -583,38 +654,62 @@ function maybe_create_and_notarize_dmg() {
     fi
 
     require_cmd hdiutil
+    require_cmd ditto
     local stage_dir
     stage_dir="$(mktemp -d)"
     local dmg_tmp_dir
     dmg_tmp_dir="$(mktemp -d)"
-    trap "rm -rf '$stage_dir' '$dmg_tmp_dir'" EXIT
+    local mount_dir
+    mount_dir="$(mktemp -d)"
+    trap "hdiutil detach '$mount_dir' -force >/dev/null 2>&1 || true; rm -rf '$stage_dir' '$dmg_tmp_dir' '$mount_dir'" EXIT
 
     cp -R "$APP_STAGE_PATH" "$stage_dir/${APP_NAME}.app"
     ln -s /Applications "$stage_dir/Applications"
     xattr -cr "$stage_dir" || true
 
     rm -f "$DMG_PATH"
+    local dmg_rw="$dmg_tmp_dir/${APP_NAME}-${BUILD_TYPE}-rw.dmg"
     local dmg_tmp="$dmg_tmp_dir/${APP_NAME}-${BUILD_TYPE}.dmg"
-    rm -f "$dmg_tmp"
+    rm -f "$dmg_rw" "$dmg_tmp"
+
+    local size_kb
+    size_kb="$(du -sk "$stage_dir" | awk '{print $1}')"
+    size_kb=$((size_kb + 512000))
+
+    hdiutil create \
+        -size "${size_kb}k" \
+        -fs APFS \
+        -volname "$APP_NAME" \
+        "$dmg_rw"
+
+    hdiutil attach "$dmg_rw" -mountpoint "$mount_dir" -nobrowse -noautoopen
+    ditto "$stage_dir" "$mount_dir"
+    sync
+
+    local detached=0
     local attempt
-    for attempt in 1 2 3; do
-        if hdiutil create \
-            -volname "$APP_NAME" \
-            -srcfolder "$stage_dir" \
-            -ov \
-            -format UDZO \
-            -imagekey zlib-level=9 \
-            "$dmg_tmp"; then
-            mv -f "$dmg_tmp" "$DMG_PATH"
+    set +e
+    for attempt in 1 2 3 4 5; do
+        hdiutil detach "$mount_dir" >/dev/null 2>&1
+        if [[ "$?" -eq 0 ]]; then
+            detached=1
             break
         fi
-        rm -f "$dmg_tmp"
-        if [[ "$attempt" -eq 3 ]]; then
-            echo "Error: failed to create DMG after $attempt attempts" >&2
-            exit 1
+        hdiutil detach -force "$mount_dir" >/dev/null 2>&1
+        if [[ "$?" -eq 0 ]]; then
+            detached=1
+            break
         fi
-        sleep 1
+        sleep 2
     done
+    set -e
+    if [[ "$detached" -ne 1 ]]; then
+        echo "Error: failed to detach temporary DMG mount at $mount_dir" >&2
+        exit 1
+    fi
+
+    hdiutil convert "$dmg_rw" -format UDZO -imagekey zlib-level=9 -o "$dmg_tmp"
+    mv -f "$dmg_tmp" "$DMG_PATH"
 
     if bool_is_true "$NOTARIZE"; then
         run_notary_submit "$DMG_PATH" "$DMG_NOTARY_JSON"
@@ -622,7 +717,7 @@ function maybe_create_and_notarize_dmg() {
         xcrun stapler validate "$DMG_PATH"
     fi
 
-    rm -rf "$stage_dir" "$dmg_tmp_dir"
+    rm -rf "$stage_dir" "$dmg_tmp_dir" "$mount_dir"
     trap - EXIT
 }
 
