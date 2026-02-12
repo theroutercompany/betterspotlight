@@ -4,9 +4,11 @@
 DerivedData/
 Build/
 build/
+build-codex/
 build-coverage/
 build-local/
 build-release/
+build-sanitizers/
 dist/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
