@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILE_FILE="${ROOT_DIR}/scripts/profiles/actor_primary_canary.env"
 STRESS_SCRIPT="${ROOT_DIR}/Tests/benchmarks/stress_48h.sh"
 MEMORY_SCRIPT="${ROOT_DIR}/Tests/benchmarks/memory_drift_24h.sh"
+LEARNING_SOAK_SCRIPT="${ROOT_DIR}/Tests/benchmarks/learning_soak_48h.sh"
 
 DEFAULT_STRESS_SECONDS=$((48 * 3600))
 DEFAULT_MEMORY_SECONDS=$((24 * 3600))
@@ -17,9 +18,10 @@ Usage:
   ./scripts/run_actor_primary_canary_gates.sh --smoke [stress_seconds] [memory_seconds]
 
 Description:
-  Applies the actor-primary canary profile and runs both long-run gates:
+  Applies the actor-primary canary profile and runs long-run gates:
     1) Tests/benchmarks/stress_48h.sh
     2) Tests/benchmarks/memory_drift_24h.sh
+    3) (optional) Tests/benchmarks/learning_soak_48h.sh
 
 Environment:
   BS_STRESS_DURATION_SECONDS   Override stress duration
@@ -29,6 +31,8 @@ Environment:
   BS_CANARY_ARTIFACT_ROOT      Root artifact dir (default: /tmp/bs_actor_primary_canary_<ts>)
   BS_STRESS_ARTIFACT_DIR       Optional explicit stress artifact dir
   BS_MEM_ARTIFACT_DIR          Optional explicit memory artifact dir
+  BS_ENABLE_LEARNING_SOAK_GATE Set to 1 to run learning_soak_48h as optional third gate
+  BS_LEARNING_SOAK_DURATION_SECONDS Override optional learning soak duration
 EOF
 }
 
@@ -55,6 +59,10 @@ if [[ ! -x "${MEMORY_SCRIPT}" ]]; then
     echo "Missing executable memory harness: ${MEMORY_SCRIPT}" >&2
     exit 1
 fi
+if [[ "${BS_ENABLE_LEARNING_SOAK_GATE:-0}" == "1" && ! -x "${LEARNING_SOAK_SCRIPT}" ]]; then
+    echo "Missing executable learning soak harness: ${LEARNING_SOAK_SCRIPT}" >&2
+    exit 1
+fi
 
 stress_default="${DEFAULT_STRESS_SECONDS}"
 memory_default="${DEFAULT_MEMORY_SECONDS}"
@@ -65,12 +73,14 @@ fi
 
 stress_duration="${BS_STRESS_DURATION_SECONDS:-${1:-${stress_default}}}"
 memory_duration="${BS_MEM_DURATION_SECONDS:-${2:-${memory_default}}}"
+learning_soak_duration="${BS_LEARNING_SOAK_DURATION_SECONDS:-${stress_duration}}"
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
 artifact_root="${BS_CANARY_ARTIFACT_ROOT:-/tmp/bs_actor_primary_canary_${timestamp}}"
 export BS_STRESS_ARTIFACT_DIR="${BS_STRESS_ARTIFACT_DIR:-${artifact_root}/stress_48h}"
 export BS_MEM_ARTIFACT_DIR="${BS_MEM_ARTIFACT_DIR:-${artifact_root}/memory_drift_24h}"
-mkdir -p "${BS_STRESS_ARTIFACT_DIR}" "${BS_MEM_ARTIFACT_DIR}"
+export BS_LEARNING_SOAK_ARTIFACT_DIR="${BS_LEARNING_SOAK_ARTIFACT_DIR:-${artifact_root}/learning_soak_48h}"
+mkdir -p "${BS_STRESS_ARTIFACT_DIR}" "${BS_MEM_ARTIFACT_DIR}" "${BS_LEARNING_SOAK_ARTIFACT_DIR}"
 
 set -a
 # shellcheck disable=SC1090
@@ -85,17 +95,36 @@ echo "Pipeline actor mode: ${BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE:-unset}"
 echo "Inference supervisor mode: ${BETTERSPOTLIGHT_INFERENCE_SUPERVISOR_MODE:-unset}"
 echo "Stress duration: ${stress_duration}s"
 echo "Memory duration: ${memory_duration}s"
+echo "Learning soak enabled: ${BS_ENABLE_LEARNING_SOAK_GATE:-0}"
+if [[ "${BS_ENABLE_LEARNING_SOAK_GATE:-0}" == "1" ]]; then
+    echo "Learning soak duration: ${learning_soak_duration}s"
+fi
 echo "Artifacts root: ${artifact_root}"
 
+total_steps=2
+if [[ "${BS_ENABLE_LEARNING_SOAK_GATE:-0}" == "1" ]]; then
+    total_steps=3
+fi
+
 echo
-echo "[1/2] Running stress gate..."
+echo "[1/${total_steps}] Running stress gate..."
 "${STRESS_SCRIPT}" "${stress_duration}"
 
 echo
-echo "[2/2] Running memory drift gate..."
+echo "[2/${total_steps}] Running memory drift gate..."
 "${MEMORY_SCRIPT}" "${memory_duration}"
+
+if [[ "${BS_ENABLE_LEARNING_SOAK_GATE:-0}" == "1" ]]; then
+    echo
+    echo "[3/${total_steps}] Running learning soak gate..."
+    BS_STRESS_ARTIFACT_DIR="${BS_LEARNING_SOAK_ARTIFACT_DIR}" \
+        "${LEARNING_SOAK_SCRIPT}" "${learning_soak_duration}"
+fi
 
 echo
 echo "All canary gates completed."
 echo "Stress artifacts: ${BS_STRESS_ARTIFACT_DIR}"
 echo "Memory artifacts: ${BS_MEM_ARTIFACT_DIR}"
+if [[ "${BS_ENABLE_LEARNING_SOAK_GATE:-0}" == "1" ]]; then
+    echo "Learning soak artifacts: ${BS_LEARNING_SOAK_ARTIFACT_DIR}"
+fi
