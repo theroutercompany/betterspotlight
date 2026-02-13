@@ -176,10 +176,12 @@ class TestQueryServiceM2Ipc : public QObject {
 
 private slots:
     void testQueryM2IpcContract();
+    void testRecordInteractionRemainsCompatibleWithPathAndTypeAffinity();
     void testLearningNativePromotionPersistsModelState();
     void testLearningServingFallbackWithoutModels();
     void testLearningIdleCycleReasonGates();
     void testLearningPromotionRejectsOnRuntimeGate();
+    void testRejectedPromotionDoesNotMutateActiveModelStateAcrossRestart();
     void testLearningSchedulerReasonCounts();
     void testLearningSchedulerTransitionSequence();
     void testSetLearningConsentRejectsInvalidRolloutMode();
@@ -190,6 +192,12 @@ private slots:
     void testRecordBehaviorEventBlockedWhenSearchCaptureDisabled();
     void testRecordBehaviorEventRequiresBehaviorStreamOptIn();
     void testRecordBehaviorEventBlockedByDenylist();
+    void testCaptureScopePersistsAcrossRestart();
+    void testDenylistPersistsAcrossRestart();
+    void testTriggerLearningCycleManualFlagPersistsInHistory();
+    void testRolloutAndBlendPersistAcrossRestart();
+    void testRecordBehaviorEventSelectAndActivateLabeling();
+    void testRecordBehaviorEventSelectActivateRespectStrictExclusions();
     void testOnlineRankerServingRespectsRolloutModes();
 };
 
@@ -620,6 +628,182 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     QVERIFY(bs::test::isError(unsupportedResponse));
     QCOMPARE(bs::test::errorPayload(unsupportedResponse).value(QStringLiteral("code")).toInt(),
              static_cast<int>(bs::IpcErrorCode::Unsupported));
+}
+
+void TestQueryServiceM2Ipc::testRecordInteractionRemainsCompatibleWithPathAndTypeAffinity()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for legacy-compat fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    const QString codeDir = QDir(docsDir.path()).filePath(QStringLiteral("code"));
+    const QString docDir = QDir(docsDir.path()).filePath(QStringLiteral("docs"));
+    QVERIFY(QDir().mkpath(codeDir));
+    QVERIFY(QDir().mkpath(docDir));
+
+    auto codeItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("code/main.cpp"),
+        {
+            QStringLiteral("int main() { return 0; }"),
+            QStringLiteral("legacy interaction compatibility fixture"),
+        });
+    QVERIFY2(codeItemIdOpt.has_value(), "Failed to seed code fixture item");
+    const qint64 codeItemId = codeItemIdOpt.value();
+    const QString codePath = QDir(docsDir.path()).filePath(QStringLiteral("code/main.cpp"));
+
+    auto docItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("docs/readme.md"),
+        {
+            QStringLiteral("legacy interaction compatibility"),
+            QStringLiteral("document file type affinity coverage"),
+        });
+    QVERIFY2(docItemIdOpt.has_value(), "Failed to seed document fixture item");
+    const qint64 docItemId = docItemIdOpt.value();
+    const QString docPath = QDir(docsDir.path()).filePath(QStringLiteral("docs/readme.md"));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 12000;
+    QVERIFY2(harness.start(launch),
+             "Failed to start query service for legacy interaction compatibility test");
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+
+    // Ensure behavior stream activity is enabled while validating legacy record_interaction path.
+    {
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = QStringLiteral("legacy-compat-behavior-1");
+        params[QStringLiteral("eventType")] = QStringLiteral("query_submitted");
+        params[QStringLiteral("source")] = QStringLiteral("system_collector");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-legacy-compat-behavior");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-legacy-compat-behavior");
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("recorded")).toBool(false));
+    }
+
+    auto recordInteraction = [&](const QString& query,
+                                 qint64 itemId,
+                                 const QString& selectedPath,
+                                 const QString& eventSuffix) {
+        QJsonObject params;
+        params[QStringLiteral("query")] = query;
+        params[QStringLiteral("selectedItemId")] = itemId;
+        params[QStringLiteral("selectedPath")] = selectedPath;
+        params[QStringLiteral("matchType")] = QStringLiteral("semantic");
+        params[QStringLiteral("resultPosition")] = 1;
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] =
+            QStringLiteral("ctx-legacy-compat-%1").arg(eventSuffix);
+        params[QStringLiteral("activityDigest")] =
+            QStringLiteral("digest-legacy-compat-%1").arg(eventSuffix);
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_interaction"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        QVERIFY(bs::test::resultPayload(response).value(QStringLiteral("recorded")).toBool(false));
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        recordInteraction(QStringLiteral("main cpp"), codeItemId, codePath, QStringLiteral("code-%1").arg(i));
+    }
+    recordInteraction(QStringLiteral("readme"), docItemId, docPath, QStringLiteral("doc-1"));
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("limit")] = 10;
+        const QJsonObject response = harness.request(QStringLiteral("get_path_preferences"), params);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonArray directories =
+            bs::test::resultPayload(response).value(QStringLiteral("directories")).toArray();
+        QVERIFY(!directories.isEmpty());
+        const QJsonObject top = directories.first().toObject();
+        QCOMPARE(top.value(QStringLiteral("directory")).toString(), codeDir);
+        QVERIFY(top.value(QStringLiteral("selectionCount")).toInt(0) >= 3);
+
+        int codeSelections = 0;
+        int docSelections = 0;
+        for (const QJsonValue& value : directories) {
+            const QJsonObject row = value.toObject();
+            const QString directory = row.value(QStringLiteral("directory")).toString();
+            if (directory == codeDir) {
+                codeSelections = row.value(QStringLiteral("selectionCount")).toInt(0);
+            } else if (directory == docDir) {
+                docSelections = row.value(QStringLiteral("selectionCount")).toInt(0);
+            }
+        }
+        QVERIFY(codeSelections >= 3);
+        QVERIFY(docSelections >= 1);
+        QVERIFY(codeSelections > docSelections);
+    }
+
+    {
+        const QJsonObject response = harness.request(QStringLiteral("get_file_type_affinity"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("codeOpens")).toInt(0) >= 3);
+        QVERIFY(result.value(QStringLiteral("documentOpens")).toInt(0) >= 1);
+        QCOMPARE(result.value(QStringLiteral("primaryAffinity")).toString(),
+                 QStringLiteral("code"));
+    }
+
+    {
+        const QJsonObject response = harness.request(QStringLiteral("export_interaction_data"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonArray interactions =
+            bs::test::resultPayload(response).value(QStringLiteral("interactions")).toArray();
+        QVERIFY(interactions.size() >= 4);
+
+        int codeHits = 0;
+        int docHits = 0;
+        for (const QJsonValue& value : interactions) {
+            const QJsonObject row = value.toObject();
+            const QString path = row.value(QStringLiteral("path")).toString();
+            if (path == codePath) {
+                ++codeHits;
+            } else if (path == docPath) {
+                ++docHits;
+            }
+        }
+        QVERIFY(codeHits >= 3);
+        QVERIFY(docHits >= 1);
+    }
 }
 
 void TestQueryServiceM2Ipc::testLearningNativePromotionPersistsModelState()
@@ -1197,6 +1381,246 @@ void TestQueryServiceM2Ipc::testLearningPromotionRejectsOnRuntimeGate()
         QCOMPARE(latest.value(QStringLiteral("reason")).toString(),
                  QStringLiteral("candidate_stability_invalid_eval"));
         QVERIFY(!latest.value(QStringLiteral("promoted")).toBool(true));
+    }
+}
+
+void TestQueryServiceM2Ipc::testRejectedPromotionDoesNotMutateActiveModelStateAcrossRestart()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for active-version stability fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    auto seededItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("active-version-stability.md"),
+        {
+            QStringLiteral("active version stability fixture"),
+            QStringLiteral("rejected promotions must not mutate active model pointer"),
+        });
+    QVERIFY2(seededItemIdOpt.has_value(), "Failed to seed active-version stability fixture item");
+    const qint64 seededItemId = seededItemIdOpt.value();
+    const QString seededPath =
+        QDir(docsDir.path()).filePath(QStringLiteral("active-version-stability.md"));
+
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerMinExamples"), QStringLiteral("60")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerEpochs"), QStringLiteral("3")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerLearningRate"), QStringLiteral("0.05")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerNegativeSampleRatio"), QStringLiteral("1.0")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"), QStringLiteral("240")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                                    QStringLiteral("1000000")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                                    QStringLiteral("1000")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                                    QStringLiteral("1.0")));
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                                    QStringLiteral("1.0")));
+
+    const QString invalidCoreMlBootstrapDir = QDir(dataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"));
+    QVERIFY(QDir().mkpath(invalidCoreMlBootstrapDir));
+    {
+        QFile invalidMarker(QDir(invalidCoreMlBootstrapDir).filePath(QStringLiteral("invalid.bin")));
+        QVERIFY(invalidMarker.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        invalidMarker.write("invalid-coreml-bootstrap");
+        invalidMarker.close();
+    }
+
+    sqlite3* db = fixtureStore.rawDb();
+    QVERIFY(db != nullptr);
+
+    const QString goodPositiveFeatures = denseFeaturesJson(0.9);
+    const QString goodNegativeFeatures = denseFeaturesJson(0.1);
+    const double createdAtBase =
+        static_cast<double>(QDateTime::currentSecsSinceEpoch() - 240);
+    for (int i = 0; i < 120; ++i) {
+        const bool positive = (i % 2 == 0);
+        QVERIFY(insertTrainingExample(db,
+                                      QStringLiteral("active-stability-good-%1").arg(i + 1),
+                                      seededItemId,
+                                      seededPath,
+                                      positive ? 1 : 0,
+                                      positive ? goodPositiveFeatures : goodNegativeFeatures,
+                                      createdAtBase + static_cast<double>(i)));
+    }
+
+    auto makeLaunchConfig = [&]() {
+        bs::test::ServiceLaunchConfig launch;
+        launch.homeDir = tempHome.path();
+        launch.dataDir = dataDir;
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+        launch.startTimeoutMs = 15000;
+        launch.connectTimeoutMs = 15000;
+        launch.readyTimeoutMs = 30000;
+        launch.requestDefaultTimeoutMs = 12000;
+        return launch;
+    };
+
+    auto applyLearningConsent = [&](bs::test::ServiceProcessHarness& harness) {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = false;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    };
+
+    QString promotedVersion;
+    QString activeBackendAfterPromotion;
+    QString rollbackVersionAfterPromotion;
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to start query service for active-version stability promotion phase");
+
+        applyLearningConsent(harness);
+
+        const QJsonObject response = harness.request(QStringLiteral("trigger_learning_cycle"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("promoted")).toBool(false));
+        QCOMPARE(result.value(QStringLiteral("reason")).toString(), QStringLiteral("promoted"));
+
+        const QJsonObject learning = result.value(QStringLiteral("learning")).toObject();
+        QCOMPARE(learning.value(QStringLiteral("lastCycleStatus")).toString(),
+                 QStringLiteral("succeeded"));
+        QCOMPARE(learning.value(QStringLiteral("lastCycleReason")).toString(),
+                 QStringLiteral("promoted"));
+        promotedVersion = learning.value(QStringLiteral("modelVersion")).toString();
+        QVERIFY(!promotedVersion.isEmpty());
+        QCOMPARE(learning.value(QStringLiteral("activeBackend")).toString(),
+                 QStringLiteral("native_sgd"));
+    }
+
+    {
+        const std::optional<QString> activeVersion =
+            readLearningModelStateValue(dbPath, QStringLiteral("active_version"));
+        const std::optional<QString> activeBackend =
+            readLearningModelStateValue(dbPath, QStringLiteral("active_backend"));
+        const std::optional<QString> rollbackVersion =
+            readLearningModelStateValue(dbPath, QStringLiteral("rollback_version"));
+        QVERIFY(activeVersion.has_value());
+        QVERIFY(activeBackend.has_value());
+        QVERIFY(rollbackVersion.has_value());
+        QCOMPARE(activeVersion.value(), promotedVersion);
+        QCOMPARE(activeBackend.value(), QStringLiteral("native_sgd"));
+        activeBackendAfterPromotion = activeBackend.value();
+        rollbackVersionAfterPromotion = rollbackVersion.value();
+    }
+
+    {
+        char* sqlError = nullptr;
+        const int rc = sqlite3_exec(db, "DELETE FROM replay_reservoir_v1;", nullptr, nullptr, &sqlError);
+        if (rc != SQLITE_OK) {
+            const QString message =
+                sqlError ? QString::fromUtf8(sqlError) : QStringLiteral("sqlite_exec_failed");
+            sqlite3_free(sqlError);
+            QFAIL(qPrintable(message));
+        }
+    }
+
+    const QString overflowFeatures = denseFeaturesJson(1e308);
+    const double overflowBase = static_cast<double>(QDateTime::currentSecsSinceEpoch() - 60);
+    for (int i = 0; i < 120; ++i) {
+        const int label = (i % 2 == 0) ? 1 : 0;
+        QVERIFY(insertTrainingExample(db,
+                                      QStringLiteral("active-stability-overflow-%1").arg(i + 1),
+                                      seededItemId,
+                                      seededPath,
+                                      label,
+                                      overflowFeatures,
+                                      overflowBase + static_cast<double>(i)));
+    }
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to restart query service for active-version stability reject phase");
+
+        applyLearningConsent(harness);
+
+        const QJsonObject response = harness.request(QStringLiteral("trigger_learning_cycle"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(!result.value(QStringLiteral("promoted")).toBool(true));
+        QCOMPARE(result.value(QStringLiteral("reason")).toString(),
+                 QStringLiteral("candidate_stability_invalid_eval"));
+
+        const QJsonObject learning = result.value(QStringLiteral("learning")).toObject();
+        QCOMPARE(learning.value(QStringLiteral("lastCycleStatus")).toString(),
+                 QStringLiteral("rejected"));
+        QCOMPARE(learning.value(QStringLiteral("lastCycleReason")).toString(),
+                 QStringLiteral("candidate_stability_invalid_eval"));
+        QCOMPARE(learning.value(QStringLiteral("modelVersion")).toString(), promotedVersion);
+        QCOMPARE(learning.value(QStringLiteral("activeBackend")).toString(),
+                 activeBackendAfterPromotion);
+    }
+
+    {
+        const std::optional<QString> activeVersion =
+            readLearningModelStateValue(dbPath, QStringLiteral("active_version"));
+        const std::optional<QString> activeBackend =
+            readLearningModelStateValue(dbPath, QStringLiteral("active_backend"));
+        const std::optional<QString> rollbackVersion =
+            readLearningModelStateValue(dbPath, QStringLiteral("rollback_version"));
+        const std::optional<QString> lastCycleStatus =
+            readLearningModelStateValue(dbPath, QStringLiteral("last_cycle_status"));
+        const std::optional<QString> lastCycleReason =
+            readLearningModelStateValue(dbPath, QStringLiteral("last_cycle_reason"));
+
+        QVERIFY(activeVersion.has_value());
+        QVERIFY(activeBackend.has_value());
+        QVERIFY(rollbackVersion.has_value());
+        QVERIFY(lastCycleStatus.has_value());
+        QVERIFY(lastCycleReason.has_value());
+        QCOMPARE(activeVersion.value(), promotedVersion);
+        QCOMPARE(activeBackend.value(), activeBackendAfterPromotion);
+        QCOMPARE(rollbackVersion.value(), rollbackVersionAfterPromotion);
+        QCOMPARE(lastCycleStatus.value(), QStringLiteral("rejected"));
+        QCOMPARE(lastCycleReason.value(), QStringLiteral("candidate_stability_invalid_eval"));
+    }
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to restart query service for active-version stability verification");
+
+        const QJsonObject healthResponse =
+            harness.request(QStringLiteral("get_learning_health"));
+        QVERIFY(bs::test::isResponse(healthResponse));
+        const QJsonObject learning = bs::test::resultPayload(healthResponse)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        QVERIFY(!learning.isEmpty());
+        QCOMPARE(learning.value(QStringLiteral("modelVersion")).toString(), promotedVersion);
+        QCOMPARE(learning.value(QStringLiteral("activeBackend")).toString(),
+                 activeBackendAfterPromotion);
+        QCOMPARE(learning.value(QStringLiteral("lastCycleStatus")).toString(),
+                 QStringLiteral("rejected"));
+        QCOMPARE(learning.value(QStringLiteral("lastCycleReason")).toString(),
+                 QStringLiteral("candidate_stability_invalid_eval"));
     }
 }
 
@@ -2350,6 +2774,854 @@ void TestQueryServiceM2Ipc::testRecordBehaviorEventBlockedByDenylist()
     const auto after = readPositiveAndEvents();
     QCOMPARE(after.first, before.first);
     QCOMPARE(after.second, before.second);
+}
+
+void TestQueryServiceM2Ipc::testCaptureScopePersistsAcrossRestart()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for capture persistence fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    auto seededItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("capture-persist.md"),
+        {
+            QStringLiteral("capture scope persistence fixture"),
+            QStringLiteral("capture toggles should survive query service restart"),
+        });
+    QVERIFY2(seededItemIdOpt.has_value(), "Failed to seed capture persistence fixture item");
+    const qint64 seededItemId = seededItemIdOpt.value();
+    const QString seededPath = QDir(docsDir.path()).filePath(QStringLiteral("capture-persist.md"));
+
+    auto readPositiveAndEvents = [&](bs::test::ServiceProcessHarness& harness) -> std::pair<int, int> {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        if (!bs::test::isResponse(response)) {
+            return {0, 0};
+        }
+        const QJsonObject learning = bs::test::resultPayload(response)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        if (learning.isEmpty()) {
+            return {0, 0};
+        }
+        const QJsonObject attribution =
+            learning.value(QStringLiteral("attributionMetrics")).toObject();
+        const QJsonObject coverage =
+            learning.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+        return {attribution.value(QStringLiteral("positiveExamples")).toInt(0),
+                coverage.value(QStringLiteral("events")).toInt(0)};
+    };
+
+    auto makeLaunchConfig = [&]() {
+        bs::test::ServiceLaunchConfig launch;
+        launch.homeDir = tempHome.path();
+        launch.dataDir = dataDir;
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+        launch.startTimeoutMs = 15000;
+        launch.connectTimeoutMs = 15000;
+        launch.readyTimeoutMs = 30000;
+        launch.requestDefaultTimeoutMs = 12000;
+        return launch;
+    };
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to start first query service for capture persistence test");
+
+        {
+            QJsonObject params;
+            params[QStringLiteral("behaviorStreamEnabled")] = true;
+            params[QStringLiteral("learningEnabled")] = true;
+            params[QStringLiteral("learningPauseOnUserInput")] = true;
+            params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+            QJsonObject captureScope;
+            captureScope[QStringLiteral("searchEventsEnabled")] = false;
+            captureScope[QStringLiteral("appActivityEnabled")] = true;
+            captureScope[QStringLiteral("inputActivityEnabled")] = true;
+            captureScope[QStringLiteral("windowTitleHashEnabled")] = true;
+            captureScope[QStringLiteral("browserHostHashEnabled")] = true;
+            params[QStringLiteral("captureScope")] = captureScope;
+            const QJsonObject response =
+                harness.request(QStringLiteral("set_learning_consent"), params);
+            QVERIFY(bs::test::isResponse(response));
+            const QJsonObject learning = bs::test::resultPayload(response)
+                                             .value(QStringLiteral("learning"))
+                                             .toObject();
+            QVERIFY(!learning.isEmpty());
+            const QJsonObject returnedScope = learning.value(QStringLiteral("captureScope")).toObject();
+            QVERIFY(!returnedScope.value(QStringLiteral("searchEventsEnabled")).toBool(true));
+        }
+
+        const auto before = readPositiveAndEvents(harness);
+
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = QStringLiteral("capture-persist-first");
+        params[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("capture persist");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-capture-persist");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-capture-persist");
+        params[QStringLiteral("attributionConfidence")] = 1.0;
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(!result.value(QStringLiteral("recorded")).toBool(true));
+        QVERIFY(result.value(QStringLiteral("filteredOut")).toBool(false));
+        QVERIFY(!result.value(QStringLiteral("attributedPositive")).toBool(true));
+
+        const auto after = readPositiveAndEvents(harness);
+        QCOMPARE(after.first, before.first);
+        QCOMPARE(after.second, before.second);
+    }
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to restart query service for capture persistence test");
+
+        const QJsonObject healthResponse =
+            harness.request(QStringLiteral("get_learning_health"));
+        QVERIFY(bs::test::isResponse(healthResponse));
+        const QJsonObject learning = bs::test::resultPayload(healthResponse)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        QVERIFY(!learning.isEmpty());
+        QVERIFY(learning.value(QStringLiteral("behaviorStreamEnabled")).toBool(false));
+        QVERIFY(learning.value(QStringLiteral("learningEnabled")).toBool(false));
+        const QJsonObject persistedScope = learning.value(QStringLiteral("captureScope")).toObject();
+        QVERIFY(!persistedScope.value(QStringLiteral("searchEventsEnabled")).toBool(true));
+
+        const auto before = readPositiveAndEvents(harness);
+
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = QStringLiteral("capture-persist-second");
+        params[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("capture persist");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-capture-persist-2");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-capture-persist-2");
+        params[QStringLiteral("attributionConfidence")] = 1.0;
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(!result.value(QStringLiteral("recorded")).toBool(true));
+        QVERIFY(result.value(QStringLiteral("filteredOut")).toBool(false));
+        QVERIFY(!result.value(QStringLiteral("attributedPositive")).toBool(true));
+
+        const auto after = readPositiveAndEvents(harness);
+        QCOMPARE(after.first, before.first);
+        QCOMPARE(after.second, before.second);
+    }
+}
+
+void TestQueryServiceM2Ipc::testDenylistPersistsAcrossRestart()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for denylist persistence fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    auto seededItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("denylist-persist.md"),
+        {
+            QStringLiteral("denylist persistence fixture"),
+            QStringLiteral("denylist should survive service restart"),
+        });
+    QVERIFY2(seededItemIdOpt.has_value(), "Failed to seed denylist persistence fixture item");
+    const qint64 seededItemId = seededItemIdOpt.value();
+    const QString seededPath = QDir(docsDir.path()).filePath(QStringLiteral("denylist-persist.md"));
+
+    auto makeLaunchConfig = [&]() {
+        bs::test::ServiceLaunchConfig launch;
+        launch.homeDir = tempHome.path();
+        launch.dataDir = dataDir;
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+        launch.startTimeoutMs = 15000;
+        launch.connectTimeoutMs = 15000;
+        launch.readyTimeoutMs = 30000;
+        launch.requestDefaultTimeoutMs = 12000;
+        return launch;
+    };
+
+    auto readPositiveAndEvents = [&](bs::test::ServiceProcessHarness& harness) -> std::pair<int, int> {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        if (!bs::test::isResponse(response)) {
+            return {0, 0};
+        }
+        const QJsonObject learning = bs::test::resultPayload(response)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        if (learning.isEmpty()) {
+            return {0, 0};
+        }
+        const QJsonObject attribution =
+            learning.value(QStringLiteral("attributionMetrics")).toObject();
+        const QJsonObject coverage =
+            learning.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+        return {attribution.value(QStringLiteral("positiveExamples")).toInt(0),
+                coverage.value(QStringLiteral("events")).toInt(0)};
+    };
+
+    auto assertDenylistedEventFiltered = [&](bs::test::ServiceProcessHarness& harness,
+                                             const QString& eventId) {
+        const auto before = readPositiveAndEvents(harness);
+
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = eventId;
+        params[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("denylist persist");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.example.secret");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-denylist-persist");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-denylist-persist");
+        params[QStringLiteral("attributionConfidence")] = 1.0;
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(!result.value(QStringLiteral("recorded")).toBool(true));
+        QVERIFY(result.value(QStringLiteral("filteredOut")).toBool(false));
+        QVERIFY(!result.value(QStringLiteral("attributedPositive")).toBool(true));
+
+        const auto after = readPositiveAndEvents(harness);
+        QCOMPARE(after.first, before.first);
+        QCOMPARE(after.second, before.second);
+    };
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to start first query service for denylist persistence test");
+
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        QJsonArray denylist;
+        denylist.append(QStringLiteral("com.example.secret"));
+        params[QStringLiteral("denylistApps")] = denylist;
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+
+        assertDenylistedEventFiltered(harness, QStringLiteral("denylist-persist-first"));
+    }
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to restart query service for denylist persistence test");
+
+        const QJsonObject healthResponse =
+            harness.request(QStringLiteral("get_learning_health"));
+        QVERIFY(bs::test::isResponse(healthResponse));
+        const QJsonObject learning = bs::test::resultPayload(healthResponse)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        QVERIFY(!learning.isEmpty());
+        QVERIFY(learning.value(QStringLiteral("behaviorStreamEnabled")).toBool(false));
+        QVERIFY(learning.value(QStringLiteral("learningEnabled")).toBool(false));
+
+        assertDenylistedEventFiltered(harness, QStringLiteral("denylist-persist-second"));
+    }
+}
+
+void TestQueryServiceM2Ipc::testTriggerLearningCycleManualFlagPersistsInHistory()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 12000;
+    QVERIFY2(harness.start(launch), "Failed to start query service for manual-flag test");
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = false;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("manual")] = false;
+        const QJsonObject response =
+            harness.request(QStringLiteral("trigger_learning_cycle"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("reason")).isString());
+    }
+
+    {
+        const QJsonObject response =
+            harness.request(QStringLiteral("trigger_learning_cycle"), QJsonObject(), 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("reason")).isString());
+    }
+
+    {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject learning = bs::test::resultPayload(response)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        QVERIFY(!learning.isEmpty());
+        const QJsonArray recent = learning.value(QStringLiteral("recentLearningCycles")).toArray();
+        QVERIFY(recent.size() >= 2);
+        const QJsonObject latest = recent.at(0).toObject();
+        const QJsonObject previous = recent.at(1).toObject();
+        QVERIFY(latest.value(QStringLiteral("manual")).toBool(false));
+        QVERIFY(!previous.value(QStringLiteral("manual")).toBool(true));
+    }
+}
+
+void TestQueryServiceM2Ipc::testRolloutAndBlendPersistAcrossRestart()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for rollout persistence fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    for (int i = 0; i < 8; ++i) {
+        const QString fileName = QStringLiteral("rollout-persist-%1.md")
+                                     .arg(i + 1, 2, 10, QLatin1Char('0'));
+        auto itemIdOpt = seedItemWithChunks(
+            fixtureStore,
+            docsDir.path(),
+            fileName,
+            {
+                QStringLiteral("rollout persistence fixture %1").arg(i),
+                QStringLiteral("blended rollout and alpha should survive restart"),
+            });
+        QVERIFY2(itemIdOpt.has_value(), "Failed to seed rollout persistence fixture item");
+    }
+
+    QVERIFY(fixtureStore.setSetting(QStringLiteral("onlineRankerBlendAlpha"),
+                                    QStringLiteral("0.07")));
+
+    const QString invalidCoreMlBootstrapDir = QDir(dataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"));
+    QVERIFY(QDir().mkpath(invalidCoreMlBootstrapDir));
+    {
+        QFile invalidMarker(QDir(invalidCoreMlBootstrapDir).filePath(QStringLiteral("invalid.bin")));
+        QVERIFY(invalidMarker.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        invalidMarker.write("invalid-coreml-bootstrap");
+        invalidMarker.close();
+    }
+
+    const QString nativeWeightsPath = QDir(dataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/active/weights.json"));
+    QVERIFY(QDir().mkpath(QFileInfo(nativeWeightsPath).absolutePath()));
+    {
+        QJsonArray weights;
+        for (int i = 0; i < 13; ++i) {
+            weights.append(0.85);
+        }
+        QJsonObject model;
+        model[QStringLiteral("version")] = QStringLiteral("test-native-rollout-persist");
+        model[QStringLiteral("bias")] = 2.5;
+        model[QStringLiteral("weights")] = weights;
+
+        QFile weightsFile(nativeWeightsPath);
+        QVERIFY(weightsFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        weightsFile.write(QJsonDocument(model).toJson(QJsonDocument::Compact));
+        weightsFile.close();
+    }
+
+    auto makeLaunchConfig = [&]() {
+        bs::test::ServiceLaunchConfig launch;
+        launch.homeDir = tempHome.path();
+        launch.dataDir = dataDir;
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+        launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+        launch.startTimeoutMs = 15000;
+        launch.connectTimeoutMs = 15000;
+        launch.readyTimeoutMs = 30000;
+        launch.requestDefaultTimeoutMs = 12000;
+        return launch;
+    };
+
+    auto runDebugSearch = [&](bs::test::ServiceProcessHarness& harness) -> QJsonObject {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("rollout persistence");
+        params[QStringLiteral("limit")] = 8;
+        params[QStringLiteral("debug")] = true;
+        const QJsonObject response = harness.request(QStringLiteral("search"), params, 12000);
+        if (!bs::test::isResponse(response)) {
+            return QJsonObject();
+        }
+        return bs::test::resultPayload(response).value(QStringLiteral("debugInfo")).toObject();
+    };
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to start first query service for rollout persistence test");
+
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = false;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("blended_ranking");
+        const QJsonObject consentResponse =
+            harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(consentResponse));
+
+        const QJsonObject debugInfo = runDebugSearch(harness);
+        QVERIFY(!debugInfo.isEmpty());
+        QCOMPARE(debugInfo.value(QStringLiteral("onlineRankerRolloutMode")).toString(),
+                 QStringLiteral("blended_ranking"));
+        QVERIFY(debugInfo.value(QStringLiteral("onlineRankerServingAllowed")).toBool(false));
+        QVERIFY(debugInfo.value(QStringLiteral("onlineRankerApplied")).toBool(false));
+        QVERIFY(std::abs(debugInfo.value(QStringLiteral("onlineRankerBlendAlpha"))
+                             .toDouble(0.0) - 0.07)
+                < 1e-6);
+        QVERIFY(std::abs(debugInfo.value(QStringLiteral("onlineRankerDeltaTop10"))
+                             .toDouble(0.0))
+                > 1e-6);
+    }
+
+    {
+        auto restartStoreOpt = bs::SQLiteStore::open(dbPath);
+        QVERIFY(restartStoreOpt.has_value());
+        bs::SQLiteStore restartStore = std::move(restartStoreOpt.value());
+        QVERIFY(restartStore.setSetting(QStringLiteral("behaviorStreamEnabled"), QStringLiteral("1")));
+        QVERIFY(restartStore.setSetting(QStringLiteral("learningEnabled"), QStringLiteral("1")));
+        QVERIFY(restartStore.setSetting(QStringLiteral("learningPauseOnUserInput"), QStringLiteral("0")));
+    }
+
+    {
+        bs::test::ServiceProcessHarness harness(
+            QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+        const bs::test::ServiceLaunchConfig launch = makeLaunchConfig();
+        QVERIFY2(harness.start(launch),
+                 "Failed to restart query service for rollout persistence test");
+
+        const QJsonObject debugInfo = runDebugSearch(harness);
+        QVERIFY(!debugInfo.isEmpty());
+        QCOMPARE(debugInfo.value(QStringLiteral("onlineRankerRolloutMode")).toString(),
+                 QStringLiteral("blended_ranking"));
+        QVERIFY(debugInfo.value(QStringLiteral("onlineRankerServingAllowed")).toBool(false));
+        QVERIFY(debugInfo.value(QStringLiteral("onlineRankerApplied")).toBool(false));
+        QVERIFY(std::abs(debugInfo.value(QStringLiteral("onlineRankerBlendAlpha"))
+                             .toDouble(0.0) - 0.07)
+                < 1e-6);
+        QVERIFY(std::abs(debugInfo.value(QStringLiteral("onlineRankerDeltaTop10"))
+                             .toDouble(0.0))
+                > 1e-6);
+    }
+}
+
+void TestQueryServiceM2Ipc::testRecordBehaviorEventSelectAndActivateLabeling()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for select/activate fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    auto seededItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("select-activate.md"),
+        {
+            QStringLiteral("select/activate labeling fixture"),
+            QStringLiteral("result_select and result_activate should map to positives"),
+        });
+    QVERIFY2(seededItemIdOpt.has_value(), "Failed to seed select/activate fixture item");
+    const qint64 seededItemId = seededItemIdOpt.value();
+    const QString seededPath = QDir(docsDir.path()).filePath(QStringLiteral("select-activate.md"));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 12000;
+    QVERIFY2(harness.start(launch), "Failed to start query service for select/activate test");
+
+    auto readPositiveAndEvents = [&]() -> std::pair<int, int> {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        if (!bs::test::isResponse(response)) {
+            return {0, 0};
+        }
+        const QJsonObject learning = bs::test::resultPayload(response)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        if (learning.isEmpty()) {
+            return {0, 0};
+        }
+        const QJsonObject attribution =
+            learning.value(QStringLiteral("attributionMetrics")).toObject();
+        const QJsonObject coverage =
+            learning.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+        return {attribution.value(QStringLiteral("positiveExamples")).toInt(0),
+                coverage.value(QStringLiteral("events")).toInt(0)};
+    };
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+
+    const auto before = readPositiveAndEvents();
+
+    auto sendEvent = [&](const QString& eventId, const QString& eventType) -> QJsonObject {
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = eventId;
+        params[QStringLiteral("eventType")] = eventType;
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("select activate");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-select-activate");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-select-activate");
+        params[QStringLiteral("attributionConfidence")] = 1.0;
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        if (!bs::test::isResponse(response)) {
+            return QJsonObject();
+        }
+        return bs::test::resultPayload(response);
+    };
+
+    const QJsonObject selectResult =
+        sendEvent(QStringLiteral("select-evt-1"), QStringLiteral("result_select"));
+    QVERIFY(!selectResult.isEmpty());
+    QVERIFY(selectResult.value(QStringLiteral("recorded")).toBool(false));
+    QVERIFY(!selectResult.value(QStringLiteral("filteredOut")).toBool(true));
+    QVERIFY(selectResult.value(QStringLiteral("attributedPositive")).toBool(false));
+
+    const QJsonObject activateResult =
+        sendEvent(QStringLiteral("activate-evt-1"), QStringLiteral("result_activate"));
+    QVERIFY(!activateResult.isEmpty());
+    QVERIFY(activateResult.value(QStringLiteral("recorded")).toBool(false));
+    QVERIFY(!activateResult.value(QStringLiteral("filteredOut")).toBool(true));
+    QVERIFY(activateResult.value(QStringLiteral("attributedPositive")).toBool(false));
+
+    const auto after = readPositiveAndEvents();
+    QVERIFY(after.first >= before.first + 2);
+    QVERIFY(after.second >= before.second + 2);
+}
+
+void TestQueryServiceM2Ipc::testRecordBehaviorEventSelectActivateRespectStrictExclusions()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsDir;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsDir.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY2(storeOpt.has_value(), "Failed to open query DB for strict-exclusion fixture");
+    bs::SQLiteStore fixtureStore = std::move(storeOpt.value());
+
+    auto seededItemIdOpt = seedItemWithChunks(
+        fixtureStore,
+        docsDir.path(),
+        QStringLiteral("select-activate-exclusions.md"),
+        {
+            QStringLiteral("select/activate strict exclusion fixture"),
+            QStringLiteral("result_select and result_activate must respect strict exclusions"),
+        });
+    QVERIFY2(seededItemIdOpt.has_value(), "Failed to seed strict-exclusion fixture item");
+    const qint64 seededItemId = seededItemIdOpt.value();
+    const QString seededPath =
+        QDir(docsDir.path()).filePath(QStringLiteral("select-activate-exclusions.md"));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+    launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.readyTimeoutMs = 30000;
+    launch.requestDefaultTimeoutMs = 12000;
+    QVERIFY2(harness.start(launch),
+             "Failed to start query service for select/activate strict-exclusion test");
+
+    auto readPositiveAndEvents = [&]() -> std::pair<int, int> {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        if (!bs::test::isResponse(response)) {
+            return {0, 0};
+        }
+        const QJsonObject learning = bs::test::resultPayload(response)
+                                         .value(QStringLiteral("learning"))
+                                         .toObject();
+        if (learning.isEmpty()) {
+            return {0, 0};
+        }
+        const QJsonObject attribution =
+            learning.value(QStringLiteral("attributionMetrics")).toObject();
+        const QJsonObject coverage =
+            learning.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+        return {attribution.value(QStringLiteral("positiveExamples")).toInt(0),
+                coverage.value(QStringLiteral("events")).toInt(0)};
+    };
+
+    auto sendBehaviorEvent = [&](const QString& eventId,
+                                 const QString& eventType,
+                                 const QString& appBundleId,
+                                 const QJsonObject& privacyFlags = QJsonObject()) -> QJsonObject {
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = eventId;
+        params[QStringLiteral("eventType")] = eventType;
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("select activate exclusions");
+        params[QStringLiteral("appBundleId")] = appBundleId;
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-select-activate-exclusions");
+        params[QStringLiteral("activityDigest")] =
+            QStringLiteral("digest-select-activate-exclusions");
+        params[QStringLiteral("attributionConfidence")] = 1.0;
+        if (!privacyFlags.isEmpty()) {
+            params[QStringLiteral("privacyFlags")] = privacyFlags;
+        }
+        const QJsonObject response =
+            harness.request(QStringLiteral("record_behavior_event"), params, 12000);
+        if (!bs::test::isResponse(response)) {
+            return QJsonObject();
+        }
+        return bs::test::resultPayload(response);
+    };
+
+    auto assertBothEventTypesBlocked = [&](const QString& eventPrefix,
+                                           const QString& appBundleId,
+                                           const QJsonObject& privacyFlags = QJsonObject()) {
+        const auto before = readPositiveAndEvents();
+        const QStringList eventTypes = {QStringLiteral("result_select"),
+                                        QStringLiteral("result_activate")};
+        for (const QString& eventType : eventTypes) {
+            const QString eventId = QStringLiteral("%1-%2")
+                                        .arg(eventPrefix,
+                                             eventType == QLatin1String("result_select")
+                                                 ? QStringLiteral("select")
+                                                 : QStringLiteral("activate"));
+            const QJsonObject result =
+                sendBehaviorEvent(eventId, eventType, appBundleId, privacyFlags);
+            QVERIFY(!result.isEmpty());
+            QVERIFY(!result.value(QStringLiteral("recorded")).toBool(true));
+            QVERIFY(result.value(QStringLiteral("filteredOut")).toBool(false));
+            QVERIFY(!result.value(QStringLiteral("attributedPositive")).toBool(true));
+        }
+        const auto after = readPositiveAndEvents();
+        QCOMPARE(after.first, before.first);
+        QCOMPARE(after.second, before.second);
+    };
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        QJsonObject captureScope;
+        captureScope[QStringLiteral("searchEventsEnabled")] = false;
+        captureScope[QStringLiteral("appActivityEnabled")] = true;
+        captureScope[QStringLiteral("inputActivityEnabled")] = true;
+        captureScope[QStringLiteral("windowTitleHashEnabled")] = true;
+        captureScope[QStringLiteral("browserHostHashEnabled")] = true;
+        params[QStringLiteral("captureScope")] = captureScope;
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+    assertBothEventTypesBlocked(QStringLiteral("scope-disabled"), QStringLiteral("com.apple.finder"));
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = false;
+        params[QStringLiteral("learningEnabled")] = false;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("disabled");
+        QJsonObject captureScope;
+        captureScope[QStringLiteral("searchEventsEnabled")] = true;
+        captureScope[QStringLiteral("appActivityEnabled")] = true;
+        captureScope[QStringLiteral("inputActivityEnabled")] = true;
+        captureScope[QStringLiteral("windowTitleHashEnabled")] = true;
+        captureScope[QStringLiteral("browserHostHashEnabled")] = true;
+        params[QStringLiteral("captureScope")] = captureScope;
+        params[QStringLiteral("denylistApps")] = QJsonArray();
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+    assertBothEventTypesBlocked(QStringLiteral("stream-disabled"), QStringLiteral("com.apple.finder"));
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        QJsonObject captureScope;
+        captureScope[QStringLiteral("searchEventsEnabled")] = true;
+        captureScope[QStringLiteral("appActivityEnabled")] = true;
+        captureScope[QStringLiteral("inputActivityEnabled")] = true;
+        captureScope[QStringLiteral("windowTitleHashEnabled")] = true;
+        captureScope[QStringLiteral("browserHostHashEnabled")] = true;
+        params[QStringLiteral("captureScope")] = captureScope;
+        QJsonArray denylist;
+        denylist.append(QStringLiteral("com.example.secret"));
+        params[QStringLiteral("denylistApps")] = denylist;
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+    assertBothEventTypesBlocked(QStringLiteral("denylisted"), QStringLiteral("com.example.secret"));
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
+        QJsonObject captureScope;
+        captureScope[QStringLiteral("searchEventsEnabled")] = true;
+        captureScope[QStringLiteral("appActivityEnabled")] = true;
+        captureScope[QStringLiteral("inputActivityEnabled")] = true;
+        captureScope[QStringLiteral("windowTitleHashEnabled")] = true;
+        captureScope[QStringLiteral("browserHostHashEnabled")] = true;
+        params[QStringLiteral("captureScope")] = captureScope;
+        params[QStringLiteral("denylistApps")] = QJsonArray();
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+    }
+
+    QJsonObject secureFlags;
+    secureFlags[QStringLiteral("secureInput")] = true;
+    secureFlags[QStringLiteral("privateContext")] = false;
+    secureFlags[QStringLiteral("denylistedApp")] = false;
+    secureFlags[QStringLiteral("redacted")] = false;
+    assertBothEventTypesBlocked(QStringLiteral("secure-input"),
+                                QStringLiteral("com.apple.finder"),
+                                secureFlags);
+
+    QJsonObject privateFlags;
+    privateFlags[QStringLiteral("secureInput")] = false;
+    privateFlags[QStringLiteral("privateContext")] = true;
+    privateFlags[QStringLiteral("denylistedApp")] = false;
+    privateFlags[QStringLiteral("redacted")] = false;
+    assertBothEventTypesBlocked(QStringLiteral("private-context"),
+                                QStringLiteral("com.apple.finder"),
+                                privateFlags);
 }
 
 void TestQueryServiceM2Ipc::testOnlineRankerServingRespectsRolloutModes()

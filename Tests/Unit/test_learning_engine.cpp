@@ -111,6 +111,7 @@ private slots:
     void testEndToEndExposureAttributionTrainPromote();
     void testScoreBoostFallsBackWhenModelsMissingOrCorrupt();
     void testTriggerLearningCyclePromotesModel();
+    void testTriggerLearningCycleRejectsCandidateNotBetter();
     void testCoreMlBootstrapSeededFromEnvOverride();
 };
 
@@ -1356,6 +1357,72 @@ void TestLearningEngine::testTriggerLearningCyclePromotesModel()
     const QJsonObject health = engine.healthSnapshot();
     QCOMPARE(health.value(QStringLiteral("lastCycleStatus")).toString(),
              QStringLiteral("succeeded"));
+}
+
+void TestLearningEngine::testTriggerLearningCycleRejectsCandidateNotBetter()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("40"));
+
+    // Balanced labels with near-constant features produce little to no incremental gain
+    // after the first promotion, so a subsequent candidate should be rejected.
+    for (int i = 0; i < 120; ++i) {
+        const int label = (i % 2 == 0) ? 1 : 0;
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("not-better-seed-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          0.0,
+                          0.0);
+    }
+
+    QString firstReason;
+    const bool firstPromoted = engine.triggerLearningCycle(true, &firstReason);
+    QVERIFY2(firstPromoted, qPrintable(firstReason));
+    const QString firstVersion = engine.modelVersion();
+    QVERIFY(!firstVersion.isEmpty());
+
+    for (int i = 0; i < 120; ++i) {
+        const int label = (i % 2 == 0) ? 1 : 0;
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("not-better-second-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          0.0,
+                          0.0);
+    }
+
+    QString secondReason;
+    const bool secondPromoted = engine.triggerLearningCycle(true, &secondReason);
+    QVERIFY(!secondPromoted);
+    QCOMPARE(secondReason, QStringLiteral("candidate_not_better_than_active"));
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("lastCycleStatus")).toString(),
+             QStringLiteral("rejected"));
+    QCOMPARE(health.value(QStringLiteral("lastCycleReason")).toString(),
+             QStringLiteral("candidate_not_better_than_active"));
+    QCOMPARE(health.value(QStringLiteral("modelVersion")).toString(), firstVersion);
 }
 
 void TestLearningEngine::testCoreMlBootstrapSeededFromEnvOverride()
