@@ -72,10 +72,16 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
     if (activeMetrics) {
         activeMetrics->examples = 0;
         activeMetrics->logLoss = 0.0;
+        activeMetrics->avgPredictionLatencyUs = 0.0;
+        activeMetrics->predictionFailureRate = 0.0;
+        activeMetrics->probabilitySaturationRate = 0.0;
     }
     if (candidateMetrics) {
         candidateMetrics->examples = 0;
         candidateMetrics->logLoss = 0.0;
+        candidateMetrics->avgPredictionLatencyUs = 0.0;
+        candidateMetrics->predictionFailureRate = 0.0;
+        candidateMetrics->probabilitySaturationRate = 0.0;
     }
     if (rejectReason) {
         *rejectReason = QStringLiteral("coreml_not_supported_on_this_platform");
@@ -84,4 +90,3 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
 }
 
 } // namespace bs
-

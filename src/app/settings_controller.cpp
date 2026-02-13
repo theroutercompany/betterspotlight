@@ -277,6 +277,34 @@ void syncRuntimeSettingsToDb(const QJsonObject& settings)
                       1.0),
                                   'g',
                                   17));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionLatencyUsMax")).toDouble(2500.0),
+                      10.0,
+                      1000000.0),
+                                  'g',
+                                  17));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax")).toDouble(35.0),
+                      0.0,
+                      1000.0),
+                                  'g',
+                                  17));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax")).toDouble(0.05),
+                      0.0,
+                      1.0),
+                                  'g',
+                                  17));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionSaturationRateMax")).toDouble(0.995),
+                      0.0,
+                      1.0),
+                                  'g',
+                                  17));
     upsertSetting(db, QStringLiteral("learningPauseOnUserInput"),
                   boolToSqlValue(settings.value(QStringLiteral("learningPauseOnUserInput")).toBool(true)));
     upsertSetting(db, QStringLiteral("onlineRankerBlendAlpha"),
@@ -1310,6 +1338,10 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionGateMinPositives"), 80);
     ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionMinAttributedRate"), 0.5);
     ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionMinContextDigestRate"), 0.1);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionLatencyUsMax"), 2500.0);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"), 35.0);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"), 0.05);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionSaturationRateMax"), 0.995);
     ensureDefault(m_settings, QStringLiteral("learningPauseOnUserInput"), true);
     ensureDefault(m_settings, QStringLiteral("onlineRankerBlendAlpha"), 0.15);
     ensureDefault(m_settings, QStringLiteral("onlineRankerNegativeSampleRatio"), 3.0);

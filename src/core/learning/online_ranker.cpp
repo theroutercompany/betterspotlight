@@ -391,59 +391,31 @@ bool OnlineRanker::trainAndPromote(const QVector<TrainingExample>& samples,
                                          &candidateFailureRate,
                                          &candidateSaturationRate);
 
+    TrainMetrics activeEvalMetrics;
+    activeEvalMetrics.examples = usedActive;
+    activeEvalMetrics.logLoss = activeLoss;
+    activeEvalMetrics.avgPredictionLatencyUs = activeLatencyUs;
+    activeEvalMetrics.predictionFailureRate = activeFailureRate;
+    activeEvalMetrics.probabilitySaturationRate = activeSaturationRate;
+
+    TrainMetrics candidateEvalMetrics;
+    candidateEvalMetrics.examples = usedCandidate;
+    candidateEvalMetrics.logLoss = candidateLoss;
+    candidateEvalMetrics.avgPredictionLatencyUs = candidateLatencyUs;
+    candidateEvalMetrics.predictionFailureRate = candidateFailureRate;
+    candidateEvalMetrics.probabilitySaturationRate = candidateSaturationRate;
+
     if (activeMetrics) {
-        activeMetrics->examples = usedActive;
-        activeMetrics->logLoss = activeLoss;
-        activeMetrics->avgPredictionLatencyUs = activeLatencyUs;
-        activeMetrics->predictionFailureRate = activeFailureRate;
-        activeMetrics->probabilitySaturationRate = activeSaturationRate;
+        *activeMetrics = activeEvalMetrics;
     }
     if (candidateMetrics) {
-        candidateMetrics->examples = usedCandidate;
-        candidateMetrics->logLoss = candidateLoss;
-        candidateMetrics->avgPredictionLatencyUs = candidateLatencyUs;
-        candidateMetrics->predictionFailureRate = candidateFailureRate;
-        candidateMetrics->probabilitySaturationRate = candidateSaturationRate;
+        *candidateMetrics = candidateEvalMetrics;
     }
 
-    if (!std::isfinite(candidateLoss) || usedCandidate <= 0) {
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_invalid_eval");
-        }
-        return false;
-    }
-
-    const double latencyBudgetUs = clamp(config.promotionLatencyUsMax, 10.0, 1000000.0);
-    const double latencyRegressionPct = clamp(config.promotionLatencyRegressionPctMax, 0.0, 1000.0);
-    const double failureRateMax = clamp(config.promotionPredictionFailureRateMax, 0.0, 1.0);
-    const double saturationRateMax = clamp(config.promotionSaturationRateMax, 0.0, 1.0);
-
-    if (candidateLatencyUs > latencyBudgetUs) {
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_latency_budget_exceeded");
-        }
-        return false;
-    }
-    if (usedActive > 0 && activeLatencyUs > 0.0) {
-        const double maxAllowedLatencyUs =
-            activeLatencyUs * (1.0 + (latencyRegressionPct / 100.0));
-        if (candidateLatencyUs > maxAllowedLatencyUs) {
-            if (rejectReason) {
-                *rejectReason = QStringLiteral("candidate_latency_regression_exceeded");
-            }
-            return false;
-        }
-    }
-    if (candidateFailureRate > failureRateMax) {
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_failure_rate_exceeded");
-        }
-        return false;
-    }
-    if (candidateSaturationRate > saturationRateMax) {
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_saturation_rate_exceeded");
-        }
+    if (!passesPromotionRuntimeGates(config,
+                                     activeEvalMetrics,
+                                     candidateEvalMetrics,
+                                     rejectReason)) {
         return false;
     }
 
@@ -463,6 +435,69 @@ bool OnlineRanker::trainAndPromote(const QVector<TrainingExample>& samples,
         }
         return false;
     }
+    return true;
+}
+
+bool OnlineRanker::passesPromotionRuntimeGates(const TrainConfig& config,
+                                               const TrainMetrics& activeMetrics,
+                                               const TrainMetrics& candidateMetrics,
+                                               QString* rejectReason)
+{
+    if (rejectReason) {
+        rejectReason->clear();
+    }
+
+    if (candidateMetrics.examples <= 0
+        || !std::isfinite(candidateMetrics.logLoss)
+        || !std::isfinite(candidateMetrics.avgPredictionLatencyUs)
+        || !std::isfinite(candidateMetrics.predictionFailureRate)
+        || !std::isfinite(candidateMetrics.probabilitySaturationRate)
+        || candidateMetrics.avgPredictionLatencyUs < 0.0
+        || candidateMetrics.predictionFailureRate < 0.0
+        || candidateMetrics.probabilitySaturationRate < 0.0) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_invalid_eval");
+        }
+        return false;
+    }
+
+    const double latencyBudgetUs = clamp(config.promotionLatencyUsMax, 10.0, 1000000.0);
+    const double latencyRegressionPct =
+        clamp(config.promotionLatencyRegressionPctMax, 0.0, 1000.0);
+    const double failureRateMax = clamp(config.promotionPredictionFailureRateMax, 0.0, 1.0);
+    const double saturationRateMax = clamp(config.promotionSaturationRateMax, 0.0, 1.0);
+
+    if (candidateMetrics.avgPredictionLatencyUs > latencyBudgetUs) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_latency_budget_exceeded");
+        }
+        return false;
+    }
+    if (activeMetrics.examples > 0
+        && std::isfinite(activeMetrics.avgPredictionLatencyUs)
+        && activeMetrics.avgPredictionLatencyUs > 0.0) {
+        const double maxAllowedLatencyUs =
+            activeMetrics.avgPredictionLatencyUs * (1.0 + (latencyRegressionPct / 100.0));
+        if (candidateMetrics.avgPredictionLatencyUs > maxAllowedLatencyUs) {
+            if (rejectReason) {
+                *rejectReason = QStringLiteral("candidate_latency_regression_exceeded");
+            }
+            return false;
+        }
+    }
+    if (candidateMetrics.predictionFailureRate > failureRateMax) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_failure_rate_exceeded");
+        }
+        return false;
+    }
+    if (candidateMetrics.probabilitySaturationRate > saturationRateMax) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_saturation_rate_exceeded");
+        }
+        return false;
+    }
+
     return true;
 }
 

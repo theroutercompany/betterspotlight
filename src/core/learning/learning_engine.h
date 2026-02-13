@@ -132,6 +132,12 @@ private:
     QString m_lastCycleReason;
     double m_lastActiveLoss = 0.0;
     double m_lastCandidateLoss = 0.0;
+    double m_lastActiveLatencyUs = 0.0;
+    double m_lastCandidateLatencyUs = 0.0;
+    double m_lastActiveFailureRate = 0.0;
+    double m_lastCandidateFailureRate = 0.0;
+    double m_lastActiveSaturationRate = 0.0;
+    double m_lastCandidateSaturationRate = 0.0;
     int m_lastSampleCount = 0;
     bool m_lastPromoted = false;
     bool m_lastManual = false;

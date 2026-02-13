@@ -4383,6 +4383,22 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionMinContextDigestRate"), 0.1),
         0.0,
         1.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionLatencyUsMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionLatencyUsMax"), 2500.0),
+        10.0,
+        1000000.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"), 35.0),
+        0.0,
+        1000.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionPredictionFailureRateMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"), 0.05),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionSaturationRateMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionSaturationRateMax"), 0.995),
+        0.0,
+        1.0);
     runtimeSettings[QStringLiteral("behaviorRawRetentionDays")] = std::max(
         1, readIntRuntimeSetting(QStringLiteral("behaviorRawRetentionDays"), 30));
     runtimeSettings[QStringLiteral("learningIdleCpuPctMax")] = std::max(

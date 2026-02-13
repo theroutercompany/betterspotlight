@@ -46,6 +46,11 @@ public:
                          TrainMetrics* candidateMetrics,
                          QString* rejectReason);
 
+    static bool passesPromotionRuntimeGates(const TrainConfig& config,
+                                            const TrainMetrics& activeMetrics,
+                                            const TrainMetrics& candidateMetrics,
+                                            QString* rejectReason);
+
 private:
     struct Weights {
         QVector<double> w;

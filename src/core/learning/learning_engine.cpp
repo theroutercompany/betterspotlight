@@ -41,6 +41,10 @@ constexpr int kDefaultRecentCycleHistoryLimit = 50;
 constexpr int kDefaultPromotionGateMinPositives = 80;
 constexpr double kDefaultPromotionMinAttributedRate = 0.5;
 constexpr double kDefaultPromotionMinContextDigestRate = 0.1;
+constexpr double kDefaultPromotionLatencyUsMax = 2500.0;
+constexpr double kDefaultPromotionLatencyRegressionPctMax = 35.0;
+constexpr double kDefaultPromotionPredictionFailureRateMax = 0.05;
+constexpr double kDefaultPromotionSaturationRateMax = 0.995;
 constexpr int kIdleGapMs = 10000;
 constexpr int kMinCycleIntervalMs = 60000;
 constexpr int kPruneIntervalMs = 60 * 60 * 1000;
@@ -614,6 +618,23 @@ bool LearningEngine::initialize()
     m_lastCycleStatus = getSetting(QStringLiteral("onlineRankerLastCycleStatus"),
                                    QStringLiteral("never_run"));
     m_lastCycleReason = getSetting(QStringLiteral("onlineRankerLastCycleReason"), QString());
+    m_lastActiveLoss = getSettingDouble(QStringLiteral("onlineRankerLastActiveLoss"), 0.0);
+    m_lastCandidateLoss = getSettingDouble(QStringLiteral("onlineRankerLastCandidateLoss"), 0.0);
+    m_lastActiveLatencyUs = getSettingDouble(QStringLiteral("onlineRankerLastActiveLatencyUs"), 0.0);
+    m_lastCandidateLatencyUs = getSettingDouble(QStringLiteral("onlineRankerLastCandidateLatencyUs"), 0.0);
+    m_lastActiveFailureRate = getSettingDouble(
+        QStringLiteral("onlineRankerLastActivePredictionFailureRate"),
+        0.0);
+    m_lastCandidateFailureRate = getSettingDouble(
+        QStringLiteral("onlineRankerLastCandidatePredictionFailureRate"),
+        0.0);
+    m_lastActiveSaturationRate = getSettingDouble(QStringLiteral("onlineRankerLastActiveSaturationRate"), 0.0);
+    m_lastCandidateSaturationRate = getSettingDouble(
+        QStringLiteral("onlineRankerLastCandidateSaturationRate"),
+        0.0);
+    m_lastSampleCount = getSettingInt(QStringLiteral("onlineRankerLastSampleCount"), 0);
+    m_lastPromoted = getSettingBool(QStringLiteral("onlineRankerLastPromoted"), false);
+    m_lastManual = getSettingBool(QStringLiteral("onlineRankerLastManual"), false);
     m_lastCycleAtMs = static_cast<qint64>(getSetting(
         QStringLiteral("onlineRankerLastCycleAtMs"),
         QStringLiteral("0")).toLongLong());
@@ -1769,6 +1790,18 @@ void LearningEngine::setLastCycleResult(const QString& status,
     setSetting(QStringLiteral("onlineRankerLastCycleAtMs"), QString::number(m_lastCycleAtMs));
     setSetting(QStringLiteral("onlineRankerLastActiveLoss"), QString::number(activeLoss, 'g', 10));
     setSetting(QStringLiteral("onlineRankerLastCandidateLoss"), QString::number(candidateLoss, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastActiveLatencyUs"),
+               QString::number(m_lastActiveLatencyUs, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastCandidateLatencyUs"),
+               QString::number(m_lastCandidateLatencyUs, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastActivePredictionFailureRate"),
+               QString::number(m_lastActiveFailureRate, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastCandidatePredictionFailureRate"),
+               QString::number(m_lastCandidateFailureRate, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastActiveSaturationRate"),
+               QString::number(m_lastActiveSaturationRate, 'g', 10));
+    setSetting(QStringLiteral("onlineRankerLastCandidateSaturationRate"),
+               QString::number(m_lastCandidateSaturationRate, 'g', 10));
     setSetting(QStringLiteral("onlineRankerLastSampleCount"), QString::number(sampleCount));
     setSetting(QStringLiteral("onlineRankerLastPromoted"), promoted ? QStringLiteral("1") : QStringLiteral("0"));
     setSetting(QStringLiteral("onlineRankerLastManual"), manual ? QStringLiteral("1") : QStringLiteral("0"));
@@ -1779,6 +1812,18 @@ void LearningEngine::setLastCycleResult(const QString& status,
     setModelState(QStringLiteral("last_cycle_reason"), reason);
     setModelState(QStringLiteral("last_active_loss"), QString::number(activeLoss, 'g', 10));
     setModelState(QStringLiteral("last_candidate_loss"), QString::number(candidateLoss, 'g', 10));
+    setModelState(QStringLiteral("last_active_latency_us"),
+                  QString::number(m_lastActiveLatencyUs, 'g', 10));
+    setModelState(QStringLiteral("last_candidate_latency_us"),
+                  QString::number(m_lastCandidateLatencyUs, 'g', 10));
+    setModelState(QStringLiteral("last_active_prediction_failure_rate"),
+                  QString::number(m_lastActiveFailureRate, 'g', 10));
+    setModelState(QStringLiteral("last_candidate_prediction_failure_rate"),
+                  QString::number(m_lastCandidateFailureRate, 'g', 10));
+    setModelState(QStringLiteral("last_active_saturation_rate"),
+                  QString::number(m_lastActiveSaturationRate, 'g', 10));
+    setModelState(QStringLiteral("last_candidate_saturation_rate"),
+                  QString::number(m_lastCandidateSaturationRate, 'g', 10));
     setModelState(QStringLiteral("last_sample_count"), QString::number(sampleCount));
     setModelState(QStringLiteral("last_promoted"), promoted ? QStringLiteral("1") : QStringLiteral("0"));
     setModelState(QStringLiteral("last_manual"), manual ? QStringLiteral("1") : QStringLiteral("0"));
@@ -1804,6 +1849,12 @@ void LearningEngine::setLastCycleResult(const QString& status,
     cycleEntry[QStringLiteral("reason")] = reason;
     cycleEntry[QStringLiteral("activeLoss")] = activeLoss;
     cycleEntry[QStringLiteral("candidateLoss")] = candidateLoss;
+    cycleEntry[QStringLiteral("activeLatencyUs")] = m_lastActiveLatencyUs;
+    cycleEntry[QStringLiteral("candidateLatencyUs")] = m_lastCandidateLatencyUs;
+    cycleEntry[QStringLiteral("activePredictionFailureRate")] = m_lastActiveFailureRate;
+    cycleEntry[QStringLiteral("candidatePredictionFailureRate")] = m_lastCandidateFailureRate;
+    cycleEntry[QStringLiteral("activeSaturationRate")] = m_lastActiveSaturationRate;
+    cycleEntry[QStringLiteral("candidateSaturationRate")] = m_lastCandidateSaturationRate;
     cycleEntry[QStringLiteral("sampleCount")] = sampleCount;
     cycleEntry[QStringLiteral("promoted")] = promoted;
     cycleEntry[QStringLiteral("manual")] = manual;
@@ -1882,6 +1933,12 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     if (!manual) {
         QString budgetReason;
         if (!passesResourceBudgetsUnlocked(&budgetReason)) {
+            m_lastActiveLatencyUs = 0.0;
+            m_lastCandidateLatencyUs = 0.0;
+            m_lastActiveFailureRate = 0.0;
+            m_lastCandidateFailureRate = 0.0;
+            m_lastActiveSaturationRate = 0.0;
+            m_lastCandidateSaturationRate = 0.0;
             ++m_cyclesRun;
             ++m_cyclesRejected;
             ++m_fallbackResourceBudget;
@@ -1917,6 +1974,12 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
 
     if (!fetchError.isEmpty()) {
         m_cycleRunning = false;
+        m_lastActiveLatencyUs = 0.0;
+        m_lastCandidateLatencyUs = 0.0;
+        m_lastActiveFailureRate = 0.0;
+        m_lastCandidateFailureRate = 0.0;
+        m_lastActiveSaturationRate = 0.0;
+        m_lastCandidateSaturationRate = 0.0;
         ++m_cyclesRun;
         ++m_cyclesRejected;
         setLastCycleResult(QStringLiteral("failed"), fetchError, 0.0, 0.0, 0, false, manual);
@@ -1961,6 +2024,12 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
 
     if (sampledCombined.size() < 60) {
         m_cycleRunning = false;
+        m_lastActiveLatencyUs = 0.0;
+        m_lastCandidateLatencyUs = 0.0;
+        m_lastActiveFailureRate = 0.0;
+        m_lastCandidateFailureRate = 0.0;
+        m_lastActiveSaturationRate = 0.0;
+        m_lastCandidateSaturationRate = 0.0;
         ++m_cyclesRun;
         ++m_cyclesRejected;
         setLastCycleResult(QStringLiteral("rejected"),
@@ -1999,6 +2068,12 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
         }
         if (!attributionGateReason.isEmpty()) {
             m_cycleRunning = false;
+            m_lastActiveLatencyUs = 0.0;
+            m_lastCandidateLatencyUs = 0.0;
+            m_lastActiveFailureRate = 0.0;
+            m_lastCandidateFailureRate = 0.0;
+            m_lastActiveSaturationRate = 0.0;
+            m_lastCandidateSaturationRate = 0.0;
             ++m_cyclesRun;
             ++m_cyclesRejected;
             setLastCycleResult(QStringLiteral("rejected"),
@@ -2020,6 +2095,26 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     cfg.learningRate = std::clamp(getSettingDouble(QStringLiteral("onlineRankerLearningRate"), 0.05), 1e-4, 0.5);
     cfg.l2 = std::clamp(getSettingDouble(QStringLiteral("onlineRankerL2"), 1e-6), 0.0, 0.1);
     cfg.minExamples = std::max(40, getSettingInt(QStringLiteral("onlineRankerMinExamples"), 120));
+    cfg.promotionLatencyUsMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                         kDefaultPromotionLatencyUsMax),
+        10.0,
+        1000000.0);
+    cfg.promotionLatencyRegressionPctMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                         kDefaultPromotionLatencyRegressionPctMax),
+        0.0,
+        1000.0);
+    cfg.promotionPredictionFailureRateMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                         kDefaultPromotionPredictionFailureRateMax),
+        0.0,
+        1.0);
+    cfg.promotionSaturationRateMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                         kDefaultPromotionSaturationRateMax),
+        0.0,
+        1.0);
 
     OnlineRanker::TrainMetrics activeMetrics;
     OnlineRanker::TrainMetrics candidateMetrics;
@@ -2036,6 +2131,13 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
                                     &activeMetrics,
                                     &candidateMetrics,
                                     &rejectReason);
+
+    m_lastActiveLatencyUs = activeMetrics.avgPredictionLatencyUs;
+    m_lastCandidateLatencyUs = candidateMetrics.avgPredictionLatencyUs;
+    m_lastActiveFailureRate = activeMetrics.predictionFailureRate;
+    m_lastCandidateFailureRate = candidateMetrics.predictionFailureRate;
+    m_lastActiveSaturationRate = activeMetrics.probabilitySaturationRate;
+    m_lastCandidateSaturationRate = candidateMetrics.probabilitySaturationRate;
 
     if (promoted) {
         for (const TrainingExample& ex : fresh) {
@@ -2267,6 +2369,26 @@ QJsonObject LearningEngine::healthSnapshot() const
                          kDefaultPromotionMinContextDigestRate),
         0.0,
         1.0);
+    const double promotionLatencyUsMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                         kDefaultPromotionLatencyUsMax),
+        10.0,
+        1000000.0);
+    const double promotionLatencyRegressionPctMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                         kDefaultPromotionLatencyRegressionPctMax),
+        0.0,
+        1000.0);
+    const double promotionPredictionFailureRateMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                         kDefaultPromotionPredictionFailureRateMax),
+        0.0,
+        1.0);
+    const double promotionSaturationRateMax = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                         kDefaultPromotionSaturationRateMax),
+        0.0,
+        1.0);
     const double negativeSampleRatio = std::clamp(
         getSettingDouble(QStringLiteral("onlineRankerNegativeSampleRatio"),
                          kDefaultNegativeSampleRatio),
@@ -2298,6 +2420,12 @@ QJsonObject LearningEngine::healthSnapshot() const
     health[QStringLiteral("lastCycleAtMs")] = m_lastCycleAtMs;
     health[QStringLiteral("lastActiveLoss")] = m_lastActiveLoss;
     health[QStringLiteral("lastCandidateLoss")] = m_lastCandidateLoss;
+    health[QStringLiteral("lastActiveLatencyUs")] = m_lastActiveLatencyUs;
+    health[QStringLiteral("lastCandidateLatencyUs")] = m_lastCandidateLatencyUs;
+    health[QStringLiteral("lastActivePredictionFailureRate")] = m_lastActiveFailureRate;
+    health[QStringLiteral("lastCandidatePredictionFailureRate")] = m_lastCandidateFailureRate;
+    health[QStringLiteral("lastActiveSaturationRate")] = m_lastActiveSaturationRate;
+    health[QStringLiteral("lastCandidateSaturationRate")] = m_lastCandidateSaturationRate;
     health[QStringLiteral("lastSampleCount")] = m_lastSampleCount;
     health[QStringLiteral("lastPromoted")] = m_lastPromoted;
     health[QStringLiteral("lastManual")] = m_lastManual;
@@ -2352,6 +2480,12 @@ QJsonObject LearningEngine::healthSnapshot() const
     promotionAttributionGate[QStringLiteral("minAttributedRate")] = promotionMinAttributedRate;
     promotionAttributionGate[QStringLiteral("minContextDigestRate")] = promotionMinContextDigestRate;
     health[QStringLiteral("promotionAttributionGate")] = promotionAttributionGate;
+    QJsonObject promotionRuntimeGate;
+    promotionRuntimeGate[QStringLiteral("latencyUsMax")] = promotionLatencyUsMax;
+    promotionRuntimeGate[QStringLiteral("latencyRegressionPctMax")] = promotionLatencyRegressionPctMax;
+    promotionRuntimeGate[QStringLiteral("predictionFailureRateMax")] = promotionPredictionFailureRateMax;
+    promotionRuntimeGate[QStringLiteral("saturationRateMax")] = promotionSaturationRateMax;
+    health[QStringLiteral("promotionRuntimeGate")] = promotionRuntimeGate;
     health[QStringLiteral("negativeSampleRatio")] = negativeSampleRatio;
     health[QStringLiteral("maxTrainingBatchSize")] = maxTrainingBatchSize;
     const QJsonArray storedCycleHistory = parseJsonArrayOrEmpty(

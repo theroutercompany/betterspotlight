@@ -321,6 +321,10 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerRecentCycleHist
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionGateMinPositives', '80');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionMinAttributedRate', '0.5');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionMinContextDigestRate', '0.1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyUsMax', '2500');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyRegressionPctMax', '35');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionPredictionFailureRateMax', '0.05');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionSaturationRateMax', '0.995');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('behaviorRawRetentionDays', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningIdleCpuPctMax', '35');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '256');
@@ -346,6 +350,12 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleReason
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleAtMs', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLoss', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLoss', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLatencyUs', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLatencyUs', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActivePredictionFailureRate', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidatePredictionFailureRate', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveSaturationRate', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateSaturationRate', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastSampleCount', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastPromoted', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastManual', '0');

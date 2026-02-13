@@ -797,49 +797,25 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
         candidateMetrics->probabilitySaturationRate = candidateEval.probabilitySaturationRate;
     }
 
-    if (!std::isfinite(candidateEval.logLoss) || candidateEval.usedExamples <= 0) {
-        [candidateModel release];
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_invalid_eval");
-        }
-        return false;
-    }
+    OnlineRanker::TrainMetrics activeEvalMetrics;
+    activeEvalMetrics.examples = activeEval.usedExamples;
+    activeEvalMetrics.logLoss = activeEval.logLoss;
+    activeEvalMetrics.avgPredictionLatencyUs = activeEval.avgPredictionLatencyUs;
+    activeEvalMetrics.predictionFailureRate = activeEval.predictionFailureRate;
+    activeEvalMetrics.probabilitySaturationRate = activeEval.probabilitySaturationRate;
 
-    const double latencyBudgetUs = clamp(config.promotionLatencyUsMax, 10.0, 1000000.0);
-    const double latencyRegressionPct = clamp(config.promotionLatencyRegressionPctMax, 0.0, 1000.0);
-    const double failureRateMax = clamp(config.promotionPredictionFailureRateMax, 0.0, 1.0);
-    const double saturationRateMax = clamp(config.promotionSaturationRateMax, 0.0, 1.0);
+    OnlineRanker::TrainMetrics candidateEvalMetrics;
+    candidateEvalMetrics.examples = candidateEval.usedExamples;
+    candidateEvalMetrics.logLoss = candidateEval.logLoss;
+    candidateEvalMetrics.avgPredictionLatencyUs = candidateEval.avgPredictionLatencyUs;
+    candidateEvalMetrics.predictionFailureRate = candidateEval.predictionFailureRate;
+    candidateEvalMetrics.probabilitySaturationRate = candidateEval.probabilitySaturationRate;
 
-    if (candidateEval.avgPredictionLatencyUs > latencyBudgetUs) {
+    if (!OnlineRanker::passesPromotionRuntimeGates(config,
+                                                   activeEvalMetrics,
+                                                   candidateEvalMetrics,
+                                                   rejectReason)) {
         [candidateModel release];
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_latency_budget_exceeded");
-        }
-        return false;
-    }
-    if (activeEval.usedExamples > 0 && activeEval.avgPredictionLatencyUs > 0.0) {
-        const double maxAllowedLatencyUs =
-            activeEval.avgPredictionLatencyUs * (1.0 + (latencyRegressionPct / 100.0));
-        if (candidateEval.avgPredictionLatencyUs > maxAllowedLatencyUs) {
-            [candidateModel release];
-            if (rejectReason) {
-                *rejectReason = QStringLiteral("candidate_latency_regression_exceeded");
-            }
-            return false;
-        }
-    }
-    if (candidateEval.predictionFailureRate > failureRateMax) {
-        [candidateModel release];
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_failure_rate_exceeded");
-        }
-        return false;
-    }
-    if (candidateEval.probabilitySaturationRate > saturationRateMax) {
-        [candidateModel release];
-        if (rejectReason) {
-            *rejectReason = QStringLiteral("candidate_stability_saturation_rate_exceeded");
-        }
         return false;
     }
 

@@ -221,6 +221,10 @@ bool applyMigrations(sqlite3* db, int targetVersion)
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionGateMinPositives', '80');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionMinAttributedRate', '0.5');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionMinContextDigestRate', '0.1');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyUsMax', '2500');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyRegressionPctMax', '35');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionPredictionFailureRateMax', '0.05');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionSaturationRateMax', '0.995');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('behaviorRawRetentionDays', '30');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('learningIdleCpuPctMax', '35');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '256');")
@@ -246,6 +250,12 @@ bool applyMigrations(sqlite3* db, int targetVersion)
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleAtMs', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLoss', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLoss', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLatencyUs', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLatencyUs', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActivePredictionFailureRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidatePredictionFailureRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveSaturationRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateSaturationRate', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastSampleCount', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastPromoted', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastManual', '0');")
@@ -272,6 +282,21 @@ bool applyMigrations(sqlite3* db, int targetVersion)
         LOG_ERROR(bsIndex, "Schema migration incomplete: current=%d target=%d",
                   current, targetVersion);
         return false;
+    }
+
+    if (current >= 4) {
+        if (!exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyUsMax', '2500');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyRegressionPctMax', '35');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionPredictionFailureRateMax', '0.05');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionSaturationRateMax', '0.995');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLatencyUs', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLatencyUs', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActivePredictionFailureRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidatePredictionFailureRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveSaturationRate', '0');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateSaturationRate', '0');")) {
+            return false;
+        }
     }
 
     LOG_INFO(bsIndex, "Schema migrations complete: version %d", current);
