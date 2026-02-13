@@ -853,11 +853,16 @@ bool LearningEngine::passesResourceBudgetsUnlocked(QString* reasonOut) const
     return true;
 }
 
-bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* errorOut)
+bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event,
+                                         QString* errorOut,
+                                         bool* persistedOut)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (errorOut) {
         errorOut->clear();
+    }
+    if (persistedOut) {
+        *persistedOut = false;
     }
 
     if (!m_db) {
@@ -1016,9 +1021,13 @@ bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* er
     sqlite3_bind_double(stmt, 16, nowSec);
 
     const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    const bool inserted = ok && sqlite3_changes(m_db) > 0;
     sqlite3_finalize(stmt);
     if (!ok && errorOut) {
         *errorOut = QStringLiteral("insert_behavior_event_failed");
+    }
+    if (ok && persistedOut) {
+        *persistedOut = inserted;
     }
     return ok;
 }

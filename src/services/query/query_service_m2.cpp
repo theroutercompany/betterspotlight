@@ -333,9 +333,10 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
     event.privacyFlags.denylistedApp = privacyFlags.value(QStringLiteral("denylistedApp")).toBool(false);
     event.privacyFlags.redacted = privacyFlags.value(QStringLiteral("redacted")).toBool(false);
 
+    bool eventPersisted = false;
     QString error;
-    const bool recorded = m_learningEngine->recordBehaviorEvent(event, &error);
-    if (!recorded) {
+    const bool ok = m_learningEngine->recordBehaviorEvent(event, &error, &eventPersisted);
+    if (!ok) {
         return IpcMessage::makeError(id, IpcErrorCode::InternalError,
                                      error.isEmpty()
                                          ? QStringLiteral("Failed to record behavior event")
@@ -344,7 +345,7 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
 
     bool attributedPositive = false;
     const QString query = params.value(QStringLiteral("query")).toString();
-    if (!query.trimmed().isEmpty() && event.itemId > 0) {
+    if (eventPersisted && !query.trimmed().isEmpty() && event.itemId > 0) {
         const QString eventTypeLower = event.eventType.trimmed().toLower();
         if (eventTypeLower == QLatin1String("open")
             || eventTypeLower == QLatin1String("select")
@@ -366,7 +367,8 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
     const bool idleCycleTriggered = m_learningEngine->maybeRunIdleCycle(&idleReason);
 
     QJsonObject result;
-    result[QStringLiteral("recorded")] = true;
+    result[QStringLiteral("recorded")] = eventPersisted;
+    result[QStringLiteral("filteredOut")] = !eventPersisted;
     result[QStringLiteral("attributedPositive")] = attributedPositive;
     result[QStringLiteral("idleCycleTriggered")] = idleCycleTriggered;
     result[QStringLiteral("idleCycleReason")] = idleReason;
@@ -537,7 +539,11 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
                                                   captureWindowTitleHashEnabled,
                                                   captureBrowserHostHashEnabled);
     if (!ok) {
-        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
+        const QString normalizedError = error.trimmed().toLower();
+        const IpcErrorCode code = normalizedError.startsWith(QStringLiteral("invalid_"))
+            ? IpcErrorCode::InvalidParams
+            : IpcErrorCode::InternalError;
+        return IpcMessage::makeError(id, code,
                                      error.isEmpty()
                                          ? QStringLiteral("Failed to update learning consent")
                                          : error);

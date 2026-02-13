@@ -28,7 +28,9 @@ public:
 
     void noteUserActivity();
 
-    bool recordBehaviorEvent(const BehaviorEvent& event, QString* errorOut = nullptr);
+    bool recordBehaviorEvent(const BehaviorEvent& event,
+                             QString* errorOut = nullptr,
+                             bool* persistedOut = nullptr);
     bool setConsent(bool behaviorStreamEnabled,
                     bool learningEnabled,
                     bool learningPauseOnUserInput,

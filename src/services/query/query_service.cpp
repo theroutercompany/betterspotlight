@@ -438,7 +438,16 @@ QueryService::QueryService(QObject* parent)
     : ServiceBase(QStringLiteral("query"), parent)
 {
     LOG_INFO(bsIpc, "QueryService created");
-    m_learningSchedulerTimer.setInterval(15000);
+    int schedulerIntervalMs = 15000;
+    if (qEnvironmentVariableIsSet("BS_TEST_LEARNING_SCHEDULER_INTERVAL_MS")) {
+        bool ok = false;
+        const int parsed =
+            qEnvironmentVariableIntValue("BS_TEST_LEARNING_SCHEDULER_INTERVAL_MS", &ok);
+        if (ok) {
+            schedulerIntervalMs = std::clamp(parsed, 100, 60000);
+        }
+    }
+    m_learningSchedulerTimer.setInterval(schedulerIntervalMs);
     m_learningSchedulerTimer.setSingleShot(false);
     QObject::connect(&m_learningSchedulerTimer, &QTimer::timeout, this, [this]() {
         if (!m_learningEngine) {
