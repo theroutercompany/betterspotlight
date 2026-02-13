@@ -102,6 +102,7 @@ private slots:
     void testPositiveAttributionPrefersContextEvent();
     void testHealthSnapshotReportsAttributionAndCoverage();
     void testTriggerLearningCycleRejectsAttributionGate();
+    void testTriggerLearningCycleAppliesNegativeSampling();
     void testTriggerLearningCyclePromotesModel();
     void testCoreMlBootstrapSeededFromEnvOverride();
 };
@@ -658,6 +659,62 @@ void TestLearningEngine::testTriggerLearningCycleRejectsAttributionGate()
     QCOMPARE(gate.value(QStringLiteral("minPositiveExamples")).toInt(), 80);
     QVERIFY(qAbs(gate.value(QStringLiteral("minAttributedRate")).toDouble() - 0.5) < 0.0001);
     QVERIFY(qAbs(gate.value(QStringLiteral("minContextDigestRate")).toDouble() - 0.3) < 0.0001);
+}
+
+void TestLearningEngine::testTriggerLearningCycleAppliesNegativeSampling()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("20"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerNegativeSampleRatio"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                  QStringLiteral("1200"));
+
+    // 30 positives + 120 negatives.
+    for (int i = 0; i < 150; ++i) {
+        const int label = i < 30 ? 1 : 0;
+        const double f0 = label > 0 ? 0.85 : 0.15;
+        const double f1 = label > 0 ? 0.75 : 0.25;
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("sample-neg-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          f0,
+                          f1,
+                          label > 0 ? 1.0 : 0.0);
+    }
+
+    QString reason;
+    engine.triggerLearningCycle(true, &reason);
+
+    const QJsonObject health = engine.healthSnapshot();
+    // Ratio=1.0 keeps all positives and samples negatives up to positive count.
+    QCOMPARE(health.value(QStringLiteral("lastSampleCount")).toInt(), 60);
+    QVERIFY(qAbs(health.value(QStringLiteral("negativeSampleRatio")).toDouble() - 1.0) < 0.0001);
+    QCOMPARE(health.value(QStringLiteral("maxTrainingBatchSize")).toInt(), 1200);
 }
 
 void TestLearningEngine::testTriggerLearningCyclePromotesModel()

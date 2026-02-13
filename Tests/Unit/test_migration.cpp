@@ -143,6 +143,30 @@ void TestMigration::testApplyMigrationsUpToV4()
              QStringLiteral("1"));
     sqlite3_finalize(stmt);
 
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerNegativeSampleRatio';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawNegativeSampleRatio =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawNegativeSampleRatio ? rawNegativeSampleRatio : ""),
+             QStringLiteral("3.0"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerMaxTrainingBatchSize';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawMaxTrainingBatch =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawMaxTrainingBatch ? rawMaxTrainingBatch : ""),
+             QStringLiteral("1200"));
+    sqlite3_finalize(stmt);
+
     sqlite3_close(db);
 }
 
