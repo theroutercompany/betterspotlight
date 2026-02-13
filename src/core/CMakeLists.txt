@@ -19,6 +19,7 @@ add_subdirectory(models)
 add_subdirectory(ranking)
 
 add_subdirectory(feedback)
+add_subdirectory(learning)
 
 add_library(betterspotlight-core STATIC
     index/sqlite_store.cpp
@@ -47,6 +48,7 @@ target_link_libraries(betterspotlight-core PUBLIC
     betterspotlight-core-ranking
     betterspotlight-core-indexing
     betterspotlight-core-feedback
+    betterspotlight-core-learning
     betterspotlight-core-models
     sqlite3
     Qt6::Core

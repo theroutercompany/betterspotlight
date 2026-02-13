@@ -163,6 +163,77 @@ CREATE INDEX IF NOT EXISTS idx_interactions_query ON interactions(query_normaliz
 CREATE INDEX IF NOT EXISTS idx_interactions_item ON interactions(item_id);
 CREATE INDEX IF NOT EXISTS idx_interactions_timestamp ON interactions(timestamp);
 
+CREATE TABLE IF NOT EXISTS behavior_events_v1 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    timestamp REAL NOT NULL,
+    source TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    app_bundle_id TEXT,
+    window_title_hash TEXT,
+    item_path TEXT,
+    item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+    browser_host_hash TEXT,
+    input_meta TEXT,
+    mouse_meta TEXT,
+    privacy_flags TEXT,
+    attribution_confidence REAL NOT NULL DEFAULT 0.0,
+    context_event_id TEXT,
+    activity_digest TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_behavior_events_ts
+    ON behavior_events_v1(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_behavior_events_item
+    ON behavior_events_v1(item_id);
+CREATE INDEX IF NOT EXISTS idx_behavior_events_app
+    ON behavior_events_v1(app_bundle_id);
+
+CREATE TABLE IF NOT EXISTS training_examples_v1 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sample_id TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    query TEXT,
+    query_normalized TEXT NOT NULL,
+    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    label INTEGER,
+    weight REAL NOT NULL DEFAULT 1.0,
+    features_json TEXT NOT NULL,
+    source_event_id TEXT,
+    app_bundle_id TEXT,
+    context_event_id TEXT,
+    activity_digest TEXT,
+    attribution_confidence REAL NOT NULL DEFAULT 0.0,
+    consumed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_examples_query
+    ON training_examples_v1(query_normalized);
+CREATE INDEX IF NOT EXISTS idx_training_examples_item
+    ON training_examples_v1(item_id);
+CREATE INDEX IF NOT EXISTS idx_training_examples_label
+    ON training_examples_v1(label, consumed, created_at);
+CREATE INDEX IF NOT EXISTS idx_training_examples_created
+    ON training_examples_v1(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS replay_reservoir_v1 (
+    slot INTEGER PRIMARY KEY,
+    sample_id TEXT NOT NULL,
+    label INTEGER NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    features_json TEXT NOT NULL,
+    query_normalized TEXT,
+    item_id INTEGER,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learning_model_state_v1 (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     file_name,
     file_path,
@@ -179,7 +250,7 @@ constexpr const char* kFts5WeightConfig =
 
 // Default settings rows (doc 04 Section 10.1)
 constexpr const char* kDefaultSettings = R"(
-INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('schema_version', '4');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_full_index_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('last_vacuum_at', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('max_file_size', '104857600');
@@ -237,8 +308,44 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerStage2Max', '12');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('personalizedLtrEnabled', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onboardingCompleted', '0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('lastFeedbackAggregation', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('behaviorStreamEnabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningEnabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('behaviorRawRetentionDays', '30');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningIdleCpuPctMax', '35');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '256');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningThermalMax', '2');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningPauseOnUserInput', '1');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerBlendAlpha', '0.15');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplayCapacity', '4000');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMinExamples', '120');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFreshTrainingLimit', '1200');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplaySampleLimit', '1200');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerEpochs', '3');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLearningRate', '0.05');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerL2', '0.0001');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerNegativeStaleSeconds', '30');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplaySeenCount', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerCyclesRun', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerCyclesSucceeded', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerCyclesRejected', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleStatus', 'never_run');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleReason', '');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCycleAtMs', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLoss', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLoss', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastSampleCount', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastPromoted', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastManual', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerActiveVersion', '');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFallbackMissingModel', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFallbackLearningDisabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFallbackResourceBudget', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastPruneAtMs', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerCoreMlReady', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerCoreMlInitError', '');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningDenylistApps', '[]');
 )";
 
-constexpr int kCurrentSchemaVersion = 3;
+constexpr int kCurrentSchemaVersion = 4;
 
 } // namespace bs

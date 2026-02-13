@@ -60,6 +60,9 @@ option(BETTERSPOTLIGHT_FETCH_MODELS
 option(BETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL
        "Fetch the 1024d max-quality embedding model as part of model asset bootstrap"
        OFF)
+option(BETTERSPOTLIGHT_GENERATE_ONLINE_RANKER_BOOTSTRAP
+       "Generate CoreML online-ranker bootstrap artifacts (requires coremltools + xcrun)"
+       OFF)
 if(APPLE)
     option(BETTERSPOTLIGHT_PREFER_COREML
            "Prefer CoreML execution provider on Apple Silicon when available"
@@ -96,6 +99,21 @@ if(BETTERSPOTLIGHT_FETCH_MODELS)
         COMMENT "Ensuring embedding model assets are available in data/models"
         VERBATIM
     )
+endif()
+
+add_custom_target(betterspotlight-generate-online-ranker-bootstrap
+    COMMAND ${CMAKE_SOURCE_DIR}/tools/generate_online_ranker_coreml.py
+            --output-root ${BETTERSPOTLIGHT_MODELS_DIR}/online-ranker-v1/bootstrap
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Generating CoreML online ranker bootstrap artifacts"
+    VERBATIM
+)
+
+if(BETTERSPOTLIGHT_GENERATE_ONLINE_RANKER_BOOTSTRAP)
+    if(TARGET betterspotlight-fetch-models)
+        add_dependencies(betterspotlight-fetch-models
+            betterspotlight-generate-online-ranker-bootstrap)
+    endif()
 endif()
 
 add_custom_target(betterspotlight-benchmark-semantic-shortlist

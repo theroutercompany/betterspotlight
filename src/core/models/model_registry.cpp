@@ -57,6 +57,43 @@ bool copyIfMissing(const QString& sourcePath, const QString& destPath)
     return QFile::copy(sourcePath, destPath);
 }
 
+bool copyDirectoryIfMissing(const QString& sourcePath, const QString& destPath)
+{
+    if (QFileInfo(destPath).isDir() && QDir(destPath).exists()) {
+        const QDir existing(destPath);
+        if (!existing.entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries | QDir::Hidden | QDir::System)
+                 .isEmpty()) {
+            return true;
+        }
+    }
+
+    const QDir sourceDir(sourcePath);
+    if (!sourceDir.exists()) {
+        return false;
+    }
+
+    if (!QDir().mkpath(destPath)) {
+        return false;
+    }
+
+    const QFileInfoList entries = sourceDir.entryInfoList(
+        QDir::NoDotAndDotDot | QDir::AllEntries | QDir::Hidden | QDir::System);
+    for (const QFileInfo& entry : entries) {
+        const QString destinationEntry = QDir(destPath).filePath(entry.fileName());
+        if (entry.isDir()) {
+            if (!copyDirectoryIfMissing(entry.filePath(), destinationEntry)) {
+                return false;
+            }
+            continue;
+        }
+        if (!copyIfMissing(entry.filePath(), destinationEntry)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 ModelRegistry::ModelRegistry(const QString& modelsDir)
@@ -226,6 +263,25 @@ bool ModelRegistry::ensureWritableModelsSeeded(QString* errorOut)
     if (!copyIfMissing(smallSrc, smallDst)) {
         LOG_WARN(bsCore, "ModelRegistry: bootstrap embedding model missing at %s",
                  qPrintable(smallSrc));
+    }
+
+    const QString onlineRankerSrc =
+        sourceDir + QStringLiteral("/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc");
+    const QString onlineRankerDst =
+        destDir + QStringLiteral("/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc");
+    if (!copyDirectoryIfMissing(onlineRankerSrc, onlineRankerDst)) {
+        LOG_INFO(bsCore,
+                 "ModelRegistry: online ranker bootstrap model not present at %s (optional)",
+                 qPrintable(onlineRankerSrc));
+    }
+    const QString onlineRankerMetadataSrc =
+        sourceDir + QStringLiteral("/online-ranker-v1/bootstrap/metadata.json");
+    const QString onlineRankerMetadataDst =
+        destDir + QStringLiteral("/online-ranker-v1/bootstrap/metadata.json");
+    if (!copyIfMissing(onlineRankerMetadataSrc, onlineRankerMetadataDst)) {
+        LOG_INFO(bsCore,
+                 "ModelRegistry: online ranker bootstrap metadata not present at %s (optional)",
+                 qPrintable(onlineRankerMetadataSrc));
     }
 
     LOG_INFO(bsCore, "ModelRegistry: writable model cache ready at %s",

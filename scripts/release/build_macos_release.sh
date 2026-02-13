@@ -17,6 +17,7 @@ NOTARIZE="${BS_NOTARIZE:-0}"
 SKIP_BUILD="${BS_SKIP_BUILD:-0}"
 MACDEPLOYQT_TIMEOUT_SEC="${BS_MACDEPLOYQT_TIMEOUT_SEC:-600}"
 ADHOC_SIGN_WHEN_UNSIGNED="${BS_ADHOC_SIGN_WHEN_UNSIGNED:-1}"
+REQUIRE_ONLINE_RANKER_BOOTSTRAP="${BS_REQUIRE_ONLINE_RANKER_BOOTSTRAP:-0}"
 
 APP_BUILD_PATH="$BUILD_DIR/src/app/betterspotlight.app"
 APP_STAGE_PATH="$OUTPUT_DIR/${APP_NAME}.app"
@@ -148,6 +149,21 @@ function verify_bundle_contents() {
             exit 1
         fi
     done
+
+    local ranker_model_dir="$models_dir/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"
+    local ranker_metadata="$models_dir/online-ranker-v1/bootstrap/metadata.json"
+    if bool_is_true "$REQUIRE_ONLINE_RANKER_BOOTSTRAP"; then
+        if [[ ! -d "$ranker_model_dir" ]]; then
+            echo "Error: required online-ranker CoreML bootstrap missing: $ranker_model_dir" >&2
+            exit 1
+        fi
+        if [[ ! -s "$ranker_metadata" ]]; then
+            echo "Error: required online-ranker metadata missing: $ranker_metadata" >&2
+            exit 1
+        fi
+    elif [[ ! -d "$ranker_model_dir" || ! -s "$ranker_metadata" ]]; then
+        echo "Warning: online-ranker CoreML bootstrap not bundled; fallback SGD ranker will be used." >&2
+    fi
 }
 
 function verify_qt_platform_plugins() {
