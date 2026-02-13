@@ -97,12 +97,17 @@ private slots:
     void testRecordBehaviorEventWithConsent();
     void testRecordBehaviorEventDenylistFilter();
     void testRecordBehaviorEventRedactedFilter();
+    void testRecordBehaviorEventSecureAndPrivateFilters();
     void testRecordBehaviorEventCaptureScopeFilter();
+    void testBehaviorEventPrunesExpiredRowsOnWrite();
     void testExposureAndPositiveAttribution();
     void testPositiveAttributionPrefersContextEvent();
     void testHealthSnapshotReportsAttributionAndCoverage();
     void testTriggerLearningCycleRejectsAttributionGate();
     void testTriggerLearningCycleAppliesNegativeSampling();
+    void testNegativeSamplingTruncatesAtBatchCap();
+    void testReplayReservoirCapacityAndSlotsBounded();
+    void testRepeatedIdleStyleCyclesKeepBoundedState();
     void testEndToEndExposureAttributionTrainPromote();
     void testScoreBoostFallsBackWhenModelsMissingOrCorrupt();
     void testTriggerLearningCyclePromotesModel();
@@ -218,6 +223,48 @@ void TestLearningEngine::testRecordBehaviorEventRedactedFilter()
     sqlite3_finalize(stmt);
 }
 
+void TestLearningEngine::testRecordBehaviorEventSecureAndPrivateFilters()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    bs::BehaviorEvent secureEvent;
+    secureEvent.eventId = QStringLiteral("evt-secure-1");
+    secureEvent.source = QStringLiteral("system_collector");
+    secureEvent.eventType = QStringLiteral("input_activity");
+    secureEvent.privacyFlags.secureInput = true;
+    secureEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(secureEvent));
+
+    bs::BehaviorEvent privateEvent;
+    privateEvent.eventId = QStringLiteral("evt-private-1");
+    privateEvent.source = QStringLiteral("system_collector");
+    privateEvent.eventType = QStringLiteral("input_activity");
+    privateEvent.privacyFlags.privateContext = true;
+    privateEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(privateEvent));
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM behavior_events_v1",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 0);
+    sqlite3_finalize(stmt);
+}
+
 void TestLearningEngine::testRecordBehaviorEventCaptureScopeFilter()
 {
     QTemporaryDir tempDir;
@@ -310,6 +357,82 @@ void TestLearningEngine::testRecordBehaviorEventCaptureScopeFilter()
     QVERIFY(!scope.value(QStringLiteral("searchEventsEnabled")).toBool(true));
     QVERIFY(!scope.value(QStringLiteral("windowTitleHashEnabled")).toBool(true));
     QVERIFY(!scope.value(QStringLiteral("browserHostHashEnabled")).toBool(true));
+}
+
+void TestLearningEngine::testBehaviorEventPrunesExpiredRowsOnWrite()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("behaviorRawRetentionDays"),
+                  QStringLiteral("1"));
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    const double nowSec = static_cast<double>(QDateTime::currentSecsSinceEpoch());
+    const double staleSec = nowSec - (3.0 * 24.0 * 60.0 * 60.0);
+
+    sqlite3_stmt* insertStmt = nullptr;
+    const char* insertSql = R"(
+        INSERT INTO behavior_events_v1 (
+            event_id,
+            timestamp,
+            source,
+            event_type,
+            app_bundle_id,
+            input_meta,
+            mouse_meta,
+            privacy_flags,
+            attribution_confidence,
+            created_at
+        ) VALUES ('evt-stale', ?1, 'system_collector', 'input_activity', 'com.example.old',
+                  '{}', '{}', '{}', 0.5, ?2)
+    )";
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(), insertSql, -1, &insertStmt, nullptr), SQLITE_OK);
+    sqlite3_bind_double(insertStmt, 1, staleSec);
+    sqlite3_bind_double(insertStmt, 2, staleSec);
+    QCOMPARE(sqlite3_step(insertStmt), SQLITE_DONE);
+    sqlite3_finalize(insertStmt);
+
+    sqlite3_stmt* countStmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM behavior_events_v1",
+                                -1,
+                                &countStmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(countStmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(countStmt, 0), 1);
+    sqlite3_finalize(countStmt);
+
+    bs::BehaviorEvent freshEvent;
+    freshEvent.eventId = QStringLiteral("evt-fresh");
+    freshEvent.source = QStringLiteral("system_collector");
+    freshEvent.eventType = QStringLiteral("app_activated");
+    freshEvent.appBundleId = QStringLiteral("com.example.new");
+    freshEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(freshEvent));
+
+    sqlite3_stmt* verifyStmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT event_id FROM behavior_events_v1 ORDER BY event_id ASC",
+                                -1,
+                                &verifyStmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(verifyStmt), SQLITE_ROW);
+    const char* onlyEvent = reinterpret_cast<const char*>(sqlite3_column_text(verifyStmt, 0));
+    QCOMPARE(QString::fromUtf8(onlyEvent ? onlyEvent : ""), QStringLiteral("evt-fresh"));
+    QCOMPARE(sqlite3_step(verifyStmt), SQLITE_DONE);
+    sqlite3_finalize(verifyStmt);
 }
 
 void TestLearningEngine::testExposureAndPositiveAttribution()
@@ -738,6 +861,283 @@ void TestLearningEngine::testTriggerLearningCycleAppliesNegativeSampling()
     QVERIFY(health.contains(QStringLiteral("lastCandidateLatencyUs")));
     QVERIFY(health.contains(QStringLiteral("lastCandidatePredictionFailureRate")));
     QVERIFY(health.contains(QStringLiteral("lastCandidateSaturationRate")));
+}
+
+void TestLearningEngine::testNegativeSamplingTruncatesAtBatchCap()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("20"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerNegativeSampleRatio"),
+                  QStringLiteral("3.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                  QStringLiteral("100"));
+
+    // 150 positives + 150 negatives with batch cap 100 => sampled batch truncates to 100.
+    for (int i = 0; i < 300; ++i) {
+        const int label = i < 150 ? 1 : 0;
+        const double f0 = label > 0 ? 0.80 : 0.20;
+        const double f1 = label > 0 ? 0.70 : 0.30;
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("sample-cap-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          f0,
+                          f1,
+                          label > 0 ? 1.0 : 0.0);
+    }
+
+    QString reason;
+    engine.triggerLearningCycle(true, &reason);
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("lastSampleCount")).toInt(), 100);
+    QCOMPARE(health.value(QStringLiteral("maxTrainingBatchSize")).toInt(), 100);
+
+    const QJsonObject lastBatch = health.value(QStringLiteral("lastBatchAttribution")).toObject();
+    QCOMPARE(lastBatch.value(QStringLiteral("positiveExamples")).toInt(), 100);
+    QCOMPARE(lastBatch.value(QStringLiteral("contextHits")).toInt(), 100);
+    QCOMPARE(lastBatch.value(QStringLiteral("digestHits")).toInt(), 0);
+    QCOMPARE(lastBatch.value(QStringLiteral("queryOnlyHits")).toInt(), 0);
+}
+
+void TestLearningEngine::testReplayReservoirCapacityAndSlotsBounded()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("20"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerReplayCapacity"),
+                  QStringLiteral("256"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerNegativeSampleRatio"),
+                  QStringLiteral("3.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                  QStringLiteral("1200"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("1000000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("1.0"));
+
+    // 600 rows so replay insert path exceeds capacity and executes replacement/drop logic.
+    for (int i = 0; i < 600; ++i) {
+        const int label = (i % 3 == 0) ? 1 : 0;
+        const double f0 = label > 0 ? 0.75 : 0.25;
+        const double f1 = label > 0 ? 0.65 : 0.35;
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("sample-replay-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          f0,
+                          f1,
+                          label > 0 ? 1.0 : 0.0);
+    }
+
+    QString reason;
+    const bool promoted = engine.triggerLearningCycle(true, &reason);
+    QVERIFY2(promoted, qPrintable(reason));
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("replayCapacity")).toInt(), 256);
+    QCOMPARE(health.value(QStringLiteral("replaySize")).toInt(), 256);
+    QVERIFY(health.value(QStringLiteral("replaySeenCount")).toInteger() >= 600);
+    QVERIFY(health.value(QStringLiteral("replaySeenCount")).toInteger()
+            > health.value(QStringLiteral("replaySize")).toInteger());
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*), COUNT(DISTINCT slot), "
+                                "MIN(slot), MAX(slot) "
+                                "FROM replay_reservoir_v1",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 256);
+    QCOMPARE(sqlite3_column_int(stmt, 1), 256);
+    QCOMPARE(sqlite3_column_int(stmt, 2), 0);
+    QCOMPARE(sqlite3_column_int(stmt, 3), 255);
+    sqlite3_finalize(stmt);
+}
+
+void TestLearningEngine::testRepeatedIdleStyleCyclesKeepBoundedState()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, false, {}));
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("20"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerNegativeSampleRatio"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                  QStringLiteral("160"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerReplayCapacity"),
+                  QStringLiteral("64"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                  QStringLiteral("5"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                  QStringLiteral("1"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                  QStringLiteral("0.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                  QStringLiteral("0.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("1000000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("learningIdleCpuPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("learningMemMbMax"),
+                  QStringLiteral("4096"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("learningThermalMax"),
+                  QStringLiteral("10"));
+
+    int sampleOrdinal = 0;
+    for (int cycle = 0; cycle < 14; ++cycle) {
+        // Keep injecting fresh labeled rows so repeated non-manual cycles exercise bounded state.
+        for (int i = 0; i < 96; ++i) {
+            const int label = ((i + cycle) % 2 == 0) ? 1 : 0;
+            const double f0 = label > 0 ? 0.78 : 0.22;
+            const double f1 = label > 0 ? 0.68 : 0.32;
+            insertTrainingRow(store.rawDb(),
+                              QStringLiteral("sample-loop-%1").arg(sampleOrdinal++),
+                              itemIdOpt.value(),
+                              label,
+                              f0,
+                              f1,
+                              label > 0 ? 1.0 : 0.0);
+        }
+
+        QString reason;
+        engine.triggerLearningCycle(false, &reason);
+        QVERIFY(!reason.trimmed().isEmpty());
+    }
+
+    const QJsonObject health = engine.healthSnapshot();
+    QVERIFY(health.value(QStringLiteral("cyclesRun")).toInt(0) >= 10);
+    QCOMPARE(health.value(QStringLiteral("replayCapacity")).toInt(), 64);
+    QVERIFY(health.value(QStringLiteral("replaySize")).toInt(0) <= 64);
+    QCOMPARE(health.value(QStringLiteral("recentLearningCyclesLimit")).toInt(), 5);
+
+    const QJsonArray recent = health.value(QStringLiteral("recentLearningCycles")).toArray();
+    QCOMPARE(recent.size(), 5);
+    for (int i = 1; i < recent.size(); ++i) {
+        const qint64 prevIndex =
+            recent.at(i - 1).toObject().value(QStringLiteral("cycleIndex")).toInteger(0);
+        const qint64 currentIndex =
+            recent.at(i).toObject().value(QStringLiteral("cycleIndex")).toInteger(0);
+        QVERIFY(prevIndex >= currentIndex);
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*), COUNT(DISTINCT slot), "
+                                "COALESCE(MIN(slot), 0), COALESCE(MAX(slot), 0) "
+                                "FROM replay_reservoir_v1",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const int replayCount = sqlite3_column_int(stmt, 0);
+    const int distinctSlots = sqlite3_column_int(stmt, 1);
+    const int minSlot = sqlite3_column_int(stmt, 2);
+    const int maxSlot = sqlite3_column_int(stmt, 3);
+    QVERIFY(replayCount <= 64);
+    QCOMPARE(distinctSlots, replayCount);
+    if (replayCount > 0) {
+        QVERIFY(minSlot >= 0);
+        QVERIFY(maxSlot < 64);
+    }
+    sqlite3_finalize(stmt);
 }
 
 void TestLearningEngine::testEndToEndExposureAttributionTrainPromote()
