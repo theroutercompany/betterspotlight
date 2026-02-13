@@ -36,6 +36,21 @@ bool envFlagEnabledInternal(const char* key, bool fallback = false)
         || value == QLatin1String("on");
 }
 
+QString normalizedBundleId(QString value)
+{
+    value = value.trimmed();
+    return value.isEmpty() ? QString() : value.toLower();
+}
+
+QString metadataDigest(const QByteArray& seed)
+{
+    if (seed.isEmpty()) {
+        return {};
+    }
+    return QString::fromUtf8(
+        QCryptographicHash::hash(seed, QCryptographicHash::Sha256).toHex());
+}
+
 } // namespace
 
 SearchController::SearchController(QObject* parent)
@@ -122,6 +137,56 @@ void SearchController::recordBehaviorEvent(const QJsonObject& event)
     const QString existingSource = payload.value(QStringLiteral("source")).toString().trimmed();
     if (existingSource.isEmpty()) {
         payload[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+    }
+    const QString source = payload.value(QStringLiteral("source"))
+                               .toString()
+                               .trimmed()
+                               .toLower();
+    const QString eventType = payload.value(QStringLiteral("eventType"))
+                                  .toString()
+                                  .trimmed()
+                                  .toLower();
+    const QString eventId = payload.value(QStringLiteral("eventId")).toString().trimmed();
+
+    const QString bundleId = normalizedBundleId(
+        payload.value(QStringLiteral("appBundleId")).toString());
+    if (!bundleId.isEmpty()) {
+        m_lastFrontmostAppBundleId = bundleId;
+        payload[QStringLiteral("appBundleId")] = bundleId;
+    } else if (source == QLatin1String("betterspotlight")
+               && !m_lastFrontmostAppBundleId.isEmpty()) {
+        payload[QStringLiteral("appBundleId")] = m_lastFrontmostAppBundleId;
+    }
+
+    QString activityDigest = payload.value(QStringLiteral("activityDigest")).toString().trimmed();
+    if (activityDigest.isEmpty()) {
+        QByteArray seed = eventType.toUtf8();
+        seed += '|';
+        seed += bundleId.toUtf8();
+        seed += '|';
+        seed += eventId.toUtf8();
+        seed += '|';
+        seed += QString::number(payload.value(QStringLiteral("timestamp"))
+                                    .toVariant()
+                                    .toLongLong())
+                    .toUtf8();
+        activityDigest = metadataDigest(seed).left(32);
+        if (!activityDigest.isEmpty()) {
+            payload[QStringLiteral("activityDigest")] = activityDigest;
+        }
+    }
+
+    if (source != QLatin1String("betterspotlight")) {
+        if (!eventId.isEmpty()) {
+            m_lastSystemEventId = eventId;
+        }
+        if (!activityDigest.isEmpty()) {
+            m_lastSystemActivityDigest = activityDigest.left(32);
+        }
+        if (eventType == QLatin1String("app_activated")
+            && !bundleId.isEmpty()) {
+            m_lastFrontmostAppBundleId = bundleId;
+        }
     }
 
     SocketClient* client = ensureQueryClient(150);
@@ -241,6 +306,16 @@ void SearchController::openResult(int index)
         interactionParams[QStringLiteral("matchType")] =
             item.value(QStringLiteral("matchType")).toString();
         interactionParams[QStringLiteral("resultPosition")] = resultIndex + 1;
+        if (!m_lastFrontmostAppBundleId.isEmpty()) {
+            interactionParams[QStringLiteral("frontmostApp")] = m_lastFrontmostAppBundleId;
+            interactionParams[QStringLiteral("appBundleId")] = m_lastFrontmostAppBundleId;
+        }
+        if (!m_lastContextEventId.isEmpty()) {
+            interactionParams[QStringLiteral("contextEventId")] = m_lastContextEventId;
+        }
+        if (!m_lastActivityDigest.isEmpty()) {
+            interactionParams[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
+        }
         client->sendNotification(QStringLiteral("record_interaction"), interactionParams);
 
         QJsonObject behaviorParams;
@@ -254,6 +329,9 @@ void SearchController::openResult(int index)
         behaviorParams[QStringLiteral("itemId")] =
             item.value(QStringLiteral("itemId")).toLongLong();
         behaviorParams[QStringLiteral("itemPath")] = path;
+        if (!m_lastFrontmostAppBundleId.isEmpty()) {
+            behaviorParams[QStringLiteral("appBundleId")] = m_lastFrontmostAppBundleId;
+        }
         if (!m_lastContextEventId.isEmpty()) {
             behaviorParams[QStringLiteral("contextEventId")] = m_lastContextEventId;
         }
@@ -568,11 +646,26 @@ void SearchController::executeSearch()
     params[QStringLiteral("limit")] = 20;
     QJsonObject context;
     m_lastContextEventId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_lastActivityDigest = QString::fromUtf8(
-        QCryptographicHash::hash(trimmedQuery.toUtf8(), QCryptographicHash::Sha256).toHex());
+    QByteArray digestSeed = trimmedQuery.toUtf8();
+    if (!m_lastFrontmostAppBundleId.isEmpty()) {
+        digestSeed += '|';
+        digestSeed += m_lastFrontmostAppBundleId.toUtf8();
+    }
+    if (!m_lastSystemActivityDigest.isEmpty()) {
+        digestSeed += '|';
+        digestSeed += m_lastSystemActivityDigest.toUtf8();
+    }
+    if (!m_lastSystemEventId.isEmpty()) {
+        digestSeed += '|';
+        digestSeed += m_lastSystemEventId.toUtf8();
+    }
+    m_lastActivityDigest = metadataDigest(digestSeed);
     context[QStringLiteral("contextEventId")] = m_lastContextEventId;
     context[QStringLiteral("contextFeatureVersion")] = 1;
     context[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
+    if (!m_lastFrontmostAppBundleId.isEmpty()) {
+        context[QStringLiteral("frontmostAppBundleId")] = m_lastFrontmostAppBundleId;
+    }
     if (m_clipboardSignalsEnabled) {
         if (m_clipboardBasenameSignal.has_value()) {
             context[QStringLiteral("clipboardBasename")] = *m_clipboardBasenameSignal;
@@ -598,6 +691,9 @@ void SearchController::executeSearch()
         behaviorParams[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
         behaviorParams[QStringLiteral("contextEventId")] = m_lastContextEventId;
         behaviorParams[QStringLiteral("query")] = trimmedQuery;
+        if (!m_lastFrontmostAppBundleId.isEmpty()) {
+            behaviorParams[QStringLiteral("appBundleId")] = m_lastFrontmostAppBundleId;
+        }
         QJsonObject inputMeta;
         inputMeta[QStringLiteral("keyEventCount")] = trimmedQuery.size();
         inputMeta[QStringLiteral("shortcutCount")] = 0;

@@ -100,12 +100,14 @@ struct SystemInteractionCollector::Impl {
         health[QStringLiteral("globalMonitorAttached")] = (globalMonitor != nil);
         health[QStringLiteral("appObserverAttached")] = (appObserver != nil);
         health[QStringLiteral("secureInputEnabled")] = IsSecureEventInputEnabled();
+        health[QStringLiteral("captureAppActivityEnabled")] = captureAppActivityEnabled;
+        health[QStringLiteral("captureInputActivityEnabled")] = captureInputActivityEnabled;
         emit owner->collectorHealthChanged(health);
     }
 
     void emitAppActivatedEvent(NSRunningApplication* app)
     {
-        if (!enabled) {
+        if (!enabled || !captureAppActivityEnabled) {
             return;
         }
 
@@ -145,6 +147,10 @@ struct SystemInteractionCollector::Impl {
 
         if (keyEvents == 0 && shortcuts == 0 && scrolls == 0
             && clicks == 0 && drags == 0 && moveDistance <= 0.0) {
+            return;
+        }
+
+        if (!captureInputActivityEnabled) {
             return;
         }
 
@@ -287,8 +293,23 @@ struct SystemInteractionCollector::Impl {
         emitHealth();
     }
 
+    void setCaptureScope(bool appActivityEnabled, bool inputActivityEnabled)
+    {
+        const bool nextAppActivityEnabled = appActivityEnabled;
+        const bool nextInputActivityEnabled = inputActivityEnabled;
+        if (captureAppActivityEnabled == nextAppActivityEnabled
+            && captureInputActivityEnabled == nextInputActivityEnabled) {
+            return;
+        }
+        captureAppActivityEnabled = nextAppActivityEnabled;
+        captureInputActivityEnabled = nextInputActivityEnabled;
+        emitHealth();
+    }
+
     SystemInteractionCollector* owner = nullptr;
     bool enabled = false;
+    bool captureAppActivityEnabled = true;
+    bool captureInputActivityEnabled = true;
     id globalMonitor = nil;
     id appObserver = nil;
     QTimer flushTimer;
@@ -327,5 +348,9 @@ void SystemInteractionCollector::setEnabled(bool enabled)
     }
 }
 
-} // namespace bs
+void SystemInteractionCollector::setCaptureScope(bool appActivityEnabled, bool inputActivityEnabled)
+{
+    m_impl->setCaptureScope(appActivityEnabled, inputActivityEnabled);
+}
 
+} // namespace bs

@@ -13,6 +13,7 @@
 #include <optional>
 #include <QFileSystemWatcher>
 #include <QHash>
+#include <QTimer>
 #include <QStringList>
 #include <shared_mutex>
 #include <thread>
@@ -162,6 +163,9 @@ private:
     void recordInferenceFallback(const QString& role);
     void recordInferenceConnected(bool connected);
     QJsonObject inferenceHealthSnapshot();
+    void noteLearningSchedulerOutcome(bool promoted, const QString& reason);
+    QJsonObject learningSchedulerSnapshot() const;
+    QJsonObject learningHealthSnapshot() const;
 
     // Initialize M2 modules after store is opened.
     void initM2Modules();
@@ -191,6 +195,14 @@ private:
     std::unique_ptr<SocketClient> m_inferenceClient;
     mutable std::mutex m_inferenceRpcMutex;
     mutable std::mutex m_inferenceStatsMutex;
+    mutable std::mutex m_learningSchedulerMutex;
+    QTimer m_learningSchedulerTimer;
+    qint64 m_learningSchedulerLastTickAtMs = 0;
+    qint64 m_learningSchedulerLastPromotedAtMs = 0;
+    qint64 m_learningSchedulerTicks = 0;
+    qint64 m_learningSchedulerPromoted = 0;
+    QString m_learningSchedulerLastReason;
+    QHash<QString, qint64> m_learningSchedulerReasonCounts;
     bool m_inferenceServiceConnected = false;
     QHash<QString, qint64> m_inferenceTimeoutCountByRole;
     QHash<QString, qint64> m_inferenceFallbackCountByRole;

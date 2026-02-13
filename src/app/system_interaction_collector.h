@@ -16,6 +16,7 @@ public:
 
     bool enabled() const;
     void setEnabled(bool enabled);
+    void setCaptureScope(bool appActivityEnabled, bool inputActivityEnabled);
 
 signals:
     void behaviorEventCaptured(const QJsonObject& event);
@@ -27,4 +28,3 @@ private:
 };
 
 } // namespace bs
-

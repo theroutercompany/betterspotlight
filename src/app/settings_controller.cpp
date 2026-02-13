@@ -239,6 +239,44 @@ void syncRuntimeSettingsToDb(const QJsonObject& settings)
                   boolToSqlValue(settings.value(QStringLiteral("behaviorStreamEnabled")).toBool(false)));
     upsertSetting(db, QStringLiteral("learningEnabled"),
                   boolToSqlValue(settings.value(QStringLiteral("learningEnabled")).toBool(false)));
+    upsertSetting(db, QStringLiteral("behaviorCaptureAppActivityEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureAppActivityEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("behaviorCaptureInputActivityEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureInputActivityEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("behaviorCaptureSearchEventsEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureSearchEventsEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("behaviorCaptureWindowTitleHashEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureWindowTitleHashEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("behaviorCaptureBrowserHostHashEnabled"),
+                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureBrowserHostHashEnabled")).toBool(true)));
+    upsertSetting(db, QStringLiteral("onlineRankerRolloutMode"),
+                  settings.value(QStringLiteral("onlineRankerRolloutMode"))
+                      .toString(QStringLiteral("instrumentation_only"))
+                      .trimmed()
+                      .toLower());
+    upsertSetting(db, QStringLiteral("onlineRankerHealthWindowDays"),
+                  QString::number(std::max(
+                      1, settings.value(QStringLiteral("onlineRankerHealthWindowDays")).toInt(7))));
+    upsertSetting(db, QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                  QString::number(std::max(
+                      1, settings.value(QStringLiteral("onlineRankerRecentCycleHistoryLimit")).toInt(50))));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                  QString::number(std::max(
+                      1, settings.value(QStringLiteral("onlineRankerPromotionGateMinPositives")).toInt(80))));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionMinAttributedRate")).toDouble(0.5),
+                      0.0,
+                      1.0),
+                                  'g',
+                                  17));
+    upsertSetting(db, QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerPromotionMinContextDigestRate")).toDouble(0.1),
+                      0.0,
+                      1.0),
+                                  'g',
+                                  17));
     upsertSetting(db, QStringLiteral("learningPauseOnUserInput"),
                   boolToSqlValue(settings.value(QStringLiteral("learningPauseOnUserInput")).toBool(true)));
     upsertSetting(db, QStringLiteral("onlineRankerBlendAlpha"),
@@ -1250,6 +1288,18 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("personalizedLtrEnabled"), true);
     ensureDefault(m_settings, QStringLiteral("behaviorStreamEnabled"), false);
     ensureDefault(m_settings, QStringLiteral("learningEnabled"), false);
+    ensureDefault(m_settings, QStringLiteral("behaviorCaptureAppActivityEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("behaviorCaptureInputActivityEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("behaviorCaptureSearchEventsEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("behaviorCaptureWindowTitleHashEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("behaviorCaptureBrowserHostHashEnabled"), true);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("instrumentation_only"));
+    ensureDefault(m_settings, QStringLiteral("onlineRankerHealthWindowDays"), 7);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerRecentCycleHistoryLimit"), 50);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionGateMinPositives"), 80);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionMinAttributedRate"), 0.5);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionMinContextDigestRate"), 0.1);
     ensureDefault(m_settings, QStringLiteral("learningPauseOnUserInput"), true);
     ensureDefault(m_settings, QStringLiteral("onlineRankerBlendAlpha"), 0.15);
     ensureDefault(m_settings, QStringLiteral("behaviorRawRetentionDays"), 30);

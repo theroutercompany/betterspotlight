@@ -33,7 +33,13 @@ public:
                     bool learningEnabled,
                     bool learningPauseOnUserInput,
                     const QStringList& denylistApps,
-                    QString* errorOut = nullptr);
+                    QString* errorOut = nullptr,
+                    const QString& rolloutMode = QString(),
+                    bool captureAppActivityEnabled = true,
+                    bool captureInputActivityEnabled = true,
+                    bool captureSearchEventsEnabled = true,
+                    bool captureWindowTitleHashEnabled = true,
+                    bool captureBrowserHostHashEnabled = true);
 
     bool recordExposure(const QString& query,
                         const SearchResult& result,
@@ -48,6 +54,8 @@ public:
                                    int64_t itemId,
                                    const QString& path,
                                    const QString& appBundleId,
+                                   const QString& contextEventId,
+                                   const QString& activityDigest,
                                    const QDateTime& timestamp,
                                    QString* errorOut = nullptr);
 
@@ -132,9 +140,21 @@ private:
     int m_cyclesSucceeded = 0;
     int m_cyclesRejected = 0;
     qint64 m_lastPruneAtMs = 0;
+    int m_lastBatchPositiveExamples = 0;
+    int m_lastBatchContextHits = 0;
+    int m_lastBatchDigestHits = 0;
+    int m_lastBatchQueryOnlyHits = 0;
+    int m_lastBatchUnattributedPositives = 0;
+    double m_lastBatchAttributedRate = 0.0;
+    double m_lastBatchContextRate = 0.0;
+    double m_lastBatchDigestRate = 0.0;
+    double m_lastBatchQueryOnlyRate = 0.0;
+    double m_lastBatchUnattributedRate = 0.0;
+    double m_lastBatchContextDigestRate = 0.0;
     mutable int m_fallbackMissingModel = 0;
     mutable int m_fallbackLearningDisabled = 0;
     mutable int m_fallbackResourceBudget = 0;
+    mutable int m_fallbackRolloutMode = 0;
 };
 
 } // namespace bs

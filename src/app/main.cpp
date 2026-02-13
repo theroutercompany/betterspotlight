@@ -280,6 +280,14 @@ int main(int argc, char* argv[])
         const bool enabled = settingsController.runtimeBoolSetting(
             QStringLiteral("behaviorStreamEnabled"),
             false);
+        const bool captureAppActivityEnabled = settingsController.runtimeBoolSetting(
+            QStringLiteral("behaviorCaptureAppActivityEnabled"),
+            true);
+        const bool captureInputActivityEnabled = settingsController.runtimeBoolSetting(
+            QStringLiteral("behaviorCaptureInputActivityEnabled"),
+            true);
+        systemInteractionCollector.setCaptureScope(captureAppActivityEnabled,
+                                                   captureInputActivityEnabled);
         systemInteractionCollector.setEnabled(enabled);
     };
     QObject::connect(&settingsController, &bs::SettingsController::settingsChanged,

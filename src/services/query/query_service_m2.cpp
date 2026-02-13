@@ -123,8 +123,12 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
     interaction.selectedPath = params.value(QStringLiteral("selectedPath")).toString();
     interaction.matchType = params.value(QStringLiteral("matchType")).toString();
     interaction.resultPosition = params.value(QStringLiteral("resultPosition")).toInt(0);
-    interaction.frontmostApp = params.value(QStringLiteral("frontmostApp")).toString();
+    const QString appBundleId = params.value(QStringLiteral("appBundleId")).toString().trimmed();
+    const QString frontmostApp = params.value(QStringLiteral("frontmostApp")).toString().trimmed();
+    interaction.frontmostApp = appBundleId.isEmpty() ? frontmostApp : appBundleId;
     interaction.timestamp = QDateTime::currentDateTimeUtc();
+    const QString contextEventId = params.value(QStringLiteral("contextEventId")).toString();
+    const QString activityDigest = params.value(QStringLiteral("activityDigest")).toString();
 
     const bool ok = m_interactionTracker && m_interactionTracker->recordInteraction(interaction);
     if (!ok) {
@@ -138,6 +142,8 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
                                                     interaction.selectedItemId,
                                                     interaction.selectedPath,
                                                     interaction.frontmostApp,
+                                                    contextEventId,
+                                                    activityDigest,
                                                     interaction.timestamp);
         QString idleReason;
         m_learningEngine->maybeRunIdleCycle(&idleReason);
@@ -153,7 +159,7 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
     QJsonObject result;
     result[QStringLiteral("recorded")] = true;
     if (m_learningEngine) {
-        result[QStringLiteral("learningHealth")] = m_learningEngine->healthSnapshot();
+        result[QStringLiteral("learningHealth")] = learningHealthSnapshot();
     }
     return IpcMessage::makeResponse(id, result);
 }
@@ -345,7 +351,13 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
             || eventTypeLower == QLatin1String("activate")
             || eventTypeLower == QLatin1String("result_open")) {
             attributedPositive = m_learningEngine->recordPositiveInteraction(
-                query, event.itemId, event.itemPath, event.appBundleId, event.timestamp);
+                query,
+                event.itemId,
+                event.itemPath,
+                event.appBundleId,
+                event.contextEventId,
+                event.activityDigest,
+                event.timestamp);
         }
     }
 
@@ -358,7 +370,7 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
     result[QStringLiteral("attributedPositive")] = attributedPositive;
     result[QStringLiteral("idleCycleTriggered")] = idleCycleTriggered;
     result[QStringLiteral("idleCycleReason")] = idleReason;
-    result[QStringLiteral("learningHealth")] = m_learningEngine->healthSnapshot();
+    result[QStringLiteral("learningHealth")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -374,7 +386,7 @@ QJsonObject QueryService::handleGetLearningHealth(uint64_t id)
     }
 
     QJsonObject result;
-    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
+    result[QStringLiteral("learning")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -395,6 +407,112 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
         params.value(QStringLiteral("learningEnabled")).toBool(false);
     const bool learningPauseOnUserInput =
         params.value(QStringLiteral("learningPauseOnUserInput")).toBool(true);
+    const QString rolloutMode =
+        params.value(QStringLiteral("onlineRankerRolloutMode")).toString();
+    const auto readBoolSetting = [&](const QString& key, bool defaultValue) {
+        if (!m_store.has_value()) {
+            return defaultValue;
+        }
+        const std::optional<QString> raw = m_store->getSetting(key);
+        if (!raw.has_value()) {
+            return defaultValue;
+        }
+        const QString normalized = raw->trimmed().toLower();
+        if (normalized == QLatin1String("1")
+            || normalized == QLatin1String("true")
+            || normalized == QLatin1String("yes")
+            || normalized == QLatin1String("on")) {
+            return true;
+        }
+        if (normalized == QLatin1String("0")
+            || normalized == QLatin1String("false")
+            || normalized == QLatin1String("no")
+            || normalized == QLatin1String("off")) {
+            return false;
+        }
+        return defaultValue;
+    };
+    const auto coerceBool = [](const QJsonValue& value, bool fallback) {
+        if (value.isBool()) {
+            return value.toBool(fallback);
+        }
+        if (value.isDouble()) {
+            return std::abs(value.toDouble(0.0)) > 1e-9;
+        }
+        if (value.isString()) {
+            const QString normalized = value.toString().trimmed().toLower();
+            if (normalized == QLatin1String("1")
+                || normalized == QLatin1String("true")
+                || normalized == QLatin1String("yes")
+                || normalized == QLatin1String("on")) {
+                return true;
+            }
+            if (normalized == QLatin1String("0")
+                || normalized == QLatin1String("false")
+                || normalized == QLatin1String("no")
+                || normalized == QLatin1String("off")) {
+                return false;
+            }
+        }
+        return fallback;
+    };
+
+    bool captureAppActivityEnabled = readBoolSetting(
+        QStringLiteral("behaviorCaptureAppActivityEnabled"), true);
+    bool captureInputActivityEnabled = readBoolSetting(
+        QStringLiteral("behaviorCaptureInputActivityEnabled"), true);
+    bool captureSearchEventsEnabled = readBoolSetting(
+        QStringLiteral("behaviorCaptureSearchEventsEnabled"), true);
+    bool captureWindowTitleHashEnabled = readBoolSetting(
+        QStringLiteral("behaviorCaptureWindowTitleHashEnabled"), true);
+    bool captureBrowserHostHashEnabled = readBoolSetting(
+        QStringLiteral("behaviorCaptureBrowserHostHashEnabled"), true);
+
+    const QJsonObject captureScope = params.value(QStringLiteral("captureScope")).toObject();
+    if (captureScope.contains(QStringLiteral("appActivityEnabled"))) {
+        captureAppActivityEnabled = coerceBool(
+            captureScope.value(QStringLiteral("appActivityEnabled")), captureAppActivityEnabled);
+    }
+    if (captureScope.contains(QStringLiteral("inputActivityEnabled"))) {
+        captureInputActivityEnabled = coerceBool(
+            captureScope.value(QStringLiteral("inputActivityEnabled")), captureInputActivityEnabled);
+    }
+    if (captureScope.contains(QStringLiteral("searchEventsEnabled"))) {
+        captureSearchEventsEnabled = coerceBool(
+            captureScope.value(QStringLiteral("searchEventsEnabled")), captureSearchEventsEnabled);
+    }
+    if (captureScope.contains(QStringLiteral("windowTitleHashEnabled"))) {
+        captureWindowTitleHashEnabled = coerceBool(
+            captureScope.value(QStringLiteral("windowTitleHashEnabled")),
+            captureWindowTitleHashEnabled);
+    }
+    if (captureScope.contains(QStringLiteral("browserHostHashEnabled"))) {
+        captureBrowserHostHashEnabled = coerceBool(
+            captureScope.value(QStringLiteral("browserHostHashEnabled")),
+            captureBrowserHostHashEnabled);
+    }
+    if (params.contains(QStringLiteral("captureAppActivityEnabled"))) {
+        captureAppActivityEnabled = coerceBool(
+            params.value(QStringLiteral("captureAppActivityEnabled")), captureAppActivityEnabled);
+    }
+    if (params.contains(QStringLiteral("captureInputActivityEnabled"))) {
+        captureInputActivityEnabled = coerceBool(
+            params.value(QStringLiteral("captureInputActivityEnabled")), captureInputActivityEnabled);
+    }
+    if (params.contains(QStringLiteral("captureSearchEventsEnabled"))) {
+        captureSearchEventsEnabled = coerceBool(
+            params.value(QStringLiteral("captureSearchEventsEnabled")), captureSearchEventsEnabled);
+    }
+    if (params.contains(QStringLiteral("captureWindowTitleHashEnabled"))) {
+        captureWindowTitleHashEnabled = coerceBool(
+            params.value(QStringLiteral("captureWindowTitleHashEnabled")),
+            captureWindowTitleHashEnabled);
+    }
+    if (params.contains(QStringLiteral("captureBrowserHostHashEnabled"))) {
+        captureBrowserHostHashEnabled = coerceBool(
+            params.value(QStringLiteral("captureBrowserHostHashEnabled")),
+            captureBrowserHostHashEnabled);
+    }
 
     QStringList denylistApps;
     const QJsonArray denylist = params.value(QStringLiteral("denylistApps")).toArray();
@@ -411,7 +529,13 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
                                                   learningEnabled,
                                                   learningPauseOnUserInput,
                                                   denylistApps,
-                                                  &error);
+                                                  &error,
+                                                  rolloutMode,
+                                                  captureAppActivityEnabled,
+                                                  captureInputActivityEnabled,
+                                                  captureSearchEventsEnabled,
+                                                  captureWindowTitleHashEnabled,
+                                                  captureBrowserHostHashEnabled);
     if (!ok) {
         return IpcMessage::makeError(id, IpcErrorCode::InternalError,
                                      error.isEmpty()
@@ -421,7 +545,7 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
 
     QJsonObject result;
     result[QStringLiteral("updated")] = true;
-    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
+    result[QStringLiteral("learning")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -443,7 +567,7 @@ QJsonObject QueryService::handleTriggerLearningCycle(uint64_t id, const QJsonObj
     QJsonObject result;
     result[QStringLiteral("promoted")] = promoted;
     result[QStringLiteral("reason")] = reason;
-    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
+    result[QStringLiteral("learning")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
 

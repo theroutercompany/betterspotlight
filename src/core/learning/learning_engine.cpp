@@ -33,9 +33,77 @@ constexpr int kDefaultReplayCapacity = 4000;
 constexpr int kDefaultFreshTrainingLimit = 1200;
 constexpr int kDefaultReplaySampleLimit = 1200;
 constexpr int kDefaultNegativeStaleSeconds = 30;
+constexpr int kDefaultHealthWindowDays = 7;
+constexpr int kDefaultRecentCycleHistoryLimit = 50;
+constexpr int kDefaultPromotionGateMinPositives = 80;
+constexpr double kDefaultPromotionMinAttributedRate = 0.5;
+constexpr double kDefaultPromotionMinContextDigestRate = 0.1;
 constexpr int kIdleGapMs = 10000;
 constexpr int kMinCycleIntervalMs = 60000;
 constexpr int kPruneIntervalMs = 60 * 60 * 1000;
+constexpr const char* kRolloutInstrumentationOnly = "instrumentation_only";
+constexpr const char* kRolloutShadowTraining = "shadow_training";
+constexpr const char* kRolloutBlendedRanking = "blended_ranking";
+constexpr double kAttributionContextThreshold = 0.95;
+constexpr double kAttributionDigestThreshold = 0.8;
+
+struct BatchAttributionStats {
+    int positiveExamples = 0;
+    int contextHits = 0;
+    int digestHits = 0;
+    int queryOnlyHits = 0;
+    int unattributedPositives = 0;
+    double attributedRate = 0.0;
+    double contextRate = 0.0;
+    double digestRate = 0.0;
+    double queryOnlyRate = 0.0;
+    double unattributedRate = 0.0;
+    double contextDigestRate = 0.0;
+};
+
+BatchAttributionStats collectBatchAttributionStats(const QVector<TrainingExample>& examples)
+{
+    BatchAttributionStats stats;
+    for (const TrainingExample& example : examples) {
+        if (example.label != 1) {
+            continue;
+        }
+        ++stats.positiveExamples;
+        const double confidence = std::clamp(example.attributionConfidence, 0.0, 1.0);
+        if (confidence >= kAttributionContextThreshold) {
+            ++stats.contextHits;
+        } else if (confidence >= kAttributionDigestThreshold) {
+            ++stats.digestHits;
+        } else if (confidence > 0.0) {
+            ++stats.queryOnlyHits;
+        } else {
+            ++stats.unattributedPositives;
+        }
+    }
+
+    if (stats.positiveExamples > 0) {
+        const double denom = static_cast<double>(stats.positiveExamples);
+        const int attributed = stats.contextHits + stats.digestHits + stats.queryOnlyHits;
+        stats.attributedRate = static_cast<double>(attributed) / denom;
+        stats.contextRate = static_cast<double>(stats.contextHits) / denom;
+        stats.digestRate = static_cast<double>(stats.digestHits) / denom;
+        stats.queryOnlyRate = static_cast<double>(stats.queryOnlyHits) / denom;
+        stats.unattributedRate = static_cast<double>(stats.unattributedPositives) / denom;
+        stats.contextDigestRate = static_cast<double>(stats.contextHits + stats.digestHits) / denom;
+    }
+
+    return stats;
+}
+
+QJsonArray parseJsonArrayOrEmpty(const QString& encoded)
+{
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(encoded.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || !doc.isArray()) {
+        return QJsonArray();
+    }
+    return doc.array();
+}
 
 double currentProcessCpuPct()
 {
@@ -114,6 +182,194 @@ bool execSql(sqlite3* db, const char* sql)
         return false;
     }
     return true;
+}
+
+QString canonicalRolloutMode(const QString& rawMode, bool* validOut = nullptr)
+{
+    if (validOut) {
+        *validOut = true;
+    }
+    const QString normalized = rawMode.trimmed().toLower();
+    if (normalized.isEmpty() || normalized == QLatin1String(kRolloutInstrumentationOnly)) {
+        return QString::fromLatin1(kRolloutInstrumentationOnly);
+    }
+    if (normalized == QLatin1String(kRolloutShadowTraining)) {
+        return QString::fromLatin1(kRolloutShadowTraining);
+    }
+    if (normalized == QLatin1String(kRolloutBlendedRanking)) {
+        return QString::fromLatin1(kRolloutBlendedRanking);
+    }
+    if (validOut) {
+        *validOut = false;
+    }
+    return QString::fromLatin1(kRolloutInstrumentationOnly);
+}
+
+bool rolloutAllowsTraining(const QString& mode)
+{
+    return mode == QLatin1String(kRolloutShadowTraining)
+        || mode == QLatin1String(kRolloutBlendedRanking);
+}
+
+bool rolloutAllowsServing(const QString& mode)
+{
+    return mode == QLatin1String(kRolloutBlendedRanking);
+}
+
+QJsonObject collectAttributionMetrics(sqlite3* db, int lookbackDays)
+{
+    QJsonObject metrics;
+    metrics[QStringLiteral("windowDays")] = std::max(1, lookbackDays);
+    metrics[QStringLiteral("positiveExamples")] = 0;
+    metrics[QStringLiteral("attributedExamples")] = 0;
+    metrics[QStringLiteral("contextHits")] = 0;
+    metrics[QStringLiteral("digestHits")] = 0;
+    metrics[QStringLiteral("queryOnlyHits")] = 0;
+    metrics[QStringLiteral("unattributedPositives")] = 0;
+    metrics[QStringLiteral("attributedRate")] = 0.0;
+    metrics[QStringLiteral("contextHitRate")] = 0.0;
+    metrics[QStringLiteral("digestHitRate")] = 0.0;
+    metrics[QStringLiteral("queryOnlyRate")] = 0.0;
+    metrics[QStringLiteral("unattributedRate")] = 0.0;
+
+    if (!db) {
+        return metrics;
+    }
+
+    static constexpr const char* kSql = R"(
+        SELECT
+            SUM(CASE WHEN label = 1 THEN 1 ELSE 0 END) AS positives,
+            SUM(CASE WHEN label = 1 AND attribution_confidence >= ?2 THEN 1 ELSE 0 END)
+                AS context_hits,
+            SUM(CASE WHEN label = 1
+                         AND attribution_confidence >= ?3
+                         AND attribution_confidence < ?2
+                     THEN 1 ELSE 0 END) AS digest_hits,
+            SUM(CASE WHEN label = 1
+                         AND attribution_confidence > 0.0
+                         AND attribution_confidence < ?3
+                     THEN 1 ELSE 0 END) AS query_only_hits,
+            SUM(CASE WHEN label = 1 AND attribution_confidence <= 0.0 THEN 1 ELSE 0 END)
+                AS unattributed_hits
+        FROM training_examples_v1
+        WHERE created_at >= ?1
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return metrics;
+    }
+
+    const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+    const qint64 cutoffSec =
+        nowSec - static_cast<qint64>(std::max(1, lookbackDays)) * 24 * 60 * 60;
+    sqlite3_bind_double(stmt, 1, static_cast<double>(cutoffSec));
+    sqlite3_bind_double(stmt, 2, kAttributionContextThreshold);
+    sqlite3_bind_double(stmt, 3, kAttributionDigestThreshold);
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const int positives = sqlite3_column_int(stmt, 0);
+        const int contextHits = sqlite3_column_int(stmt, 1);
+        const int digestHits = sqlite3_column_int(stmt, 2);
+        const int queryOnlyHits = sqlite3_column_int(stmt, 3);
+        const int unattributedPositives = sqlite3_column_int(stmt, 4);
+        const int attributedExamples = contextHits + digestHits + queryOnlyHits;
+        metrics[QStringLiteral("positiveExamples")] = positives;
+        metrics[QStringLiteral("attributedExamples")] = attributedExamples;
+        metrics[QStringLiteral("contextHits")] = contextHits;
+        metrics[QStringLiteral("digestHits")] = digestHits;
+        metrics[QStringLiteral("queryOnlyHits")] = queryOnlyHits;
+        metrics[QStringLiteral("unattributedPositives")] = unattributedPositives;
+        if (positives > 0) {
+            const double denom = static_cast<double>(positives);
+            metrics[QStringLiteral("attributedRate")] = attributedExamples / denom;
+            metrics[QStringLiteral("contextHitRate")] = contextHits / denom;
+            metrics[QStringLiteral("digestHitRate")] = digestHits / denom;
+            metrics[QStringLiteral("queryOnlyRate")] = queryOnlyHits / denom;
+            metrics[QStringLiteral("unattributedRate")] = unattributedPositives / denom;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return metrics;
+}
+
+QJsonObject collectBehaviorCoverageMetrics(sqlite3* db, int lookbackDays)
+{
+    QJsonObject metrics;
+    metrics[QStringLiteral("windowDays")] = std::max(1, lookbackDays);
+    metrics[QStringLiteral("events")] = 0;
+    metrics[QStringLiteral("appBundlePresent")] = 0;
+    metrics[QStringLiteral("activityDigestPresent")] = 0;
+    metrics[QStringLiteral("contextEventPresent")] = 0;
+    metrics[QStringLiteral("eventsWithAnyContextSignal")] = 0;
+    metrics[QStringLiteral("eventsWithFullContextSignals")] = 0;
+    metrics[QStringLiteral("appBundleCoverage")] = 0.0;
+    metrics[QStringLiteral("activityDigestCoverage")] = 0.0;
+    metrics[QStringLiteral("contextEventCoverage")] = 0.0;
+    metrics[QStringLiteral("anyContextSignalCoverage")] = 0.0;
+    metrics[QStringLiteral("fullContextSignalsCoverage")] = 0.0;
+
+    if (!db) {
+        return metrics;
+    }
+
+    static constexpr const char* kSql = R"(
+        SELECT
+            COUNT(*) AS events,
+            SUM(CASE WHEN COALESCE(app_bundle_id, '') <> '' THEN 1 ELSE 0 END)
+                AS app_bundle_present,
+            SUM(CASE WHEN COALESCE(activity_digest, '') <> '' THEN 1 ELSE 0 END)
+                AS digest_present,
+            SUM(CASE WHEN COALESCE(context_event_id, '') <> '' THEN 1 ELSE 0 END)
+                AS context_present,
+            SUM(CASE WHEN COALESCE(app_bundle_id, '') <> ''
+                          OR COALESCE(activity_digest, '') <> ''
+                          OR COALESCE(context_event_id, '') <> ''
+                     THEN 1 ELSE 0 END) AS any_context_signal,
+            SUM(CASE WHEN COALESCE(app_bundle_id, '') <> ''
+                          AND COALESCE(activity_digest, '') <> ''
+                          AND COALESCE(context_event_id, '') <> ''
+                     THEN 1 ELSE 0 END) AS full_context_signals
+        FROM behavior_events_v1
+        WHERE timestamp >= ?1
+    )";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return metrics;
+    }
+
+    const qint64 nowSec = QDateTime::currentSecsSinceEpoch();
+    const qint64 cutoffSec =
+        nowSec - static_cast<qint64>(std::max(1, lookbackDays)) * 24 * 60 * 60;
+    sqlite3_bind_double(stmt, 1, static_cast<double>(cutoffSec));
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const int events = sqlite3_column_int(stmt, 0);
+        const int appBundlePresent = sqlite3_column_int(stmt, 1);
+        const int digestPresent = sqlite3_column_int(stmt, 2);
+        const int contextPresent = sqlite3_column_int(stmt, 3);
+        const int anyContextSignal = sqlite3_column_int(stmt, 4);
+        const int fullContextSignals = sqlite3_column_int(stmt, 5);
+        metrics[QStringLiteral("events")] = events;
+        metrics[QStringLiteral("appBundlePresent")] = appBundlePresent;
+        metrics[QStringLiteral("activityDigestPresent")] = digestPresent;
+        metrics[QStringLiteral("contextEventPresent")] = contextPresent;
+        metrics[QStringLiteral("eventsWithAnyContextSignal")] = anyContextSignal;
+        metrics[QStringLiteral("eventsWithFullContextSignals")] = fullContextSignals;
+        if (events > 0) {
+            const double denom = static_cast<double>(events);
+            metrics[QStringLiteral("appBundleCoverage")] = appBundlePresent / denom;
+            metrics[QStringLiteral("activityDigestCoverage")] = digestPresent / denom;
+            metrics[QStringLiteral("contextEventCoverage")] = contextPresent / denom;
+            metrics[QStringLiteral("anyContextSignalCoverage")] = anyContextSignal / denom;
+            metrics[QStringLiteral("fullContextSignalsCoverage")] = fullContextSignals / denom;
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return metrics;
 }
 
 QString generateId()
@@ -308,9 +564,22 @@ bool LearningEngine::initialize()
     m_fallbackResourceBudget = getSetting(
         QStringLiteral("onlineRankerFallbackResourceBudget"),
         QStringLiteral("0")).toInt();
+    m_fallbackRolloutMode = getSetting(
+        QStringLiteral("onlineRankerFallbackRolloutMode"),
+        QStringLiteral("0")).toInt();
     m_lastPruneAtMs = static_cast<qint64>(getSetting(
         QStringLiteral("onlineRankerLastPruneAtMs"),
         QStringLiteral("0")).toLongLong());
+
+    bool rolloutValid = false;
+    const QString rolloutMode = canonicalRolloutMode(
+        getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                   QString::fromLatin1(kRolloutInstrumentationOnly)),
+        &rolloutValid);
+    if (!rolloutValid
+        || getSetting(QStringLiteral("onlineRankerRolloutMode"), QString()) != rolloutMode) {
+        setSetting(QStringLiteral("onlineRankerRolloutMode"), rolloutMode);
+    }
 
     m_lastUserActivityMs = QDateTime::currentMSecsSinceEpoch();
     return true;
@@ -516,6 +785,34 @@ bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* er
         return true;
     }
 
+    const QString source = event.source.trimmed().toLower();
+    const QString eventType = event.eventType.trimmed().toLower();
+    const bool captureAppActivityEnabled = getSettingBool(
+        QStringLiteral("behaviorCaptureAppActivityEnabled"), true);
+    const bool captureInputActivityEnabled = getSettingBool(
+        QStringLiteral("behaviorCaptureInputActivityEnabled"), true);
+    const bool captureSearchEventsEnabled = getSettingBool(
+        QStringLiteral("behaviorCaptureSearchEventsEnabled"), true);
+    const bool captureWindowTitleHashEnabled = getSettingBool(
+        QStringLiteral("behaviorCaptureWindowTitleHashEnabled"), true);
+    const bool captureBrowserHostHashEnabled = getSettingBool(
+        QStringLiteral("behaviorCaptureBrowserHostHashEnabled"), true);
+
+    if (eventType == QLatin1String("app_activated") && !captureAppActivityEnabled) {
+        return true;
+    }
+    if (eventType == QLatin1String("input_activity") && !captureInputActivityEnabled) {
+        return true;
+    }
+    if (source == QLatin1String("betterspotlight")
+        && (eventType == QLatin1String("query_submitted")
+            || eventType == QLatin1String("result_open")
+            || eventType == QLatin1String("result_select")
+            || eventType == QLatin1String("result_activate"))
+        && !captureSearchEventsEnabled) {
+        return true;
+    }
+
     maybePruneExpiredDataUnlocked();
 
     const QString appBundleId = event.appBundleId.trimmed().toLower();
@@ -524,8 +821,17 @@ bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* er
     }
 
     if (event.privacyFlags.secureInput || event.privacyFlags.privateContext
-        || event.privacyFlags.denylistedApp) {
+        || event.privacyFlags.denylistedApp || event.privacyFlags.redacted) {
         return true;
+    }
+
+    QString windowTitleHash = event.windowTitleHash;
+    QString browserHostHash = event.browserHostHash;
+    if (!captureWindowTitleHashEnabled) {
+        windowTitleHash.clear();
+    }
+    if (!captureBrowserHostHashEnabled) {
+        browserHostHash.clear();
     }
 
     m_lastUserActivityMs = QDateTime::currentMSecsSinceEpoch();
@@ -586,9 +892,9 @@ bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* er
         ? QByteArrayLiteral("activity")
         : event.eventType.toUtf8();
     const QByteArray appUtf8 = event.appBundleId.toUtf8();
-    const QByteArray windowUtf8 = event.windowTitleHash.toUtf8();
+    const QByteArray windowUtf8 = windowTitleHash.toUtf8();
     const QByteArray pathUtf8 = event.itemPath.toUtf8();
-    const QByteArray hostUtf8 = event.browserHostHash.toUtf8();
+    const QByteArray hostUtf8 = browserHostHash.toUtf8();
     const QByteArray inputUtf8 = QJsonDocument(inputMeta).toJson(QJsonDocument::Compact);
     const QByteArray mouseUtf8 = QJsonDocument(mouseMeta).toJson(QJsonDocument::Compact);
     const QByteArray privacyUtf8 = QJsonDocument(privacyFlags).toJson(QJsonDocument::Compact);
@@ -605,13 +911,13 @@ bool LearningEngine::recordBehaviorEvent(const BehaviorEvent& event, QString* er
     sqlite3_bind_text(stmt, 4, eventTypeUtf8.constData(), -1, SQLITE_TRANSIENT);
     if (event.appBundleId.isEmpty()) sqlite3_bind_null(stmt, 5);
     else sqlite3_bind_text(stmt, 5, appUtf8.constData(), -1, SQLITE_TRANSIENT);
-    if (event.windowTitleHash.isEmpty()) sqlite3_bind_null(stmt, 6);
+    if (windowTitleHash.isEmpty()) sqlite3_bind_null(stmt, 6);
     else sqlite3_bind_text(stmt, 6, windowUtf8.constData(), -1, SQLITE_TRANSIENT);
     if (event.itemPath.isEmpty()) sqlite3_bind_null(stmt, 7);
     else sqlite3_bind_text(stmt, 7, pathUtf8.constData(), -1, SQLITE_TRANSIENT);
     if (event.itemId <= 0) sqlite3_bind_null(stmt, 8);
     else sqlite3_bind_int64(stmt, 8, event.itemId);
-    if (event.browserHostHash.isEmpty()) sqlite3_bind_null(stmt, 9);
+    if (browserHostHash.isEmpty()) sqlite3_bind_null(stmt, 9);
     else sqlite3_bind_text(stmt, 9, hostUtf8.constData(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 10, inputUtf8.constData(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 11, mouseUtf8.constData(), -1, SQLITE_TRANSIENT);
@@ -635,7 +941,13 @@ bool LearningEngine::setConsent(bool behaviorStreamEnabled,
                                 bool learningEnabled,
                                 bool learningPauseOnUserInput,
                                 const QStringList& denylistApps,
-                                QString* errorOut)
+                                QString* errorOut,
+                                const QString& rolloutMode,
+                                bool captureAppActivityEnabled,
+                                bool captureInputActivityEnabled,
+                                bool captureSearchEventsEnabled,
+                                bool captureWindowTitleHashEnabled,
+                                bool captureBrowserHostHashEnabled)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (errorOut) {
@@ -657,9 +969,35 @@ bool LearningEngine::setConsent(bool behaviorStreamEnabled,
         }
     }
 
+    QString rolloutSetting = getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                                        QString::fromLatin1(kRolloutInstrumentationOnly));
+    if (!rolloutMode.trimmed().isEmpty()) {
+        bool rolloutValid = false;
+        rolloutSetting = canonicalRolloutMode(rolloutMode, &rolloutValid);
+        if (!rolloutValid) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("invalid_rollout_mode");
+            }
+            return false;
+        }
+    } else {
+        rolloutSetting = canonicalRolloutMode(rolloutSetting, nullptr);
+    }
+
     if (!setSetting(QStringLiteral("behaviorStreamEnabled"), behaviorStreamEnabled ? QStringLiteral("1") : QStringLiteral("0"))
         || !setSetting(QStringLiteral("learningEnabled"), learningEnabled ? QStringLiteral("1") : QStringLiteral("0"))
         || !setSetting(QStringLiteral("learningPauseOnUserInput"), learningPauseOnUserInput ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("behaviorCaptureAppActivityEnabled"),
+                       captureAppActivityEnabled ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("behaviorCaptureInputActivityEnabled"),
+                       captureInputActivityEnabled ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("behaviorCaptureSearchEventsEnabled"),
+                       captureSearchEventsEnabled ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("behaviorCaptureWindowTitleHashEnabled"),
+                       captureWindowTitleHashEnabled ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("behaviorCaptureBrowserHostHashEnabled"),
+                       captureBrowserHostHashEnabled ? QStringLiteral("1") : QStringLiteral("0"))
+        || !setSetting(QStringLiteral("onlineRankerRolloutMode"), rolloutSetting)
         || !setSetting(QStringLiteral("learningDenylistApps"),
                        QString::fromUtf8(QJsonDocument(denylist).toJson(QJsonDocument::Compact)))) {
         if (errorOut) {
@@ -838,6 +1176,8 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
                                                int64_t itemId,
                                                const QString& path,
                                                const QString& appBundleId,
+                                               const QString& contextEventId,
+                                               const QString& activityDigest,
                                                const QDateTime& timestamp,
                                                QString* errorOut)
 {
@@ -863,11 +1203,92 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
         : QDateTime::currentSecsSinceEpoch();
     const qint64 fromTs = ts - 30;
     const qint64 toTs = ts + 1;
+    const QString normalizedContextEventId = contextEventId.trimmed();
+    const QString normalizedActivityDigest = activityDigest.trimmed();
+    const QByteArray queryNormUtf8 = normalizedQuery.toUtf8();
 
-    static constexpr const char* kUpdateSql = R"(
+    static constexpr const char* kContextUpdateSql = R"(
         UPDATE training_examples_v1
         SET label = 1,
             attribution_confidence = MAX(attribution_confidence, 1.0)
+        WHERE item_id = ?1
+          AND context_event_id = ?2
+          AND consumed = 0
+          AND (label IS NULL OR label < 0)
+          AND created_at BETWEEN ?3 AND ?4
+    )";
+
+    if (!normalizedContextEventId.isEmpty()) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, kContextUpdateSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("prepare_positive_context_update_failed");
+            }
+            return false;
+        }
+        const QByteArray contextUtf8 = normalizedContextEventId.toUtf8();
+        sqlite3_bind_int64(stmt, 1, itemId);
+        sqlite3_bind_text(stmt, 2, contextUtf8.constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, static_cast<double>(fromTs));
+        sqlite3_bind_double(stmt, 4, static_cast<double>(toTs));
+
+        const int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("update_positive_context_failed");
+            }
+            return false;
+        }
+        if (sqlite3_changes(m_db) > 0) {
+            return true;
+        }
+    }
+
+    static constexpr const char* kDigestUpdateSql = R"(
+        UPDATE training_examples_v1
+        SET label = 1,
+            attribution_confidence = MAX(attribution_confidence, 0.85)
+        WHERE item_id = ?1
+          AND activity_digest = ?2
+          AND query_normalized = ?3
+          AND consumed = 0
+          AND (label IS NULL OR label < 0)
+          AND created_at BETWEEN ?4 AND ?5
+    )";
+
+    if (!normalizedActivityDigest.isEmpty() && !normalizedQuery.isEmpty()) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, kDigestUpdateSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("prepare_positive_digest_update_failed");
+            }
+            return false;
+        }
+        const QByteArray digestUtf8 = normalizedActivityDigest.toUtf8();
+        sqlite3_bind_int64(stmt, 1, itemId);
+        sqlite3_bind_text(stmt, 2, digestUtf8.constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, queryNormUtf8.constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 4, static_cast<double>(fromTs));
+        sqlite3_bind_double(stmt, 5, static_cast<double>(toTs));
+
+        const int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("update_positive_digest_failed");
+            }
+            return false;
+        }
+        if (sqlite3_changes(m_db) > 0) {
+            return true;
+        }
+    }
+
+    static constexpr const char* kQueryUpdateSql = R"(
+        UPDATE training_examples_v1
+        SET label = 1,
+            attribution_confidence = MAX(attribution_confidence, 0.7)
         WHERE item_id = ?1
           AND query_normalized = ?2
           AND consumed = 0
@@ -875,31 +1296,30 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
           AND created_at BETWEEN ?3 AND ?4
     )";
 
-    sqlite3_stmt* updateStmt = nullptr;
-    if (sqlite3_prepare_v2(m_db, kUpdateSql, -1, &updateStmt, nullptr) != SQLITE_OK) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("prepare_positive_update_failed");
+    if (!normalizedQuery.isEmpty()) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, kQueryUpdateSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("prepare_positive_query_update_failed");
+            }
+            return false;
         }
-        return false;
-    }
+        sqlite3_bind_int64(stmt, 1, itemId);
+        sqlite3_bind_text(stmt, 2, queryNormUtf8.constData(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, static_cast<double>(fromTs));
+        sqlite3_bind_double(stmt, 4, static_cast<double>(toTs));
 
-    const QByteArray queryNormUtf8 = normalizedQuery.toUtf8();
-    sqlite3_bind_int64(updateStmt, 1, itemId);
-    sqlite3_bind_text(updateStmt, 2, queryNormUtf8.constData(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_double(updateStmt, 3, static_cast<double>(fromTs));
-    sqlite3_bind_double(updateStmt, 4, static_cast<double>(toTs));
-
-    const int rc = sqlite3_step(updateStmt);
-    sqlite3_finalize(updateStmt);
-    if (rc != SQLITE_DONE) {
-        if (errorOut) {
-            *errorOut = QStringLiteral("update_positive_failed");
+        const int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("update_positive_query_failed");
+            }
+            return false;
         }
-        return false;
-    }
-
-    if (sqlite3_changes(m_db) > 0) {
-        return true;
+        if (sqlite3_changes(m_db) > 0) {
+            return true;
+        }
     }
 
     static constexpr const char* kInsertSql = R"(
@@ -914,9 +1334,11 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
             weight,
             features_json,
             app_bundle_id,
+            context_event_id,
+            activity_digest,
             attribution_confidence,
             consumed
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1.0, ?7, ?8, 1.0, 0)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 1.0, ?7, ?8, ?9, ?10, ?11, 0)
     )";
 
     sqlite3_stmt* insertStmt = nullptr;
@@ -940,6 +1362,11 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
     const QByteArray pathUtf8 = path.toUtf8();
     const QByteArray featureUtf8 = featuresToJson(fallbackFeatures).toUtf8();
     const QByteArray appUtf8 = appBundleId.toUtf8();
+    const QByteArray contextUtf8 = normalizedContextEventId.toUtf8();
+    const QByteArray digestUtf8 = normalizedActivityDigest.toUtf8();
+    const double fallbackAttributionConfidence = !normalizedContextEventId.isEmpty()
+        ? 1.0
+        : (!normalizedActivityDigest.isEmpty() ? 0.85 : 0.7);
 
     sqlite3_bind_text(insertStmt, 1, sampleUtf8.constData(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_double(insertStmt, 2, static_cast<double>(ts));
@@ -950,6 +1377,11 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
     sqlite3_bind_text(insertStmt, 7, featureUtf8.constData(), -1, SQLITE_TRANSIENT);
     if (appUtf8.isEmpty()) sqlite3_bind_null(insertStmt, 8);
     else sqlite3_bind_text(insertStmt, 8, appUtf8.constData(), -1, SQLITE_TRANSIENT);
+    if (contextUtf8.isEmpty()) sqlite3_bind_null(insertStmt, 9);
+    else sqlite3_bind_text(insertStmt, 9, contextUtf8.constData(), -1, SQLITE_TRANSIENT);
+    if (digestUtf8.isEmpty()) sqlite3_bind_null(insertStmt, 10);
+    else sqlite3_bind_text(insertStmt, 10, digestUtf8.constData(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(insertStmt, 11, fallbackAttributionConfidence);
 
     const bool ok = sqlite3_step(insertStmt) == SQLITE_DONE;
     sqlite3_finalize(insertStmt);
@@ -1269,6 +1701,56 @@ void LearningEngine::setLastCycleResult(const QString& status,
     setModelState(QStringLiteral("last_promoted"), promoted ? QStringLiteral("1") : QStringLiteral("0"));
     setModelState(QStringLiteral("last_manual"), manual ? QStringLiteral("1") : QStringLiteral("0"));
     setModelState(QStringLiteral("last_cycle_at_ms"), QString::number(m_lastCycleAtMs));
+
+    QJsonObject batchAttribution;
+    batchAttribution[QStringLiteral("positiveExamples")] = m_lastBatchPositiveExamples;
+    batchAttribution[QStringLiteral("contextHits")] = m_lastBatchContextHits;
+    batchAttribution[QStringLiteral("digestHits")] = m_lastBatchDigestHits;
+    batchAttribution[QStringLiteral("queryOnlyHits")] = m_lastBatchQueryOnlyHits;
+    batchAttribution[QStringLiteral("unattributedPositives")] = m_lastBatchUnattributedPositives;
+    batchAttribution[QStringLiteral("attributedRate")] = m_lastBatchAttributedRate;
+    batchAttribution[QStringLiteral("contextRate")] = m_lastBatchContextRate;
+    batchAttribution[QStringLiteral("digestRate")] = m_lastBatchDigestRate;
+    batchAttribution[QStringLiteral("queryOnlyRate")] = m_lastBatchQueryOnlyRate;
+    batchAttribution[QStringLiteral("unattributedRate")] = m_lastBatchUnattributedRate;
+    batchAttribution[QStringLiteral("contextDigestRate")] = m_lastBatchContextDigestRate;
+
+    QJsonObject cycleEntry;
+    cycleEntry[QStringLiteral("cycleAtMs")] = m_lastCycleAtMs;
+    cycleEntry[QStringLiteral("cycleIndex")] = m_cyclesRun;
+    cycleEntry[QStringLiteral("status")] = status;
+    cycleEntry[QStringLiteral("reason")] = reason;
+    cycleEntry[QStringLiteral("activeLoss")] = activeLoss;
+    cycleEntry[QStringLiteral("candidateLoss")] = candidateLoss;
+    cycleEntry[QStringLiteral("sampleCount")] = sampleCount;
+    cycleEntry[QStringLiteral("promoted")] = promoted;
+    cycleEntry[QStringLiteral("manual")] = manual;
+    cycleEntry[QStringLiteral("rolloutMode")] = canonicalRolloutMode(
+        getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                   QString::fromLatin1(kRolloutInstrumentationOnly)),
+        nullptr);
+    cycleEntry[QStringLiteral("batchAttribution")] = batchAttribution;
+
+    const int historyLimit = std::max(
+        1, getSettingInt(QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                         kDefaultRecentCycleHistoryLimit));
+    const QJsonArray previousHistory = parseJsonArrayOrEmpty(
+        getSetting(QStringLiteral("onlineRankerRecentCycleHistory"), QStringLiteral("[]")));
+    QJsonArray nextHistory;
+    nextHistory.append(cycleEntry);
+    for (const QJsonValue& value : previousHistory) {
+        if (!value.isObject()) {
+            continue;
+        }
+        if (nextHistory.size() >= historyLimit) {
+            break;
+        }
+        nextHistory.append(value);
+    }
+    const QString historyJson = QString::fromUtf8(
+        QJsonDocument(nextHistory).toJson(QJsonDocument::Compact));
+    setSetting(QStringLiteral("onlineRankerRecentCycleHistory"), historyJson);
+    setModelState(QStringLiteral("recent_cycle_history"), historyJson);
 }
 
 bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
@@ -1295,6 +1777,20 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     if (!getSettingBool(QStringLiteral("learningEnabled"), false)) {
         if (reasonOut) {
             *reasonOut = QStringLiteral("learning_disabled");
+        }
+        return false;
+    }
+
+    const QString rolloutMode = canonicalRolloutMode(
+        getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                   QString::fromLatin1(kRolloutInstrumentationOnly)),
+        nullptr);
+    if (!rolloutAllowsTraining(rolloutMode)) {
+        ++m_fallbackRolloutMode;
+        setSetting(QStringLiteral("onlineRankerFallbackRolloutMode"),
+                   QString::number(m_fallbackRolloutMode));
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("rollout_mode_blocks_training");
         }
         return false;
     }
@@ -1356,6 +1852,19 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     combined += fresh;
     combined += replay;
 
+    const BatchAttributionStats batchAttribution = collectBatchAttributionStats(combined);
+    m_lastBatchPositiveExamples = batchAttribution.positiveExamples;
+    m_lastBatchContextHits = batchAttribution.contextHits;
+    m_lastBatchDigestHits = batchAttribution.digestHits;
+    m_lastBatchQueryOnlyHits = batchAttribution.queryOnlyHits;
+    m_lastBatchUnattributedPositives = batchAttribution.unattributedPositives;
+    m_lastBatchAttributedRate = batchAttribution.attributedRate;
+    m_lastBatchContextRate = batchAttribution.contextRate;
+    m_lastBatchDigestRate = batchAttribution.digestRate;
+    m_lastBatchQueryOnlyRate = batchAttribution.queryOnlyRate;
+    m_lastBatchUnattributedRate = batchAttribution.unattributedRate;
+    m_lastBatchContextDigestRate = batchAttribution.contextDigestRate;
+
     if (combined.size() < 60) {
         m_cycleRunning = false;
         ++m_cyclesRun;
@@ -1371,6 +1880,45 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
             *reasonOut = QStringLiteral("not_enough_training_examples");
         }
         return false;
+    }
+
+    const int promotionGateMinPositives = std::max(
+        1, getSettingInt(QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                         kDefaultPromotionGateMinPositives));
+    const double promotionMinAttributedRate = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                         kDefaultPromotionMinAttributedRate),
+        0.0,
+        1.0);
+    const double promotionMinContextDigestRate = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                         kDefaultPromotionMinContextDigestRate),
+        0.0,
+        1.0);
+
+    if (batchAttribution.positiveExamples >= promotionGateMinPositives) {
+        QString attributionGateReason;
+        if (batchAttribution.attributedRate + 1e-9 < promotionMinAttributedRate) {
+            attributionGateReason = QStringLiteral("attribution_quality_gate_failed_attributed_rate");
+        } else if (batchAttribution.contextDigestRate + 1e-9 < promotionMinContextDigestRate) {
+            attributionGateReason = QStringLiteral("attribution_quality_gate_failed_context_digest_rate");
+        }
+        if (!attributionGateReason.isEmpty()) {
+            m_cycleRunning = false;
+            ++m_cyclesRun;
+            ++m_cyclesRejected;
+            setLastCycleResult(QStringLiteral("rejected"),
+                               attributionGateReason,
+                               0.0,
+                               0.0,
+                               combined.size(),
+                               false,
+                               manual);
+            if (reasonOut) {
+                *reasonOut = attributionGateReason;
+            }
+            return false;
+        }
     }
 
     OnlineRanker::TrainConfig cfg;
@@ -1485,6 +2033,20 @@ bool LearningEngine::maybeRunIdleCycle(QString* reasonOut)
             return false;
         }
 
+        const QString rolloutMode = canonicalRolloutMode(
+            getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                       QString::fromLatin1(kRolloutInstrumentationOnly)),
+            nullptr);
+        if (!rolloutAllowsTraining(rolloutMode)) {
+            ++m_fallbackRolloutMode;
+            setSetting(QStringLiteral("onlineRankerFallbackRolloutMode"),
+                       QString::number(m_fallbackRolloutMode));
+            if (reasonOut) {
+                *reasonOut = QStringLiteral("rollout_mode_blocks_training");
+            }
+            return false;
+        }
+
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         const bool pauseOnInput = getSettingBool(QStringLiteral("learningPauseOnUserInput"), true);
         if (pauseOnInput && (nowMs - m_lastUserActivityMs) < kIdleGapMs) {
@@ -1547,6 +2109,19 @@ double LearningEngine::scoreBoostForResult(const SearchResult& result,
         return 0.0;
     }
 
+    const QString rolloutMode = canonicalRolloutMode(
+        getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                   QString::fromLatin1(kRolloutInstrumentationOnly)),
+        nullptr);
+    if (!rolloutAllowsServing(rolloutMode)) {
+        ++m_fallbackRolloutMode;
+        if ((m_fallbackRolloutMode % 50) == 0) {
+            setSetting(QStringLiteral("onlineRankerFallbackRolloutMode"),
+                       QString::number(m_fallbackRolloutMode));
+        }
+        return 0.0;
+    }
+
     const QVector<double> features = buildFeatureVector(result,
                                                         context,
                                                         queryClass,
@@ -1580,6 +2155,28 @@ QJsonObject LearningEngine::healthSnapshot() const
 
     const bool coreMlAvailable = (m_coreMlRanker && m_coreMlRanker->hasModel());
     const bool nativeAvailable = (m_ranker && m_ranker->hasModel());
+    const int metricsWindowDays = std::max(
+        1, getSettingInt(QStringLiteral("onlineRankerHealthWindowDays"), kDefaultHealthWindowDays));
+    const int recentCycleHistoryLimit = std::max(
+        1, getSettingInt(QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                         kDefaultRecentCycleHistoryLimit));
+    const int promotionGateMinPositives = std::max(
+        1, getSettingInt(QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                         kDefaultPromotionGateMinPositives));
+    const double promotionMinAttributedRate = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                         kDefaultPromotionMinAttributedRate),
+        0.0,
+        1.0);
+    const double promotionMinContextDigestRate = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                         kDefaultPromotionMinContextDigestRate),
+        0.0,
+        1.0);
+    const QString rolloutMode = canonicalRolloutMode(
+        getSetting(QStringLiteral("onlineRankerRolloutMode"),
+                   QString::fromLatin1(kRolloutInstrumentationOnly)),
+        nullptr);
 
     QJsonObject health;
     health[QStringLiteral("initialized")] = (m_db != nullptr);
@@ -1613,12 +2210,66 @@ QJsonObject LearningEngine::healthSnapshot() const
     health[QStringLiteral("fallbackMissingModel")] = m_fallbackMissingModel;
     health[QStringLiteral("fallbackLearningDisabled")] = m_fallbackLearningDisabled;
     health[QStringLiteral("fallbackResourceBudget")] = m_fallbackResourceBudget;
+    health[QStringLiteral("fallbackRolloutMode")] = m_fallbackRolloutMode;
     health[QStringLiteral("behaviorStreamEnabled")] =
         getSettingBool(QStringLiteral("behaviorStreamEnabled"), false);
     health[QStringLiteral("learningEnabled")] =
         getSettingBool(QStringLiteral("learningEnabled"), false);
+    health[QStringLiteral("onlineRankerRolloutMode")] = rolloutMode;
+    health[QStringLiteral("rolloutAllowsTraining")] = rolloutAllowsTraining(rolloutMode);
+    health[QStringLiteral("rolloutAllowsServing")] = rolloutAllowsServing(rolloutMode);
     health[QStringLiteral("learningPauseOnUserInput")] =
         getSettingBool(QStringLiteral("learningPauseOnUserInput"), true);
+    QJsonObject captureScope;
+    captureScope[QStringLiteral("appActivityEnabled")] =
+        getSettingBool(QStringLiteral("behaviorCaptureAppActivityEnabled"), true);
+    captureScope[QStringLiteral("inputActivityEnabled")] =
+        getSettingBool(QStringLiteral("behaviorCaptureInputActivityEnabled"), true);
+    captureScope[QStringLiteral("searchEventsEnabled")] =
+        getSettingBool(QStringLiteral("behaviorCaptureSearchEventsEnabled"), true);
+    captureScope[QStringLiteral("windowTitleHashEnabled")] =
+        getSettingBool(QStringLiteral("behaviorCaptureWindowTitleHashEnabled"), true);
+    captureScope[QStringLiteral("browserHostHashEnabled")] =
+        getSettingBool(QStringLiteral("behaviorCaptureBrowserHostHashEnabled"), true);
+    health[QStringLiteral("captureScope")] = captureScope;
+    QJsonObject lastBatchAttribution;
+    lastBatchAttribution[QStringLiteral("positiveExamples")] = m_lastBatchPositiveExamples;
+    lastBatchAttribution[QStringLiteral("contextHits")] = m_lastBatchContextHits;
+    lastBatchAttribution[QStringLiteral("digestHits")] = m_lastBatchDigestHits;
+    lastBatchAttribution[QStringLiteral("queryOnlyHits")] = m_lastBatchQueryOnlyHits;
+    lastBatchAttribution[QStringLiteral("unattributedPositives")] = m_lastBatchUnattributedPositives;
+    lastBatchAttribution[QStringLiteral("attributedRate")] = m_lastBatchAttributedRate;
+    lastBatchAttribution[QStringLiteral("contextRate")] = m_lastBatchContextRate;
+    lastBatchAttribution[QStringLiteral("digestRate")] = m_lastBatchDigestRate;
+    lastBatchAttribution[QStringLiteral("queryOnlyRate")] = m_lastBatchQueryOnlyRate;
+    lastBatchAttribution[QStringLiteral("unattributedRate")] = m_lastBatchUnattributedRate;
+    lastBatchAttribution[QStringLiteral("contextDigestRate")] = m_lastBatchContextDigestRate;
+    health[QStringLiteral("lastBatchAttribution")] = lastBatchAttribution;
+    QJsonObject promotionAttributionGate;
+    promotionAttributionGate[QStringLiteral("minPositiveExamples")] = promotionGateMinPositives;
+    promotionAttributionGate[QStringLiteral("minAttributedRate")] = promotionMinAttributedRate;
+    promotionAttributionGate[QStringLiteral("minContextDigestRate")] = promotionMinContextDigestRate;
+    health[QStringLiteral("promotionAttributionGate")] = promotionAttributionGate;
+    const QJsonArray storedCycleHistory = parseJsonArrayOrEmpty(
+        getSetting(QStringLiteral("onlineRankerRecentCycleHistory"), QStringLiteral("[]")));
+    QJsonArray recentLearningCycles;
+    for (const QJsonValue& value : storedCycleHistory) {
+        if (!value.isObject()) {
+            continue;
+        }
+        recentLearningCycles.append(value);
+        if (recentLearningCycles.size() >= recentCycleHistoryLimit) {
+            break;
+        }
+    }
+    health[QStringLiteral("recentLearningCycles")] = recentLearningCycles;
+    health[QStringLiteral("recentLearningCyclesCount")] = recentLearningCycles.size();
+    health[QStringLiteral("recentLearningCyclesLimit")] = recentCycleHistoryLimit;
+    health[QStringLiteral("metricsWindowDays")] = metricsWindowDays;
+    health[QStringLiteral("attributionMetrics")] =
+        collectAttributionMetrics(m_db, metricsWindowDays);
+    health[QStringLiteral("behaviorCoverageMetrics")] =
+        collectBehaviorCoverageMetrics(m_db, metricsWindowDays);
     health[QStringLiteral("cycleRunning")] = m_cycleRunning;
     health[QStringLiteral("lastUserActivityMs")] = m_lastUserActivityMs;
     return health;

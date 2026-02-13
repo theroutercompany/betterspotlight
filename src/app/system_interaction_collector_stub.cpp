@@ -4,6 +4,8 @@ namespace bs {
 
 struct SystemInteractionCollector::Impl {
     bool enabled = false;
+    bool captureAppActivityEnabled = true;
+    bool captureInputActivityEnabled = true;
 };
 
 SystemInteractionCollector::SystemInteractionCollector(QObject* parent)
@@ -29,8 +31,26 @@ void SystemInteractionCollector::setEnabled(bool enabled)
     QJsonObject health;
     health[QStringLiteral("enabled")] = enabled;
     health[QStringLiteral("platformSupported")] = false;
+    health[QStringLiteral("captureAppActivityEnabled")] = m_impl->captureAppActivityEnabled;
+    health[QStringLiteral("captureInputActivityEnabled")] = m_impl->captureInputActivityEnabled;
+    emit collectorHealthChanged(health);
+}
+
+void SystemInteractionCollector::setCaptureScope(bool appActivityEnabled, bool inputActivityEnabled)
+{
+    if (m_impl->captureAppActivityEnabled == appActivityEnabled
+        && m_impl->captureInputActivityEnabled == inputActivityEnabled) {
+        return;
+    }
+    m_impl->captureAppActivityEnabled = appActivityEnabled;
+    m_impl->captureInputActivityEnabled = inputActivityEnabled;
+
+    QJsonObject health;
+    health[QStringLiteral("enabled")] = m_impl->enabled;
+    health[QStringLiteral("platformSupported")] = false;
+    health[QStringLiteral("captureAppActivityEnabled")] = m_impl->captureAppActivityEnabled;
+    health[QStringLiteral("captureInputActivityEnabled")] = m_impl->captureInputActivityEnabled;
     emit collectorHealthChanged(health);
 }
 
 } // namespace bs
-

@@ -96,6 +96,9 @@ private:
     std::optional<QString> m_clipboardBasenameSignal;
     std::optional<QString> m_clipboardDirnameSignal;
     std::optional<QString> m_clipboardExtensionSignal;
+    QString m_lastFrontmostAppBundleId;
+    QString m_lastSystemEventId;
+    QString m_lastSystemActivityDigest;
     QString m_lastContextEventId;
     QString m_lastActivityDigest;
 
