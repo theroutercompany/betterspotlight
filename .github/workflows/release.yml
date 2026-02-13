@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: CMake build type
+        required: false
+        default: Release
+      notarize:
+        description: Run Apple notarization and stapling
+        required: false
+        default: false
+        type: boolean
+      create_dmg:
+        description: Create DMG artifact
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-build:
+    name: release-build
+    runs-on: ${{ vars.NS_RUNNER_MACOS_LG != '' && vars.NS_RUNNER_MACOS_LG || 'macos-15' }}
+    timeout-minutes: 240
+    env:
+      DEVELOPER_ID: ${{ secrets.DEVELOPER_ID }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Enforce workflow SHA pinning
+        run: |
+          set -euo pipefail
+          ./tools/ci/verify_workflow_action_pins.sh
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+          BS_FETCH_MAX_QUALITY_MODEL: '1'
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
+
+      - name: Build release artifacts
+        env:
+          BS_RELEASE_BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
+          BS_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-release
+          BS_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/dist/release
+          BS_SIGN: '1'
+          BS_CREATE_APP_ZIP: '1'
+          BS_CREATE_DMG: ${{ (github.event_name == 'push' && '1') || (inputs.create_dmg && '1') || '0' }}
+          BS_NOTARIZE: ${{ (github.event_name == 'push' && '1') || (inputs.notarize && '1') || '0' }}
+          BS_ENABLE_SPARKLE: '1'
+          BS_REQUIRE_SPARKLE: '1'
+          BS_BUILDER_PROVIDER: ${{ vars.NS_RUNNER_MACOS_LG != '' && 'namespace' || 'github-hosted' }}
+          BS_BUILDER_RUNNER_CLASS: ${{ vars.NS_RUNNER_MACOS_LG != '' && vars.NS_RUNNER_MACOS_LG || 'macos-15' }}
+        run: |
+          set -euo pipefail
+          ./scripts/release/build_macos_release.sh
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release_artifacts
+          path: |
+            ${{ github.workspace }}/dist/release
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/release/*.zip
+            dist/release/*.dmg
+            dist/release/release-manifest.json
+            dist/release/release_summary.json
+
+      - name: Verify release attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./tools/verify_attestation.sh dist/release/release-manifest.json "${{ github.repository }}"

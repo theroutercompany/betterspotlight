@@ -12,6 +12,7 @@ ENABLE_SPARKLE="${BS_ENABLE_SPARKLE:-0}"
 RUN_MACDEPLOYQT="${BS_RUN_MACDEPLOYQT:-1}"
 MACDEPLOYQT_INCLUDE_QMLDIR="${BS_MACDEPLOYQT_INCLUDE_QMLDIR:-1}"
 CREATE_DMG="${BS_CREATE_DMG:-1}"
+CREATE_APP_ZIP="${BS_CREATE_APP_ZIP:-1}"
 SIGN_ARTIFACTS="${BS_SIGN:-0}"
 NOTARIZE="${BS_NOTARIZE:-0}"
 SKIP_BUILD="${BS_SKIP_BUILD:-0}"
@@ -26,6 +27,7 @@ DMG_PATH="$OUTPUT_DIR/${APP_NAME}-${BUILD_TYPE}.dmg"
 APP_NOTARY_JSON="$OUTPUT_DIR/notary_app.json"
 DMG_NOTARY_JSON="$OUTPUT_DIR/notary_dmg.json"
 SUMMARY_JSON="$OUTPUT_DIR/release_summary.json"
+RELEASE_MANIFEST_PATH="$OUTPUT_DIR/release-manifest.json"
 
 function bool_is_true() {
     local v="${1:-0}"
@@ -726,18 +728,24 @@ PY
 }
 
 function maybe_notarize_app() {
+    if ! bool_is_true "$CREATE_APP_ZIP" && ! bool_is_true "$NOTARIZE"; then
+        return 0
+    fi
+
+    require_cmd ditto
+
+    rm -f "$ZIP_PATH"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_STAGE_PATH" "$ZIP_PATH"
+
     if ! bool_is_true "$NOTARIZE"; then
         return 0
     fi
 
     require_cmd xcrun
-    require_cmd ditto
     require_env APPLE_ID
     require_env APPLE_APP_SPECIFIC_PASSWORD
     require_env TEAM_ID
 
-    rm -f "$ZIP_PATH"
-    ditto -c -k --sequesterRsrc --keepParent "$APP_STAGE_PATH" "$ZIP_PATH"
     run_notary_submit "$ZIP_PATH" "$APP_NOTARY_JSON"
     xcrun stapler staple "$APP_STAGE_PATH"
     xcrun stapler validate "$APP_STAGE_PATH"
@@ -866,6 +874,39 @@ print(json.dumps(summary, indent=2))
 PY
 }
 
+function write_release_manifest() {
+    local artifacts=()
+    for candidate in \
+        "$SUMMARY_JSON" \
+        "$ZIP_PATH" \
+        "$DMG_PATH" \
+        "$APP_NOTARY_JSON" \
+        "$DMG_NOTARY_JSON"; do
+        if [[ -f "$candidate" ]]; then
+            artifacts+=("--artifact" "$candidate")
+        fi
+    done
+
+    local apple_stapled="0"
+    if bool_is_true "$NOTARIZE"; then
+        apple_stapled="1"
+    fi
+
+    python3 "$ROOT_DIR/scripts/release/generate_release_manifest.py" \
+        --output "$RELEASE_MANIFEST_PATH" \
+        --source-repository "${GITHUB_REPOSITORY:-}" \
+        --source-commit "${GITHUB_SHA:-}" \
+        --source-ref "${GITHUB_REF:-}" \
+        --builder-provider "${BS_BUILDER_PROVIDER:-}" \
+        --builder-runner-class "${BS_BUILDER_RUNNER_CLASS:-}" \
+        --builder-runner-label "${BS_BUILDER_RUNNER_LABEL:-${RUNNER_NAME:-}}" \
+        --summary-json "$SUMMARY_JSON" \
+        --apple-signed "$SIGN_ARTIFACTS" \
+        --apple-notarized "$NOTARIZE" \
+        --apple-stapled "$apple_stapled" \
+        "${artifacts[@]}"
+}
+
 require_cmd cmake
 require_cmd cp
 require_cmd python3
@@ -885,5 +926,6 @@ sign_staged_app
 maybe_notarize_app
 maybe_create_and_notarize_dmg
 write_summary
+write_release_manifest
 
 echo "Release pipeline complete. Artifacts in: $OUTPUT_DIR"

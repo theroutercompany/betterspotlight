@@ -1,0 +1,83 @@
+name: Provenance Drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * 3'
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: provenance-drill
+  cancel-in-progress: false
+
+jobs:
+  provenance-drill:
+    name: provenance-drill
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Enforce workflow SHA pinning
+        run: |
+          set -euo pipefail
+          ./tools/ci/verify_workflow_action_pins.sh
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for provenance drills."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
+
+      - name: Build unsigned release artifacts
+        env:
+          BS_RELEASE_BUILD_TYPE: Release
+          BS_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-release
+          BS_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/dist/release
+          BS_SIGN: '0'
+          BS_NOTARIZE: '0'
+          BS_CREATE_APP_ZIP: '1'
+          BS_CREATE_DMG: '0'
+          BS_BUILDER_PROVIDER: github-hosted
+          BS_BUILDER_RUNNER_CLASS: macos-15
+        run: |
+          set -euo pipefail
+          ./scripts/release/build_macos_release.sh
+
+      - name: Upload provenance drill artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provenance_drill_artifacts
+          path: |
+            ${{ github.workspace }}/dist/release
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest provenance drill artifacts
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/release/*.zip
+            dist/release/release-manifest.json
+            dist/release/release_summary.json
+
+      - name: Verify provenance drill attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./tools/verify_attestation.sh dist/release/release-manifest.json "${{ github.repository }}"

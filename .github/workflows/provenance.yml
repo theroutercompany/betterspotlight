@@ -1,0 +1,94 @@
+name: Provenance
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: CMake build type for release packaging
+        required: false
+        default: Release
+      create_dmg:
+        description: Build DMG in provenance lane
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      build_type:
+        required: false
+        type: string
+        default: Release
+      create_dmg:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: provenance-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-attest:
+    name: provenance-build-and-attest
+    runs-on: ${{ vars.NS_RUNNER_MACOS_MD != '' && vars.NS_RUNNER_MACOS_MD || 'macos-15' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
+
+      - name: Build release artifacts (unsigned)
+        env:
+          BS_RELEASE_BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
+          BS_RELEASE_BUILD_DIR: ${{ github.workspace }}/build-release
+          BS_RELEASE_OUTPUT_DIR: ${{ github.workspace }}/dist/release
+          BS_SIGN: '0'
+          BS_NOTARIZE: '0'
+          BS_CREATE_APP_ZIP: '1'
+          BS_CREATE_DMG: ${{ (inputs.create_dmg && '1') || '0' }}
+        run: |
+          set -euo pipefail
+          ./scripts/release/build_macos_release.sh
+
+      - name: Upload provenance artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: provenance_release_artifacts
+          path: |
+            ${{ github.workspace }}/dist/release
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/release/*.zip
+            dist/release/release-manifest.json
+            dist/release/release_summary.json
+
+      - name: Verify attestation from clean CLI context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./tools/verify_attestation.sh dist/release/release-manifest.json "${{ github.repository }}"

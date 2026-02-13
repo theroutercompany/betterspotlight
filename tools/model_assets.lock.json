@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "assets": [
+    {
+      "name": "bge-small-en-v1.5-int8.onnx",
+      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_int8.onnx",
+      "sha256": "bf64d05457cb391fa88d045faf5927a15ea36d96228ddf23ea970087afdc1197",
+      "size_bytes": 33760831,
+      "version": "xenova-bge-small-en-v1.5-int8"
+    },
+    {
+      "name": "vocab.txt",
+      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+      "size_bytes": 231508,
+      "version": "xenova-bge-small-en-v1.5-vocab"
+    },
+    {
+      "name": "bge-large-en-v1.5-f32.onnx",
+      "url": "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model.onnx",
+      "sha256": "69ed3f810d3b6d13f70dff9ca89966f39c0a0e877fb88211be7bcc070df2a2ce",
+      "size_bytes": 1336854281,
+      "version": "xenova-bge-large-en-v1.5-f32"
+    }
+  ]
+}

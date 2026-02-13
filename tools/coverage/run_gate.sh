@@ -40,6 +40,8 @@ cmake_args=(
     -B "${BUILD_DIR}"
     -DCMAKE_BUILD_TYPE=Debug
     -DBETTERSPOTLIGHT_ENABLE_COVERAGE=ON
+    -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+    -DBETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL=OFF
 )
 if [[ -n "${QT_PREFIX}" ]]; then
     cmake_args+=(-DCMAKE_PREFIX_PATH="${QT_PREFIX}")
@@ -131,7 +133,11 @@ if os.path.exists(exclusions_path):
         for line in f:
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                excluded.add(os.path.realpath(stripped))
+                if os.path.isabs(stripped):
+                    excluded_path = stripped
+                else:
+                    excluded_path = os.path.join(root_dir, stripped)
+                excluded.add(os.path.realpath(excluded_path))
 
 line_total = 0
 line_covered = 0
