@@ -9,6 +9,7 @@
 #include <QDir>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace bs {
@@ -189,32 +190,78 @@ double OnlineRanker::boost(const QVector<double>& features, double blendAlpha) c
 
 double OnlineRanker::logLoss(const Weights& model,
                              const QVector<TrainingExample>& examples,
-                             int* usedExamples)
+                             int* usedExamples,
+                             double* avgPredictionLatencyUs,
+                             double* predictionFailureRate,
+                             double* probabilitySaturationRate)
 {
     if (usedExamples) {
         *usedExamples = 0;
+    }
+    if (avgPredictionLatencyUs) {
+        *avgPredictionLatencyUs = 0.0;
+    }
+    if (predictionFailureRate) {
+        *predictionFailureRate = 0.0;
+    }
+    if (probabilitySaturationRate) {
+        *probabilitySaturationRate = 0.0;
     }
     if (!model.valid || model.w.isEmpty() || examples.isEmpty()) {
         return 0.0;
     }
 
     double loss = 0.0;
-    int count = 0;
+    int used = 0;
+    int attempted = 0;
+    int failed = 0;
+    int saturated = 0;
+    double totalLatencyUs = 0.0;
     for (const TrainingExample& ex : examples) {
         if (ex.label < 0 || ex.denseFeatures.isEmpty()) {
             continue;
         }
+        ++attempted;
         const double y = ex.label > 0 ? 1.0 : 0.0;
-        const double p = clamp(sigmoid(scoreRaw(model, ex.denseFeatures)), 1e-6, 1.0 - 1e-6);
+        const auto startedAt = std::chrono::steady_clock::now();
+        const double rawScore = scoreRaw(model, ex.denseFeatures);
+        const double rawProbability = sigmoid(rawScore);
+        const auto endedAt = std::chrono::steady_clock::now();
+        totalLatencyUs += static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(endedAt - startedAt).count());
+
+        if (!std::isfinite(rawScore) || !std::isfinite(rawProbability)) {
+            ++failed;
+            continue;
+        }
+        const double p = clamp(rawProbability, 1e-6, 1.0 - 1e-6);
+        if (p <= 1e-4 || p >= (1.0 - 1e-4)) {
+            ++saturated;
+        }
         const double weight = std::max(0.05, ex.weight);
         loss += -weight * (y * std::log(p) + (1.0 - y) * std::log(1.0 - p));
-        ++count;
+        ++used;
     }
 
     if (usedExamples) {
-        *usedExamples = count;
+        *usedExamples = used;
     }
-    return count > 0 ? loss / static_cast<double>(count) : 0.0;
+    if (avgPredictionLatencyUs) {
+        *avgPredictionLatencyUs = used > 0
+            ? (totalLatencyUs / static_cast<double>(used))
+            : 0.0;
+    }
+    if (predictionFailureRate) {
+        *predictionFailureRate = attempted > 0
+            ? (static_cast<double>(failed) / static_cast<double>(attempted))
+            : 0.0;
+    }
+    if (probabilitySaturationRate) {
+        *probabilitySaturationRate = used > 0
+            ? (static_cast<double>(saturated) / static_cast<double>(used))
+            : 0.0;
+    }
+    return used > 0 ? loss / static_cast<double>(used) : 0.0;
 }
 
 OnlineRanker::Weights OnlineRanker::trainCandidate(const Weights& seed,
@@ -266,6 +313,21 @@ bool OnlineRanker::trainAndPromote(const QVector<TrainingExample>& samples,
         rejectReason->clear();
     }
 
+    if (activeMetrics) {
+        activeMetrics->examples = 0;
+        activeMetrics->logLoss = 0.0;
+        activeMetrics->avgPredictionLatencyUs = 0.0;
+        activeMetrics->predictionFailureRate = 0.0;
+        activeMetrics->probabilitySaturationRate = 0.0;
+    }
+    if (candidateMetrics) {
+        candidateMetrics->examples = 0;
+        candidateMetrics->logLoss = 0.0;
+        candidateMetrics->avgPredictionLatencyUs = 0.0;
+        candidateMetrics->predictionFailureRate = 0.0;
+        candidateMetrics->probabilitySaturationRate = 0.0;
+    }
+
     if (samples.size() < std::max(20, config.minExamples)) {
         if (rejectReason) {
             *rejectReason = QStringLiteral("insufficient_examples");
@@ -308,16 +370,81 @@ bool OnlineRanker::trainAndPromote(const QVector<TrainingExample>& samples,
 
     int usedActive = 0;
     int usedCandidate = 0;
-    const double activeLoss = m_active.valid ? logLoss(m_active, holdoutSet, &usedActive) : 1.0;
-    const double candidateLoss = logLoss(candidate, holdoutSet, &usedCandidate);
+    double activeLatencyUs = 0.0;
+    double candidateLatencyUs = 0.0;
+    double activeFailureRate = 0.0;
+    double candidateFailureRate = 0.0;
+    double activeSaturationRate = 0.0;
+    double candidateSaturationRate = 0.0;
+    const double activeLoss = m_active.valid
+        ? logLoss(m_active,
+                  holdoutSet,
+                  &usedActive,
+                  &activeLatencyUs,
+                  &activeFailureRate,
+                  &activeSaturationRate)
+        : 1.0;
+    const double candidateLoss = logLoss(candidate,
+                                         holdoutSet,
+                                         &usedCandidate,
+                                         &candidateLatencyUs,
+                                         &candidateFailureRate,
+                                         &candidateSaturationRate);
 
     if (activeMetrics) {
         activeMetrics->examples = usedActive;
         activeMetrics->logLoss = activeLoss;
+        activeMetrics->avgPredictionLatencyUs = activeLatencyUs;
+        activeMetrics->predictionFailureRate = activeFailureRate;
+        activeMetrics->probabilitySaturationRate = activeSaturationRate;
     }
     if (candidateMetrics) {
         candidateMetrics->examples = usedCandidate;
         candidateMetrics->logLoss = candidateLoss;
+        candidateMetrics->avgPredictionLatencyUs = candidateLatencyUs;
+        candidateMetrics->predictionFailureRate = candidateFailureRate;
+        candidateMetrics->probabilitySaturationRate = candidateSaturationRate;
+    }
+
+    if (!std::isfinite(candidateLoss) || usedCandidate <= 0) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_invalid_eval");
+        }
+        return false;
+    }
+
+    const double latencyBudgetUs = clamp(config.promotionLatencyUsMax, 10.0, 1000000.0);
+    const double latencyRegressionPct = clamp(config.promotionLatencyRegressionPctMax, 0.0, 1000.0);
+    const double failureRateMax = clamp(config.promotionPredictionFailureRateMax, 0.0, 1.0);
+    const double saturationRateMax = clamp(config.promotionSaturationRateMax, 0.0, 1.0);
+
+    if (candidateLatencyUs > latencyBudgetUs) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_latency_budget_exceeded");
+        }
+        return false;
+    }
+    if (usedActive > 0 && activeLatencyUs > 0.0) {
+        const double maxAllowedLatencyUs =
+            activeLatencyUs * (1.0 + (latencyRegressionPct / 100.0));
+        if (candidateLatencyUs > maxAllowedLatencyUs) {
+            if (rejectReason) {
+                *rejectReason = QStringLiteral("candidate_latency_regression_exceeded");
+            }
+            return false;
+        }
+    }
+    if (candidateFailureRate > failureRateMax) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_failure_rate_exceeded");
+        }
+        return false;
+    }
+    if (candidateSaturationRate > saturationRateMax) {
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_saturation_rate_exceeded");
+        }
+        return false;
     }
 
     const bool promote = !m_active.valid || (candidateLoss + 0.002 < activeLoss);

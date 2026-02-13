@@ -12,6 +12,7 @@
 #import <dispatch/dispatch.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace bs {
@@ -278,26 +279,37 @@ double scoreWithModel(MLModel* model,
     return clamp(probability, 0.0, 1.0);
 }
 
-double evaluateLogLoss(MLModel* model,
-                       const QString& inputFeatureName,
-                       int featureDim,
-                       const QVector<TrainingExample>& examples,
-                       int* usedExamples)
+struct EvalSummary {
+    int usedExamples = 0;
+    int attemptedExamples = 0;
+    int failedExamples = 0;
+    int saturatedExamples = 0;
+    double logLoss = 0.0;
+    double avgPredictionLatencyUs = 0.0;
+    double predictionFailureRate = 0.0;
+    double probabilitySaturationRate = 0.0;
+};
+
+EvalSummary evaluateModel(MLModel* model,
+                          const QString& inputFeatureName,
+                          int featureDim,
+                          const QVector<TrainingExample>& examples)
 {
-    if (usedExamples) {
-        *usedExamples = 0;
-    }
+    EvalSummary summary;
     if (!model || examples.isEmpty()) {
-        return 0.0;
+        return summary;
     }
 
     double loss = 0.0;
+    double totalLatencyUs = 0.0;
     int used = 0;
     for (const TrainingExample& ex : examples) {
         if (ex.label < 0 || ex.denseFeatures.isEmpty()) {
             continue;
         }
+        ++summary.attemptedExamples;
         bool ok = false;
+        const auto startedAt = std::chrono::steady_clock::now();
         const double p = clamp(scoreWithModel(model,
                                               inputFeatureName,
                                               featureDim,
@@ -305,8 +317,19 @@ double evaluateLogLoss(MLModel* model,
                                               &ok),
                                1e-6,
                                1.0 - 1e-6);
+        const auto endedAt = std::chrono::steady_clock::now();
+        totalLatencyUs += static_cast<double>(
+            std::chrono::duration_cast<std::chrono::microseconds>(endedAt - startedAt).count());
         if (!ok) {
+            ++summary.failedExamples;
             continue;
+        }
+        if (!std::isfinite(p)) {
+            ++summary.failedExamples;
+            continue;
+        }
+        if (p <= 1e-4 || p >= (1.0 - 1e-4)) {
+            ++summary.saturatedExamples;
         }
         const double y = ex.label > 0 ? 1.0 : 0.0;
         const double weight = std::max(0.05, ex.weight);
@@ -314,10 +337,19 @@ double evaluateLogLoss(MLModel* model,
         ++used;
     }
 
-    if (usedExamples) {
-        *usedExamples = used;
-    }
-    return used > 0 ? (loss / static_cast<double>(used)) : 0.0;
+    summary.usedExamples = used;
+    summary.logLoss = used > 0 ? (loss / static_cast<double>(used)) : 0.0;
+    summary.avgPredictionLatencyUs = used > 0
+        ? (totalLatencyUs / static_cast<double>(used))
+        : 0.0;
+    summary.predictionFailureRate = summary.attemptedExamples > 0
+        ? (static_cast<double>(summary.failedExamples)
+           / static_cast<double>(summary.attemptedExamples))
+        : 0.0;
+    summary.probabilitySaturationRate = used > 0
+        ? (static_cast<double>(summary.saturatedExamples) / static_cast<double>(used))
+        : 0.0;
+    return summary;
 }
 
 id<MLBatchProvider> makeTrainingBatch(const QVector<TrainingExample>& trainSet,
@@ -572,10 +604,16 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
     if (activeMetrics) {
         activeMetrics->examples = 0;
         activeMetrics->logLoss = 0.0;
+        activeMetrics->avgPredictionLatencyUs = 0.0;
+        activeMetrics->predictionFailureRate = 0.0;
+        activeMetrics->probabilitySaturationRate = 0.0;
     }
     if (candidateMetrics) {
         candidateMetrics->examples = 0;
         candidateMetrics->logLoss = 0.0;
+        candidateMetrics->avgPredictionLatencyUs = 0.0;
+        candidateMetrics->predictionFailureRate = 0.0;
+        candidateMetrics->probabilitySaturationRate = 0.0;
     }
 
     if (!hasModel()) {
@@ -736,28 +774,76 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
         return false;
     }
 
-    int activeUsed = 0;
-    int candidateUsed = 0;
-    const double activeLoss = evaluateLogLoss(m_impl->activeModel,
-                                              m_impl->inputFeatureName,
-                                              m_impl->featureDim,
-                                              holdoutSet,
-                                              &activeUsed);
-    const double candidateLoss = evaluateLogLoss(candidateModel,
+    const EvalSummary activeEval = evaluateModel(m_impl->activeModel,
                                                  m_impl->inputFeatureName,
                                                  m_impl->featureDim,
-                                                 holdoutSet,
-                                                 &candidateUsed);
+                                                 holdoutSet);
+    const EvalSummary candidateEval = evaluateModel(candidateModel,
+                                                    m_impl->inputFeatureName,
+                                                    m_impl->featureDim,
+                                                    holdoutSet);
     if (activeMetrics) {
-        activeMetrics->examples = activeUsed;
-        activeMetrics->logLoss = activeLoss;
+        activeMetrics->examples = activeEval.usedExamples;
+        activeMetrics->logLoss = activeEval.logLoss;
+        activeMetrics->avgPredictionLatencyUs = activeEval.avgPredictionLatencyUs;
+        activeMetrics->predictionFailureRate = activeEval.predictionFailureRate;
+        activeMetrics->probabilitySaturationRate = activeEval.probabilitySaturationRate;
     }
     if (candidateMetrics) {
-        candidateMetrics->examples = candidateUsed;
-        candidateMetrics->logLoss = candidateLoss;
+        candidateMetrics->examples = candidateEval.usedExamples;
+        candidateMetrics->logLoss = candidateEval.logLoss;
+        candidateMetrics->avgPredictionLatencyUs = candidateEval.avgPredictionLatencyUs;
+        candidateMetrics->predictionFailureRate = candidateEval.predictionFailureRate;
+        candidateMetrics->probabilitySaturationRate = candidateEval.probabilitySaturationRate;
     }
 
-    const bool promote = (candidateLoss + kPromotionMargin) < activeLoss;
+    if (!std::isfinite(candidateEval.logLoss) || candidateEval.usedExamples <= 0) {
+        [candidateModel release];
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_invalid_eval");
+        }
+        return false;
+    }
+
+    const double latencyBudgetUs = clamp(config.promotionLatencyUsMax, 10.0, 1000000.0);
+    const double latencyRegressionPct = clamp(config.promotionLatencyRegressionPctMax, 0.0, 1000.0);
+    const double failureRateMax = clamp(config.promotionPredictionFailureRateMax, 0.0, 1.0);
+    const double saturationRateMax = clamp(config.promotionSaturationRateMax, 0.0, 1.0);
+
+    if (candidateEval.avgPredictionLatencyUs > latencyBudgetUs) {
+        [candidateModel release];
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_latency_budget_exceeded");
+        }
+        return false;
+    }
+    if (activeEval.usedExamples > 0 && activeEval.avgPredictionLatencyUs > 0.0) {
+        const double maxAllowedLatencyUs =
+            activeEval.avgPredictionLatencyUs * (1.0 + (latencyRegressionPct / 100.0));
+        if (candidateEval.avgPredictionLatencyUs > maxAllowedLatencyUs) {
+            [candidateModel release];
+            if (rejectReason) {
+                *rejectReason = QStringLiteral("candidate_latency_regression_exceeded");
+            }
+            return false;
+        }
+    }
+    if (candidateEval.predictionFailureRate > failureRateMax) {
+        [candidateModel release];
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_failure_rate_exceeded");
+        }
+        return false;
+    }
+    if (candidateEval.probabilitySaturationRate > saturationRateMax) {
+        [candidateModel release];
+        if (rejectReason) {
+            *rejectReason = QStringLiteral("candidate_stability_saturation_rate_exceeded");
+        }
+        return false;
+    }
+
+    const bool promote = (candidateEval.logLoss + kPromotionMargin) < activeEval.logLoss;
     if (!promote) {
         [candidateModel release];
         if (rejectReason) {

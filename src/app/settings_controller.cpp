@@ -281,6 +281,16 @@ void syncRuntimeSettingsToDb(const QJsonObject& settings)
                   boolToSqlValue(settings.value(QStringLiteral("learningPauseOnUserInput")).toBool(true)));
     upsertSetting(db, QStringLiteral("onlineRankerBlendAlpha"),
                   QString::number(settings.value(QStringLiteral("onlineRankerBlendAlpha")).toDouble(0.15), 'g', 17));
+    upsertSetting(db, QStringLiteral("onlineRankerNegativeSampleRatio"),
+                  QString::number(std::clamp(
+                      settings.value(QStringLiteral("onlineRankerNegativeSampleRatio")).toDouble(3.0),
+                      0.0,
+                      10.0),
+                                  'g',
+                                  17));
+    upsertSetting(db, QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                  QString::number(std::max(
+                      60, settings.value(QStringLiteral("onlineRankerMaxTrainingBatchSize")).toInt(1200))));
     upsertSetting(db, QStringLiteral("behaviorRawRetentionDays"),
                   QString::number(settings.value(QStringLiteral("behaviorRawRetentionDays")).toInt(30)));
     upsertSetting(db, QStringLiteral("semanticBudgetMs"),
@@ -1302,6 +1312,8 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("onlineRankerPromotionMinContextDigestRate"), 0.1);
     ensureDefault(m_settings, QStringLiteral("learningPauseOnUserInput"), true);
     ensureDefault(m_settings, QStringLiteral("onlineRankerBlendAlpha"), 0.15);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerNegativeSampleRatio"), 3.0);
+    ensureDefault(m_settings, QStringLiteral("onlineRankerMaxTrainingBatchSize"), 1200);
     ensureDefault(m_settings, QStringLiteral("behaviorRawRetentionDays"), 30);
     ensureDefault(m_settings, QStringLiteral("queryRouterMinConfidence"), 0.45);
     ensureDefault(m_settings, QStringLiteral("strongEmbeddingTopK"), 40);

@@ -327,6 +327,8 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '256');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningThermalMax', '2');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningPauseOnUserInput', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerBlendAlpha', '0.15');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerNegativeSampleRatio', '3.0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMaxTrainingBatchSize', '1200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplayCapacity', '4000');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMinExamples', '120');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFreshTrainingLimit', '1200');

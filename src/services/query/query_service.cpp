@@ -4395,6 +4395,10 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         readBoolRuntimeSetting(QStringLiteral("learningPauseOnUserInput"), true);
     runtimeSettings[QStringLiteral("onlineRankerBlendAlpha")] = std::clamp(
         readDoubleRuntimeSetting(QStringLiteral("onlineRankerBlendAlpha"), 0.15), 0.0, 1.0);
+    runtimeSettings[QStringLiteral("onlineRankerNegativeSampleRatio")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerNegativeSampleRatio"), 3.0), 0.0, 10.0);
+    runtimeSettings[QStringLiteral("onlineRankerMaxTrainingBatchSize")] = std::max(
+        60, readIntRuntimeSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"), 1200));
     runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
         20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
     runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(

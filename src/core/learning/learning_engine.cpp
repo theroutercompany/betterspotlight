@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <utility>
 
 namespace bs {
@@ -32,7 +33,9 @@ constexpr int kFeatureDim = 13;
 constexpr int kDefaultReplayCapacity = 4000;
 constexpr int kDefaultFreshTrainingLimit = 1200;
 constexpr int kDefaultReplaySampleLimit = 1200;
+constexpr int kDefaultMaxTrainingBatchSize = 1200;
 constexpr int kDefaultNegativeStaleSeconds = 30;
+constexpr double kDefaultNegativeSampleRatio = 3.0;
 constexpr int kDefaultHealthWindowDays = 7;
 constexpr int kDefaultRecentCycleHistoryLimit = 50;
 constexpr int kDefaultPromotionGateMinPositives = 80;
@@ -103,6 +106,68 @@ QJsonArray parseJsonArrayOrEmpty(const QString& encoded)
         return QJsonArray();
     }
     return doc.array();
+}
+
+double exposureBiasWeightForRank(int rank)
+{
+    const int safeRank = std::max(0, rank);
+    // Approximate inverse-propensity correction: lower-ranked items get more weight.
+    const double inversePropensity = std::log2(static_cast<double>(safeRank) + 2.0);
+    return std::clamp(inversePropensity, 1.0, 4.0);
+}
+
+QVector<TrainingExample> sampleTrainingBatch(const QVector<TrainingExample>& examples,
+                                             double negativeSampleRatio,
+                                             int maxBatchSize)
+{
+    QVector<TrainingExample> positives;
+    QVector<TrainingExample> negatives;
+    positives.reserve(examples.size());
+    negatives.reserve(examples.size());
+
+    for (const TrainingExample& example : examples) {
+        if (example.label > 0) {
+            positives.push_back(example);
+        } else if (example.label == 0) {
+            negatives.push_back(example);
+        }
+    }
+
+    const int batchCap = std::max(1, maxBatchSize);
+    int targetNegatives = negatives.size();
+    if (!positives.isEmpty()) {
+        const double safeRatio = std::max(0.0, negativeSampleRatio);
+        const int ratioBound = static_cast<int>(std::ceil(
+            static_cast<double>(positives.size()) * safeRatio));
+        targetNegatives = std::min(targetNegatives, std::max(0, ratioBound));
+    }
+
+    if (positives.size() >= batchCap) {
+        positives.resize(batchCap);
+        targetNegatives = 0;
+    } else {
+        const int remainingCapacity = std::max(0, batchCap - static_cast<int>(positives.size()));
+        targetNegatives = std::min(targetNegatives, remainingCapacity);
+    }
+
+    if (targetNegatives < negatives.size()) {
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(
+            QRandomGenerator::global()->generate()));
+        std::shuffle(negatives.begin(), negatives.end(), rng);
+        negatives.resize(targetNegatives);
+    }
+
+    QVector<TrainingExample> sampled;
+    sampled.reserve(positives.size() + negatives.size());
+    sampled += positives;
+    sampled += negatives;
+
+    if (sampled.size() > 1) {
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(
+            QRandomGenerator::global()->generate()));
+        std::shuffle(sampled.begin(), sampled.end(), rng);
+    }
+    return sampled;
 }
 
 double currentProcessCpuPct()
@@ -1017,6 +1082,21 @@ QVector<double> LearningEngine::buildFeatureVector(const SearchResult& result,
                                                    int rank,
                                                    int queryTokenCount) const
 {
+    ContextFeatureVector contextFeatures;
+    contextFeatures.version = context.contextFeatureVersion.value_or(1);
+    contextFeatures.contextEventId = context.contextEventId.value_or(QString());
+    contextFeatures.activityDigest = context.activityDigest.value_or(QString());
+    contextFeatures.appFocusMatch =
+        (context.frontmostAppBundleId.has_value() && !context.frontmostAppBundleId->isEmpty())
+            ? 1.0
+            : 0.0;
+    contextFeatures.keyboardActivity = 0.0;
+    contextFeatures.mouseActivity = 0.0;
+    contextFeatures.queryLength = std::clamp(static_cast<double>(queryTokenCount) / 8.0, 0.0, 2.0);
+    contextFeatures.resultRank = 1.0 / static_cast<double>(std::max(1, rank + 1));
+    contextFeatures.routerConfidence = std::clamp(static_cast<double>(routerConfidence), 0.0, 1.0);
+    contextFeatures.semanticNeed = std::clamp(static_cast<double>(semanticNeed), 0.0, 1.0);
+
     QVector<double> features;
     features.fill(0.0, kFeatureDim);
 
@@ -1025,16 +1105,16 @@ QVector<double> LearningEngine::buildFeatureVector(const SearchResult& result,
     features[2] = std::clamp(result.scoreBreakdown.feedbackBoost / 25.0, 0.0, 2.0);
     features[3] = std::clamp(result.scoreBreakdown.frequencyBoost / 30.0, 0.0, 2.0);
     features[4] = std::clamp(result.scoreBreakdown.contextBoost / 25.0, -2.0, 2.0);
-    features[5] = std::clamp(static_cast<double>(semanticNeed), 0.0, 1.0);
-    features[6] = std::clamp(static_cast<double>(routerConfidence), 0.0, 1.0);
+    features[5] = contextFeatures.semanticNeed;
+    features[6] = contextFeatures.routerConfidence;
     features[7] = queryClass == QueryClass::PathOrCode ? 1.0 : 0.0;
     features[8] = queryClass == QueryClass::NaturalLanguage ? 1.0 : 0.0;
     features[9] = queryClass == QueryClass::ShortAmbiguous ? 1.0 : 0.0;
-    features[10] = 1.0 / static_cast<double>(std::max(1, rank + 1));
-    features[11] = std::clamp(static_cast<double>(queryTokenCount) / 8.0, 0.0, 2.0);
+    features[10] = contextFeatures.resultRank;
+    features[11] = contextFeatures.queryLength;
     features[12] = std::tanh(result.score / 300.0);
 
-    if (context.frontmostAppBundleId.has_value() && !context.frontmostAppBundleId->isEmpty()) {
+    if (contextFeatures.appFocusMatch > 0.0) {
         features[4] += 0.1;
     }
 
@@ -1087,7 +1167,8 @@ bool LearningEngine::recordExposure(const QString& query,
         return false;
     }
 
-    if (!getSettingBool(QStringLiteral("learningEnabled"), false)) {
+    if (!getSettingBool(QStringLiteral("learningEnabled"), false)
+        || !getSettingBool(QStringLiteral("behaviorStreamEnabled"), false)) {
         return true;
     }
 
@@ -1131,7 +1212,7 @@ bool LearningEngine::recordExposure(const QString& query,
 
     const QString sampleId = generateId();
     const double nowSec = static_cast<double>(QDateTime::currentSecsSinceEpoch());
-    const double weight = std::max(0.1, 1.0 / static_cast<double>(rank + 1));
+    const double weight = exposureBiasWeightForRank(rank);
 
     const QByteArray sampleUtf8 = sampleId.toUtf8();
     const QByteArray queryUtf8 = query.toUtf8();
@@ -1193,7 +1274,8 @@ bool LearningEngine::recordPositiveInteraction(const QString& query,
         return false;
     }
 
-    if (!getSettingBool(QStringLiteral("learningEnabled"), false)) {
+    if (!getSettingBool(QStringLiteral("learningEnabled"), false)
+        || !getSettingBool(QStringLiteral("behaviorStreamEnabled"), false)) {
         return true;
     }
 
@@ -1852,7 +1934,19 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     combined += fresh;
     combined += replay;
 
-    const BatchAttributionStats batchAttribution = collectBatchAttributionStats(combined);
+    const double negativeSampleRatio = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerNegativeSampleRatio"),
+                         kDefaultNegativeSampleRatio),
+        0.0,
+        10.0);
+    const int maxTrainingBatchSize = std::max(
+        60, getSettingInt(QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                          kDefaultMaxTrainingBatchSize));
+    QVector<TrainingExample> sampledCombined = sampleTrainingBatch(combined,
+                                                                   negativeSampleRatio,
+                                                                   maxTrainingBatchSize);
+
+    const BatchAttributionStats batchAttribution = collectBatchAttributionStats(sampledCombined);
     m_lastBatchPositiveExamples = batchAttribution.positiveExamples;
     m_lastBatchContextHits = batchAttribution.contextHits;
     m_lastBatchDigestHits = batchAttribution.digestHits;
@@ -1865,7 +1959,7 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     m_lastBatchUnattributedRate = batchAttribution.unattributedRate;
     m_lastBatchContextDigestRate = batchAttribution.contextDigestRate;
 
-    if (combined.size() < 60) {
+    if (sampledCombined.size() < 60) {
         m_cycleRunning = false;
         ++m_cyclesRun;
         ++m_cyclesRejected;
@@ -1873,7 +1967,7 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
                            QStringLiteral("not_enough_training_examples"),
                            0.0,
                            0.0,
-                           combined.size(),
+                           sampledCombined.size(),
                            false,
                            manual);
         if (reasonOut) {
@@ -1911,7 +2005,7 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
                                attributionGateReason,
                                0.0,
                                0.0,
-                               combined.size(),
+                               sampledCombined.size(),
                                false,
                                manual);
             if (reasonOut) {
@@ -1932,12 +2026,12 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     QString rejectReason;
     const bool coreMlBackend = m_coreMlRanker && m_coreMlRanker->hasModel();
     const bool promoted = coreMlBackend
-        ? m_coreMlRanker->trainAndPromote(combined,
+        ? m_coreMlRanker->trainAndPromote(sampledCombined,
                                           cfg,
                                           &activeMetrics,
                                           &candidateMetrics,
                                           &rejectReason)
-        : m_ranker->trainAndPromote(combined,
+        : m_ranker->trainAndPromote(sampledCombined,
                                     cfg,
                                     &activeMetrics,
                                     &candidateMetrics,
@@ -1974,7 +2068,7 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
                            QStringLiteral("promoted"),
                            activeMetrics.logLoss,
                            candidateMetrics.logLoss,
-                           combined.size(),
+                           sampledCombined.size(),
                            true,
                            manual);
         const QString promotedVersion = coreMlBackend
@@ -1995,7 +2089,7 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
                            reason,
                            activeMetrics.logLoss,
                            candidateMetrics.logLoss,
-                           combined.size(),
+                           sampledCombined.size(),
                            false,
                            manual);
     }
@@ -2173,6 +2267,14 @@ QJsonObject LearningEngine::healthSnapshot() const
                          kDefaultPromotionMinContextDigestRate),
         0.0,
         1.0);
+    const double negativeSampleRatio = std::clamp(
+        getSettingDouble(QStringLiteral("onlineRankerNegativeSampleRatio"),
+                         kDefaultNegativeSampleRatio),
+        0.0,
+        10.0);
+    const int maxTrainingBatchSize = std::max(
+        60, getSettingInt(QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                          kDefaultMaxTrainingBatchSize));
     const QString rolloutMode = canonicalRolloutMode(
         getSetting(QStringLiteral("onlineRankerRolloutMode"),
                    QString::fromLatin1(kRolloutInstrumentationOnly)),
@@ -2250,6 +2352,8 @@ QJsonObject LearningEngine::healthSnapshot() const
     promotionAttributionGate[QStringLiteral("minAttributedRate")] = promotionMinAttributedRate;
     promotionAttributionGate[QStringLiteral("minContextDigestRate")] = promotionMinContextDigestRate;
     health[QStringLiteral("promotionAttributionGate")] = promotionAttributionGate;
+    health[QStringLiteral("negativeSampleRatio")] = negativeSampleRatio;
+    health[QStringLiteral("maxTrainingBatchSize")] = maxTrainingBatchSize;
     const QJsonArray storedCycleHistory = parseJsonArrayOrEmpty(
         getSetting(QStringLiteral("onlineRankerRecentCycleHistory"), QStringLiteral("[]")));
     QJsonArray recentLearningCycles;
