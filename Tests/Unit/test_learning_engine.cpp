@@ -103,6 +103,8 @@ private slots:
     void testHealthSnapshotReportsAttributionAndCoverage();
     void testTriggerLearningCycleRejectsAttributionGate();
     void testTriggerLearningCycleAppliesNegativeSampling();
+    void testEndToEndExposureAttributionTrainPromote();
+    void testScoreBoostFallsBackWhenModelsMissingOrCorrupt();
     void testTriggerLearningCyclePromotesModel();
     void testCoreMlBootstrapSeededFromEnvOverride();
 };
@@ -692,6 +694,18 @@ void TestLearningEngine::testTriggerLearningCycleAppliesNegativeSampling()
     upsertSetting(store.rawDb(),
                   QStringLiteral("onlineRankerMaxTrainingBatchSize"),
                   QStringLiteral("1200"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("2222"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("12"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("0.07"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("0.98"));
 
     // 30 positives + 120 negatives.
     for (int i = 0; i < 150; ++i) {
@@ -715,6 +729,189 @@ void TestLearningEngine::testTriggerLearningCycleAppliesNegativeSampling()
     QCOMPARE(health.value(QStringLiteral("lastSampleCount")).toInt(), 60);
     QVERIFY(qAbs(health.value(QStringLiteral("negativeSampleRatio")).toDouble() - 1.0) < 0.0001);
     QCOMPARE(health.value(QStringLiteral("maxTrainingBatchSize")).toInt(), 1200);
+    QVERIFY(health.value(QStringLiteral("promotionRuntimeGate")).isObject());
+    const QJsonObject runtimeGate = health.value(QStringLiteral("promotionRuntimeGate")).toObject();
+    QVERIFY(qAbs(runtimeGate.value(QStringLiteral("latencyUsMax")).toDouble() - 2222.0) < 0.0001);
+    QVERIFY(qAbs(runtimeGate.value(QStringLiteral("latencyRegressionPctMax")).toDouble() - 12.0) < 0.0001);
+    QVERIFY(qAbs(runtimeGate.value(QStringLiteral("predictionFailureRateMax")).toDouble() - 0.07) < 0.0001);
+    QVERIFY(qAbs(runtimeGate.value(QStringLiteral("saturationRateMax")).toDouble() - 0.98) < 0.0001);
+    QVERIFY(health.contains(QStringLiteral("lastCandidateLatencyUs")));
+    QVERIFY(health.contains(QStringLiteral("lastCandidatePredictionFailureRate")));
+    QVERIFY(health.contains(QStringLiteral("lastCandidateSaturationRate")));
+}
+
+void TestLearningEngine::testEndToEndExposureAttributionTrainPromote()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString positivePath = QDir(tempDir.path()).filePath(QStringLiteral("report.md"));
+    const QString negativePath = QDir(tempDir.path()).filePath(QStringLiteral("notes.md"));
+    auto positiveItemIdOpt = seedItem(store, positivePath, QStringLiteral("report.md"));
+    auto negativeItemIdOpt = seedItem(store, negativePath, QStringLiteral("notes.md"));
+    QVERIFY(positiveItemIdOpt.has_value());
+    QVERIFY(negativeItemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerMinExamples"),
+                  QStringLiteral("40"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerNegativeStaleSeconds"),
+                  QStringLiteral("1"));
+
+    bs::SearchResult positiveResult;
+    positiveResult.itemId = positiveItemIdOpt.value();
+    positiveResult.path = positivePath;
+    positiveResult.name = QStringLiteral("report.md");
+    positiveResult.score = 175.0;
+    positiveResult.semanticNormalized = 0.92;
+    positiveResult.crossEncoderScore = 0.86f;
+
+    bs::SearchResult negativeResult;
+    negativeResult.itemId = negativeItemIdOpt.value();
+    negativeResult.path = negativePath;
+    negativeResult.name = QStringLiteral("notes.md");
+    negativeResult.score = 38.0;
+    negativeResult.semanticNormalized = 0.12;
+    negativeResult.crossEncoderScore = 0.08f;
+
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (int i = 0; i < 70; ++i) {
+        const QString contextEventId = QStringLiteral("ctx-e2e-%1").arg(i);
+        const QString activityDigest = QStringLiteral("digest-e2e-%1").arg(i);
+
+        bs::QueryContext context;
+        context.contextEventId = contextEventId;
+        context.activityDigest = activityDigest;
+        context.frontmostAppBundleId = QStringLiteral("com.apple.finder");
+
+        QVERIFY(engine.recordExposure(QStringLiteral("report"),
+                                      positiveResult,
+                                      context,
+                                      bs::QueryClass::NaturalLanguage,
+                                      0.92f,
+                                      0.85f,
+                                      0));
+        QVERIFY(engine.recordExposure(QStringLiteral("report"),
+                                      negativeResult,
+                                      context,
+                                      bs::QueryClass::NaturalLanguage,
+                                      0.92f,
+                                      0.85f,
+                                      1));
+        QVERIFY(engine.recordPositiveInteraction(QStringLiteral("report"),
+                                                 positiveItemIdOpt.value(),
+                                                 positivePath,
+                                                 QStringLiteral("com.apple.finder"),
+                                                 contextEventId,
+                                                 activityDigest,
+                                                 now.addSecs(i)));
+    }
+
+    // Let unlabeled exposures age into sampled negatives.
+    QTest::qWait(2200);
+
+    QString reason;
+    const bool promoted = engine.triggerLearningCycle(true, &reason);
+    QVERIFY2(promoted, qPrintable(reason));
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("lastCycleStatus")).toString(),
+             QStringLiteral("succeeded"));
+    QCOMPARE(health.value(QStringLiteral("lastCycleReason")).toString(),
+             QStringLiteral("promoted"));
+    QVERIFY(health.value(QStringLiteral("lastSampleCount")).toInt() >= 70);
+    QVERIFY(health.value(QStringLiteral("replaySize")).toInt() > 0);
+
+    const QJsonObject attribution = health.value(QStringLiteral("attributionMetrics")).toObject();
+    QVERIFY(attribution.value(QStringLiteral("positiveExamples")).toInt() >= 70);
+    QVERIFY(attribution.value(QStringLiteral("contextHitRate")).toDouble() > 0.95);
+
+    const QJsonArray cycles = health.value(QStringLiteral("recentLearningCycles")).toArray();
+    QVERIFY(!cycles.isEmpty());
+    const QJsonObject latest = cycles.first().toObject();
+    QCOMPARE(latest.value(QStringLiteral("status")).toString(),
+             QStringLiteral("succeeded"));
+    QCOMPARE(latest.value(QStringLiteral("reason")).toString(),
+             QStringLiteral("promoted"));
+}
+
+void TestLearningEngine::testScoreBoostFallsBackWhenModelsMissingOrCorrupt()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString itemPath = QDir(tempDir.path()).filePath(QStringLiteral("report.md"));
+    auto itemIdOpt = seedItem(store, itemPath, QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    const QString runtimeDataDir = QDir(tempDir.path()).filePath(QStringLiteral("runtime-data"));
+    const QString invalidBootstrapModelDir = QDir(runtimeDataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"));
+    QVERIFY(QDir().mkpath(invalidBootstrapModelDir));
+    QFile invalidBootstrapPayload(QDir(invalidBootstrapModelDir).filePath(QStringLiteral("dummy.bin")));
+    QVERIFY(invalidBootstrapPayload.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    invalidBootstrapPayload.write("invalid-coreml-bootstrap");
+    invalidBootstrapPayload.close();
+
+    const QString invalidNativeWeightsPath = QDir(runtimeDataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/active/weights.json"));
+    QVERIFY(QDir().mkpath(QFileInfo(invalidNativeWeightsPath).absolutePath()));
+    QFile invalidNativeWeights(invalidNativeWeightsPath);
+    QVERIFY(invalidNativeWeights.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    invalidNativeWeights.write("{invalid-json");
+    invalidNativeWeights.close();
+
+    bs::LearningEngine engine(store.rawDb(), runtimeDataDir);
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+
+    bs::SearchResult result;
+    result.itemId = itemIdOpt.value();
+    result.path = itemPath;
+    result.name = QStringLiteral("report.md");
+    result.score = 75.0;
+    result.semanticNormalized = 0.4;
+    result.crossEncoderScore = 0.3f;
+
+    bs::QueryContext context;
+    context.frontmostAppBundleId = QStringLiteral("com.apple.finder");
+
+    const double boost = engine.scoreBoostForResult(result,
+                                                    context,
+                                                    bs::QueryClass::NaturalLanguage,
+                                                    0.7f,
+                                                    0.5f,
+                                                    0,
+                                                    1,
+                                                    0.2);
+    QCOMPARE(boost, 0.0);
+
+    const QJsonObject health = engine.healthSnapshot();
+    QVERIFY(!health.value(QStringLiteral("modelAvailable")).toBool(true));
+    QVERIFY(!health.value(QStringLiteral("coreMlModelAvailable")).toBool(true));
+    QVERIFY(!health.value(QStringLiteral("nativeModelAvailable")).toBool(true));
+    QCOMPARE(health.value(QStringLiteral("fallbackMissingModel")).toInt(), 1);
 }
 
 void TestLearningEngine::testTriggerLearningCyclePromotesModel()

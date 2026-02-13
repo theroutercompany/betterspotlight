@@ -245,6 +245,7 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(learning.value(QStringLiteral("attributionMetrics")).isObject());
         QVERIFY(learning.value(QStringLiteral("behaviorCoverageMetrics")).isObject());
         QVERIFY(learning.value(QStringLiteral("promotionAttributionGate")).isObject());
+        QVERIFY(learning.value(QStringLiteral("promotionRuntimeGate")).isObject());
         QVERIFY(learning.value(QStringLiteral("recentLearningCycles")).isArray());
         QVERIFY(learning.value(QStringLiteral("scheduler")).isObject());
         QVERIFY(learning.value(QStringLiteral("captureScope")).isObject());
@@ -255,6 +256,7 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         params[QStringLiteral("behaviorStreamEnabled")] = true;
         params[QStringLiteral("learningEnabled")] = true;
         params[QStringLiteral("learningPauseOnUserInput")] = true;
+        params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("shadow_training");
         QJsonArray denylist;
         denylist.append(QStringLiteral("com.example.secret"));
         params[QStringLiteral("denylistApps")] = denylist;
@@ -314,11 +316,15 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(result.value(QStringLiteral("recorded")).toBool(false));
+        QVERIFY(result.value(QStringLiteral("attributedPositive")).toBool(false));
+        QVERIFY(result.contains(QStringLiteral("idleCycleTriggered")));
+        QVERIFY(result.contains(QStringLiteral("idleCycleReason")));
         QVERIFY(result.value(QStringLiteral("learningHealth")).isObject());
         const QJsonObject learning = result.value(QStringLiteral("learningHealth")).toObject();
         QVERIFY(learning.value(QStringLiteral("attributionMetrics")).isObject());
         QVERIFY(learning.value(QStringLiteral("behaviorCoverageMetrics")).isObject());
         QVERIFY(learning.value(QStringLiteral("promotionAttributionGate")).isObject());
+        QVERIFY(learning.value(QStringLiteral("promotionRuntimeGate")).isObject());
         QVERIFY(learning.value(QStringLiteral("recentLearningCycles")).isArray());
         const QJsonObject attribution =
             learning.value(QStringLiteral("attributionMetrics")).toObject();
@@ -356,6 +362,20 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(result.contains(QStringLiteral("promoted")));
         QVERIFY(result.contains(QStringLiteral("reason")));
         QVERIFY(result.value(QStringLiteral("learning")).isObject());
+        const QJsonObject learning = result.value(QStringLiteral("learning")).toObject();
+        QVERIFY(!learning.isEmpty());
+        QVERIFY(learning.value(QStringLiteral("lastCycleStatus")).isString());
+        QVERIFY(learning.value(QStringLiteral("lastCycleStatus")).toString()
+                != QLatin1String("never_run"));
+        QVERIFY(learning.value(QStringLiteral("lastSampleCount")).toInt(-1) >= 0);
+        const QJsonArray recentCycles =
+            learning.value(QStringLiteral("recentLearningCycles")).toArray();
+        QVERIFY(!recentCycles.isEmpty());
+        const QJsonObject latestCycle = recentCycles.first().toObject();
+        QCOMPARE(latestCycle.value(QStringLiteral("reason")).toString(),
+                 result.value(QStringLiteral("reason")).toString());
+        QCOMPARE(latestCycle.value(QStringLiteral("promoted")).toBool(false),
+                 result.value(QStringLiteral("promoted")).toBool(false));
     }
 
     bs::test::ServiceProcessHarness inferenceHarness(

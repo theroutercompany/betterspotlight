@@ -115,6 +115,7 @@ bs_add_unit_test(test-query-router Unit/test_query_router.cpp)
 bs_add_unit_test(test-reranker-cascade Unit/test_reranker_cascade.cpp)
 bs_add_unit_test(test-personalized-ltr Unit/test_personalized_ltr.cpp)
 bs_add_unit_test(test-learning-engine Unit/test_learning_engine.cpp)
+bs_add_unit_test(test-online-ranker Unit/test_online_ranker.cpp)
 bs_add_unit_test(test-dual-index-calibration Unit/test_dual_index_calibration.cpp)
 
 # Stability/reliability tests

@@ -167,6 +167,30 @@ void TestMigration::testApplyMigrationsUpToV4()
              QStringLiteral("1200"));
     sqlite3_finalize(stmt);
 
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerPromotionLatencyUsMax';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawLatencyUsMax =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawLatencyUsMax ? rawLatencyUsMax : ""),
+             QStringLiteral("2500"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerPromotionPredictionFailureRateMax';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawFailureRateMax =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawFailureRateMax ? rawFailureRateMax : ""),
+             QStringLiteral("0.05"));
+    sqlite3_finalize(stmt);
+
     sqlite3_close(db);
 }
 
