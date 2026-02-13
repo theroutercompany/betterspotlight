@@ -350,7 +350,9 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
         if (eventTypeLower == QLatin1String("open")
             || eventTypeLower == QLatin1String("select")
             || eventTypeLower == QLatin1String("activate")
-            || eventTypeLower == QLatin1String("result_open")) {
+            || eventTypeLower == QLatin1String("result_open")
+            || eventTypeLower == QLatin1String("result_select")
+            || eventTypeLower == QLatin1String("result_activate")) {
             attributedPositive = m_learningEngine->recordPositiveInteraction(
                 query,
                 event.itemId,
