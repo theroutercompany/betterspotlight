@@ -1574,6 +1574,22 @@ void TestQueryServiceM2Ipc::testRejectedPromotionDoesNotMutateActiveModelStateAc
         QCOMPARE(learning.value(QStringLiteral("modelVersion")).toString(), promotedVersion);
         QCOMPARE(learning.value(QStringLiteral("activeBackend")).toString(),
                  activeBackendAfterPromotion);
+
+        // Repeat once more: consecutive rejects must not mutate active/rollback pointers.
+        const QJsonObject secondResponse = harness.request(QStringLiteral("trigger_learning_cycle"));
+        QVERIFY(bs::test::isResponse(secondResponse));
+        const QJsonObject secondResult = bs::test::resultPayload(secondResponse);
+        QVERIFY(!secondResult.value(QStringLiteral("promoted")).toBool(true));
+        QCOMPARE(secondResult.value(QStringLiteral("reason")).toString(),
+                 QStringLiteral("candidate_stability_invalid_eval"));
+        const QJsonObject secondLearning = secondResult.value(QStringLiteral("learning")).toObject();
+        QCOMPARE(secondLearning.value(QStringLiteral("lastCycleStatus")).toString(),
+                 QStringLiteral("rejected"));
+        QCOMPARE(secondLearning.value(QStringLiteral("lastCycleReason")).toString(),
+                 QStringLiteral("candidate_stability_invalid_eval"));
+        QCOMPARE(secondLearning.value(QStringLiteral("modelVersion")).toString(), promotedVersion);
+        QCOMPARE(secondLearning.value(QStringLiteral("activeBackend")).toString(),
+                 activeBackendAfterPromotion);
     }
 
     {
