@@ -63,3 +63,8 @@ data/models/
 
 # Local debug logs
 firebase-debug.log
+
+# Environment files
+.env
+.env.*
+!.env.example
