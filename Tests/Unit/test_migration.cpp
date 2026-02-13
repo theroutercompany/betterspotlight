@@ -9,7 +9,7 @@ class TestMigration : public QObject {
 
 private slots:
     void testCurrentVersionMissingSettingsDefaultsToZero();
-    void testApplyMigrationsUpToV3();
+    void testApplyMigrationsUpToV4();
     void testRejectsDowngrade();
     void testRejectsUnsupportedTargetVersion();
 };
@@ -25,7 +25,7 @@ void TestMigration::testCurrentVersionMissingSettingsDefaultsToZero()
     sqlite3_close(db);
 }
 
-void TestMigration::testApplyMigrationsUpToV3()
+void TestMigration::testApplyMigrationsUpToV4()
 {
     sqlite3* db = nullptr;
     QCOMPARE(sqlite3_open(":memory:", &db), SQLITE_OK);
@@ -37,13 +37,22 @@ void TestMigration::testApplyMigrationsUpToV3()
                           nullptr, nullptr, nullptr),
              SQLITE_OK);
 
-    QVERIFY(bs::applyMigrations(db, 3));
-    QCOMPARE(bs::currentSchemaVersion(db), 3);
+    QVERIFY(bs::applyMigrations(db, 4));
+    QCOMPARE(bs::currentSchemaVersion(db), 4);
 
     sqlite3_stmt* stmt = nullptr;
     QCOMPARE(sqlite3_prepare_v2(
                  db,
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='vector_generation_state';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QVERIFY(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='behavior_events_v1';",
                  -1, &stmt, nullptr),
              SQLITE_OK);
     QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
@@ -65,7 +74,7 @@ void TestMigration::testRejectsDowngrade()
                           nullptr, nullptr, nullptr),
              SQLITE_OK);
 
-    QVERIFY(!bs::applyMigrations(db, 3));
+    QVERIFY(!bs::applyMigrations(db, 4));
     QCOMPARE(bs::currentSchemaVersion(db), 5);
 
     sqlite3_close(db);
@@ -83,12 +92,11 @@ void TestMigration::testRejectsUnsupportedTargetVersion()
                           nullptr, nullptr, nullptr),
              SQLITE_OK);
 
-    QVERIFY(!bs::applyMigrations(db, 4));
-    QCOMPARE(bs::currentSchemaVersion(db), 3);
+    QVERIFY(!bs::applyMigrations(db, 5));
+    QCOMPARE(bs::currentSchemaVersion(db), 4);
 
     sqlite3_close(db);
 }
 
 QTEST_MAIN(TestMigration)
 #include "test_migration.moc"
-

@@ -5,10 +5,14 @@
 #undef private
 
 #include <QFile>
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QStandardPaths>
+
+#include <sqlite3.h>
 
 namespace bs {
 
@@ -53,6 +57,32 @@ void resetSettings()
     QFile::remove(settingsPath());
 }
 
+QString runtimeDbPath()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+        + QStringLiteral("/betterspotlight/index.db");
+}
+
+void ensureRuntimeSettingsTable()
+{
+    const QFileInfo dbInfo(runtimeDbPath());
+    QDir().mkpath(dbInfo.absolutePath());
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(runtimeDbPath().toUtf8().constData(), &db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+    sqlite3_exec(db,
+                 "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);",
+                 nullptr,
+                 nullptr,
+                 nullptr);
+    sqlite3_close(db);
+}
+
 QJsonObject readSettings()
 {
     QFile file(settingsPath());
@@ -81,6 +111,7 @@ private slots:
     void testLaunchAtLoginSuccessPersists();
     void testShowInDockFailureDoesNotPersist();
     void testShowInDockSuccessPersists();
+    void testRuntimeBoolSettingReadsDbValue();
 };
 
 void TestSettingsControllerPlatform::initTestCase()
@@ -192,6 +223,20 @@ void TestSettingsControllerPlatform::testShowInDockSuccessPersists()
 
     const QJsonObject settings = readSettings();
     QVERIFY(settings.value(QStringLiteral("showInDock")).toBool(false));
+}
+
+void TestSettingsControllerPlatform::testRuntimeBoolSettingReadsDbValue()
+{
+    bs::SettingsController controller;
+    ensureRuntimeSettingsTable();
+
+    QVERIFY(controller.setRuntimeSetting(QStringLiteral("behaviorStreamEnabled"),
+                                         QStringLiteral("1")));
+    QVERIFY(controller.runtimeBoolSetting(QStringLiteral("behaviorStreamEnabled"), false));
+
+    QVERIFY(controller.setRuntimeSetting(QStringLiteral("behaviorStreamEnabled"),
+                                         QStringLiteral("0")));
+    QVERIFY(!controller.runtimeBoolSetting(QStringLiteral("behaviorStreamEnabled"), true));
 }
 
 QTEST_MAIN(TestSettingsControllerPlatform)

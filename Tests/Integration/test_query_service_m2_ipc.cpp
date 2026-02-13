@@ -219,6 +219,70 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(result.value(QStringLiteral("count")).toInt() >= 1);
     }
 
+    {
+        const QJsonObject response = harness.request(QStringLiteral("get_learning_health"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("learning")).isObject());
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("behaviorStreamEnabled")] = true;
+        params[QStringLiteral("learningEnabled")] = true;
+        params[QStringLiteral("learningPauseOnUserInput")] = true;
+        QJsonArray denylist;
+        denylist.append(QStringLiteral("com.example.secret"));
+        params[QStringLiteral("denylistApps")] = denylist;
+
+        const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("updated")).toBool(false));
+        QVERIFY(result.value(QStringLiteral("learning")).isObject());
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("eventId")] = QStringLiteral("fixture-behavior-1");
+        params[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] = static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("report");
+        params[QStringLiteral("attributionConfidence")] = 0.95;
+
+        QJsonObject inputMeta;
+        inputMeta[QStringLiteral("keyEventCount")] = 4;
+        inputMeta[QStringLiteral("shortcutCount")] = 0;
+        inputMeta[QStringLiteral("scrollCount")] = 0;
+        inputMeta[QStringLiteral("metadataOnly")] = true;
+        params[QStringLiteral("inputMeta")] = inputMeta;
+
+        QJsonObject privacyFlags;
+        privacyFlags[QStringLiteral("secureInput")] = false;
+        privacyFlags[QStringLiteral("privateContext")] = false;
+        privacyFlags[QStringLiteral("denylistedApp")] = false;
+        privacyFlags[QStringLiteral("redacted")] = false;
+        params[QStringLiteral("privacyFlags")] = privacyFlags;
+
+        const QJsonObject response = harness.request(QStringLiteral("record_behavior_event"), params);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("recorded")).toBool(false));
+        QVERIFY(result.value(QStringLiteral("learningHealth")).isObject());
+    }
+
+    {
+        const QJsonObject response = harness.request(QStringLiteral("trigger_learning_cycle"));
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.contains(QStringLiteral("promoted")));
+        QVERIFY(result.contains(QStringLiteral("reason")));
+        QVERIFY(result.value(QStringLiteral("learning")).isObject());
+    }
+
     bs::test::ServiceProcessHarness inferenceHarness(
         QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
     bs::test::ServiceLaunchConfig inferenceLaunch;
