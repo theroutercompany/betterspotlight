@@ -107,6 +107,7 @@ public:
     QString platformStatusMessage() const;
     QString platformStatusKey() const;
     bool platformStatusSuccess() const;
+    bool runtimeBoolSetting(const QString& key, bool defaultValue = false) const;
 
     // Setters
     void setHotkey(const QString& hotkey);

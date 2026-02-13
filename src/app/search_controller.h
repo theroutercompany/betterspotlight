@@ -33,6 +33,7 @@ public:
     void setSupervisor(Supervisor* supervisor);
     void setServiceManager(ServiceManager* serviceManager);
     void setClipboardSignalsEnabled(bool enabled);
+    void recordBehaviorEvent(const QJsonObject& event);
 
     QString query() const;
     void setQuery(const QString& query);
@@ -95,6 +96,8 @@ private:
     std::optional<QString> m_clipboardBasenameSignal;
     std::optional<QString> m_clipboardDirnameSignal;
     std::optional<QString> m_clipboardExtensionSignal;
+    QString m_lastContextEventId;
+    QString m_lastActivityDigest;
 
     QTimer m_debounceTimer;
     static constexpr int kDebounceMs = 100;

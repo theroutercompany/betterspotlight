@@ -30,6 +30,20 @@ qt_add_executable(betterspotlight
     assets/icons.qrc
 )
 
+target_sources(betterspotlight PRIVATE
+    system_interaction_collector.h
+)
+
+if(APPLE)
+    target_sources(betterspotlight PRIVATE
+        system_interaction_collector_mac.mm
+    )
+else()
+    target_sources(betterspotlight PRIVATE
+        system_interaction_collector_stub.cpp
+    )
+endif()
+
 set(APP_ICON_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/assets/BetterSpotlight.icns")
 set_source_files_properties(${APP_ICON_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 target_sources(betterspotlight PRIVATE ${APP_ICON_ICNS})

@@ -33,6 +33,7 @@ class QaExtractiveModel;
 class VectorIndex;
 class VectorStore;
 class SearchMerger;
+class LearningEngine;
 
 class QueryService : public ServiceBase {
     Q_OBJECT
@@ -60,6 +61,10 @@ private:
     QJsonObject handleRunAggregation(uint64_t id);
     QJsonObject handleExportInteractionData(uint64_t id, const QJsonObject& params);
     QJsonObject handleRebuildVectorIndex(uint64_t id, const QJsonObject& params);
+    QJsonObject handleRecordBehaviorEvent(uint64_t id, const QJsonObject& params);
+    QJsonObject handleGetLearningHealth(uint64_t id);
+    QJsonObject handleSetLearningConsent(uint64_t id, const QJsonObject& params);
+    QJsonObject handleTriggerLearningCycle(uint64_t id, const QJsonObject& params);
     void runVectorRebuildWorker(uint64_t runId, QString dbPath, QString dataDir,
                                 QString modelsDir,
                                 QString indexPath, QString metaPath,
@@ -86,6 +91,7 @@ private:
     std::unique_ptr<CrossEncoderReranker> m_fastCrossEncoderReranker;
     std::unique_ptr<PersonalizedLtr> m_personalizedLtr;
     std::unique_ptr<QaExtractiveModel> m_qaExtractiveModel;
+    std::unique_ptr<LearningEngine> m_learningEngine;
 
     struct VectorRebuildState {
         enum class Status {

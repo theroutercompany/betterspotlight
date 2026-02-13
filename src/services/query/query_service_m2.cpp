@@ -11,6 +11,8 @@
 #include "core/models/model_registry.h"
 #include "core/vector/vector_index.h"
 #include "core/vector/vector_store.h"
+#include "core/learning/learning_engine.h"
+#include "core/learning/behavior_types.h"
 
 #include <sqlite3.h>
 
@@ -20,6 +22,7 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QJsonArray>
+#include <QTimeZone>
 
 #include <algorithm>
 #include <cmath>
@@ -129,6 +132,17 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
                                      QStringLiteral("Failed to record interaction"));
     }
 
+    if (m_learningEngine) {
+        m_learningEngine->noteUserActivity();
+        m_learningEngine->recordPositiveInteraction(interaction.query,
+                                                    interaction.selectedItemId,
+                                                    interaction.selectedPath,
+                                                    interaction.frontmostApp,
+                                                    interaction.timestamp);
+        QString idleReason;
+        m_learningEngine->maybeRunIdleCycle(&idleReason);
+    }
+
     if (m_pathPreferences) {
         m_pathPreferences->invalidateCache();
     }
@@ -138,6 +152,9 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
 
     QJsonObject result;
     result[QStringLiteral("recorded")] = true;
+    if (m_learningEngine) {
+        result[QStringLiteral("learningHealth")] = m_learningEngine->healthSnapshot();
+    }
     return IpcMessage::makeResponse(id, result);
 }
 
@@ -248,6 +265,185 @@ QJsonObject QueryService::handleExportInteractionData(uint64_t id, const QJsonOb
     QJsonObject result;
     result[QStringLiteral("interactions")] = data;
     result[QStringLiteral("count")] = data.size();
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObject& params)
+{
+    if (!ensureM2ModulesInitialized()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+    if (!m_learningEngine) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Learning engine not initialized"));
+    }
+
+    BehaviorEvent event;
+    event.eventId = params.value(QStringLiteral("eventId")).toString();
+    event.source = params.value(QStringLiteral("source")).toString(QStringLiteral("betterspotlight"));
+    event.eventType = params.value(QStringLiteral("eventType")).toString(QStringLiteral("activity"));
+    event.appBundleId = params.value(QStringLiteral("appBundleId")).toString();
+    event.windowTitleHash = params.value(QStringLiteral("windowTitleHash")).toString();
+    event.itemPath = params.value(QStringLiteral("itemPath")).toString();
+    event.itemId = static_cast<int64_t>(params.value(QStringLiteral("itemId")).toInteger(0));
+    event.browserHostHash = params.value(QStringLiteral("browserHostHash")).toString();
+    event.attributionConfidence = std::clamp(
+        params.value(QStringLiteral("attributionConfidence")).toDouble(0.0), 0.0, 1.0);
+    event.contextEventId = params.value(QStringLiteral("contextEventId")).toString();
+    event.activityDigest = params.value(QStringLiteral("activityDigest")).toString();
+
+    const QJsonValue timestampValue = params.value(QStringLiteral("timestamp"));
+    if (timestampValue.isDouble()) {
+        const qint64 tsRaw = static_cast<qint64>(timestampValue.toDouble());
+        if (tsRaw > 9999999999LL) {
+            event.timestamp = QDateTime::fromMSecsSinceEpoch(tsRaw, QTimeZone::UTC);
+        } else {
+            event.timestamp = QDateTime::fromSecsSinceEpoch(tsRaw, QTimeZone::UTC);
+        }
+    } else if (timestampValue.isString()) {
+        event.timestamp = QDateTime::fromString(timestampValue.toString(), Qt::ISODate);
+        if (event.timestamp.isValid()) {
+            event.timestamp = event.timestamp.toUTC();
+        }
+    } else {
+        event.timestamp = QDateTime::currentDateTimeUtc();
+    }
+
+    const QJsonObject inputMeta = params.value(QStringLiteral("inputMeta")).toObject();
+    event.inputMeta.keyEventCount = std::max(0, inputMeta.value(QStringLiteral("keyEventCount")).toInt(0));
+    event.inputMeta.shortcutCount = std::max(0, inputMeta.value(QStringLiteral("shortcutCount")).toInt(0));
+    event.inputMeta.scrollCount = std::max(0, inputMeta.value(QStringLiteral("scrollCount")).toInt(0));
+    event.inputMeta.metadataOnly = inputMeta.value(QStringLiteral("metadataOnly")).toBool(true);
+
+    const QJsonObject mouseMeta = params.value(QStringLiteral("mouseMeta")).toObject();
+    event.mouseMeta.moveDistancePx = std::max(0.0, mouseMeta.value(QStringLiteral("moveDistancePx")).toDouble(0.0));
+    event.mouseMeta.clickCount = std::max(0, mouseMeta.value(QStringLiteral("clickCount")).toInt(0));
+    event.mouseMeta.dragCount = std::max(0, mouseMeta.value(QStringLiteral("dragCount")).toInt(0));
+
+    const QJsonObject privacyFlags = params.value(QStringLiteral("privacyFlags")).toObject();
+    event.privacyFlags.secureInput = privacyFlags.value(QStringLiteral("secureInput")).toBool(false);
+    event.privacyFlags.privateContext = privacyFlags.value(QStringLiteral("privateContext")).toBool(false);
+    event.privacyFlags.denylistedApp = privacyFlags.value(QStringLiteral("denylistedApp")).toBool(false);
+    event.privacyFlags.redacted = privacyFlags.value(QStringLiteral("redacted")).toBool(false);
+
+    QString error;
+    const bool recorded = m_learningEngine->recordBehaviorEvent(event, &error);
+    if (!recorded) {
+        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
+                                     error.isEmpty()
+                                         ? QStringLiteral("Failed to record behavior event")
+                                         : error);
+    }
+
+    bool attributedPositive = false;
+    const QString query = params.value(QStringLiteral("query")).toString();
+    if (!query.trimmed().isEmpty() && event.itemId > 0) {
+        const QString eventTypeLower = event.eventType.trimmed().toLower();
+        if (eventTypeLower == QLatin1String("open")
+            || eventTypeLower == QLatin1String("select")
+            || eventTypeLower == QLatin1String("activate")
+            || eventTypeLower == QLatin1String("result_open")) {
+            attributedPositive = m_learningEngine->recordPositiveInteraction(
+                query, event.itemId, event.itemPath, event.appBundleId, event.timestamp);
+        }
+    }
+
+    m_learningEngine->noteUserActivity();
+    QString idleReason;
+    const bool idleCycleTriggered = m_learningEngine->maybeRunIdleCycle(&idleReason);
+
+    QJsonObject result;
+    result[QStringLiteral("recorded")] = true;
+    result[QStringLiteral("attributedPositive")] = attributedPositive;
+    result[QStringLiteral("idleCycleTriggered")] = idleCycleTriggered;
+    result[QStringLiteral("idleCycleReason")] = idleReason;
+    result[QStringLiteral("learningHealth")] = m_learningEngine->healthSnapshot();
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleGetLearningHealth(uint64_t id)
+{
+    if (!ensureM2ModulesInitialized()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+    if (!m_learningEngine) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Learning engine not initialized"));
+    }
+
+    QJsonObject result;
+    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObject& params)
+{
+    if (!ensureM2ModulesInitialized()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+    if (!m_learningEngine) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Learning engine not initialized"));
+    }
+
+    const bool behaviorStreamEnabled =
+        params.value(QStringLiteral("behaviorStreamEnabled")).toBool(false);
+    const bool learningEnabled =
+        params.value(QStringLiteral("learningEnabled")).toBool(false);
+    const bool learningPauseOnUserInput =
+        params.value(QStringLiteral("learningPauseOnUserInput")).toBool(true);
+
+    QStringList denylistApps;
+    const QJsonArray denylist = params.value(QStringLiteral("denylistApps")).toArray();
+    denylistApps.reserve(denylist.size());
+    for (const QJsonValue& value : denylist) {
+        const QString app = value.toString().trimmed();
+        if (!app.isEmpty() && !denylistApps.contains(app)) {
+            denylistApps.push_back(app);
+        }
+    }
+
+    QString error;
+    const bool ok = m_learningEngine->setConsent(behaviorStreamEnabled,
+                                                  learningEnabled,
+                                                  learningPauseOnUserInput,
+                                                  denylistApps,
+                                                  &error);
+    if (!ok) {
+        return IpcMessage::makeError(id, IpcErrorCode::InternalError,
+                                     error.isEmpty()
+                                         ? QStringLiteral("Failed to update learning consent")
+                                         : error);
+    }
+
+    QJsonObject result;
+    result[QStringLiteral("updated")] = true;
+    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
+    return IpcMessage::makeResponse(id, result);
+}
+
+QJsonObject QueryService::handleTriggerLearningCycle(uint64_t id, const QJsonObject& params)
+{
+    if (!ensureM2ModulesInitialized()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+    if (!m_learningEngine) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Learning engine not initialized"));
+    }
+
+    const bool manual = params.value(QStringLiteral("manual")).toBool(true);
+    QString reason;
+    const bool promoted = m_learningEngine->triggerLearningCycle(manual, &reason);
+
+    QJsonObject result;
+    result[QStringLiteral("promoted")] = promoted;
+    result[QStringLiteral("reason")] = reason;
+    result[QStringLiteral("learning")] = m_learningEngine->healthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
 

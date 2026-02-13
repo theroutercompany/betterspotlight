@@ -16,6 +16,7 @@
 #include "core/ranking/personalized_ltr.h"
 #include "core/ranking/qa_extractive_model.h"
 #include "core/ranking/reranker_cascade.h"
+#include "core/learning/learning_engine.h"
 
 #include <sqlite3.h>
 
@@ -596,6 +597,10 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
     if (method == QLatin1String("get_file_type_affinity"))   return handleGetFileTypeAffinity(id);
     if (method == QLatin1String("run_aggregation"))          return handleRunAggregation(id);
     if (method == QLatin1String("export_interaction_data"))  return handleExportInteractionData(id, params);
+    if (method == QLatin1String("record_behavior_event"))    return handleRecordBehaviorEvent(id, params);
+    if (method == QLatin1String("get_learning_health"))      return handleGetLearningHealth(id);
+    if (method == QLatin1String("set_learning_consent"))     return handleSetLearningConsent(id, params);
+    if (method == QLatin1String("trigger_learning_cycle"))   return handleTriggerLearningCycle(id, params);
     if (method == QLatin1String("rebuildVectorIndex")
         || method == QLatin1String("rebuild_vector_index")) {
         return handleRebuildVectorIndex(id, params);
@@ -1019,6 +1024,14 @@ void QueryService::initM2Modules()
         LOG_WARN(bsIpc, "Personalized LTR unavailable (cold start)");
     }
 
+    m_learningEngine = std::make_unique<LearningEngine>(db, m_dataDir);
+    if (m_learningEngine->initialize()) {
+        LOG_INFO(bsIpc, "Online learning engine initialized (model=%s)",
+                 qUtf8Printable(m_learningEngine->modelVersion()));
+    } else {
+        LOG_WARN(bsIpc, "Online learning engine unavailable");
+    }
+
     m_qaExtractiveModel =
         std::make_unique<QaExtractiveModel>(m_modelRegistry.get(), "qa-extractive");
     if (m_qaExtractiveModel->initialize()) {
@@ -1220,6 +1233,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
+    if (m_learningEngine) {
+        m_learningEngine->noteUserActivity();
+    }
 
     // Parse query
     const QString originalRawQuery = params.value(QStringLiteral("query")).toString();
@@ -1367,6 +1383,28 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                 context.clipboardExtension = extension;
             }
         }
+        if (ctxObj.contains(QStringLiteral("contextEventId"))) {
+            const QString contextEventId = ctxObj.value(QStringLiteral("contextEventId"))
+                .toString()
+                .trimmed();
+            if (!contextEventId.isEmpty()) {
+                context.contextEventId = contextEventId;
+            }
+        }
+        if (ctxObj.contains(QStringLiteral("contextFeatureVersion"))) {
+            const int version = ctxObj.value(QStringLiteral("contextFeatureVersion")).toInt(0);
+            if (version > 0) {
+                context.contextFeatureVersion = version;
+            }
+        }
+        if (ctxObj.contains(QStringLiteral("activityDigest"))) {
+            const QString activityDigest = ctxObj.value(QStringLiteral("activityDigest"))
+                .toString()
+                .trimmed();
+            if (!activityDigest.isEmpty()) {
+                context.activityDigest = activityDigest;
+            }
+        }
         if (ctxObj.contains(QStringLiteral("recentPaths"))) {
             QJsonArray recentArr = ctxObj.value(QStringLiteral("recentPaths")).toArray();
             context.recentPaths.reserve(static_cast<size_t>(recentArr.size()));
@@ -1443,6 +1481,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const int rerankerStage1Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage1Max"), 40));
     const int rerankerStage2Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage2Max"), 12));
     const bool personalizedLtrEnabled = readBoolSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    const bool learningEnabled = readBoolSetting(QStringLiteral("learningEnabled"), false);
+    const double onlineRankerBlendAlpha = std::clamp(
+        readDoubleSetting(QStringLiteral("onlineRankerBlendAlpha"), 0.15), 0.0, 1.0);
     const double semanticThresholdNaturalLanguageBase = std::clamp(
         readDoubleSetting(QStringLiteral("semanticThresholdNaturalLanguageBase"), 0.62), 0.0, 1.0);
     const double semanticThresholdShortAmbiguousBase = std::clamp(
@@ -2782,6 +2823,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     bool ltrApplied = false;
     double ltrDeltaTop10 = 0.0;
     QString ltrModelVersion = QStringLiteral("unavailable");
+    bool onlineRankerApplied = false;
+    double onlineRankerDeltaTop10 = 0.0;
+    QString onlineRankerModelVersion = QStringLiteral("unavailable");
 
     for (auto& sr : results) {
         double feedbackBoost = 0.0;
@@ -2937,6 +2981,33 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         ltrApplied = true;
     }
 
+    if (learningEnabled && m_learningEngine) {
+        const int queryTokenCount = std::max<int>(
+            1, static_cast<int>(querySignalTokens.size()));
+        onlineRankerModelVersion = m_learningEngine->modelVersion();
+        const int limitForLearning = std::min<int>(100, static_cast<int>(results.size()));
+        for (int i = 0; i < limitForLearning; ++i) {
+            SearchResult& sr = results[static_cast<size_t>(i)];
+            const double delta = m_learningEngine->scoreBoostForResult(
+                sr,
+                context,
+                queryClass,
+                routerConfidence,
+                std::clamp(structured.semanticNeedScore, 0.0f, 1.0f),
+                i,
+                queryTokenCount,
+                onlineRankerBlendAlpha);
+            if (std::abs(delta) > 1e-9) {
+                sr.score += delta;
+                sr.scoreBreakdown.m2SignalBoost += delta;
+                if (i < 10) {
+                    onlineRankerDeltaTop10 += delta;
+                }
+                onlineRankerApplied = true;
+            }
+        }
+    }
+
     // Re-sort after M2 boosts
     std::sort(results.begin(), results.end(), [](const SearchResult& a, const SearchResult& b) {
         if (a.score != b.score) return a.score > b.score;
@@ -2946,6 +3017,19 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     // Truncate to the requested limit
     if (static_cast<int>(results.size()) > limit) {
         results.resize(static_cast<size_t>(limit));
+    }
+
+    if (learningEnabled && m_learningEngine) {
+        const int exposureLimit = std::min<int>(20, static_cast<int>(results.size()));
+        const float semanticNeedForExposure =
+            std::clamp(structured.semanticNeedScore, 0.0f, 1.0f);
+        for (int i = 0; i < exposureLimit; ++i) {
+            const SearchResult& sr = results[static_cast<size_t>(i)];
+            m_learningEngine->recordExposure(query, sr, context, queryClass,
+                                             routerConfidence,
+                                             semanticNeedForExposure,
+                                             i);
+        }
     }
 
     // Serialize results to JSON array
@@ -3084,6 +3168,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("rerankerStage1Max")] = rerankerStage1Max;
         debugInfo[QStringLiteral("rerankerStage2Max")] = rerankerStage2Max;
         debugInfo[QStringLiteral("personalizedLtrEnabled")] = personalizedLtrEnabled;
+        debugInfo[QStringLiteral("learningEnabled")] = learningEnabled;
+        debugInfo[QStringLiteral("onlineRankerBlendAlpha")] = onlineRankerBlendAlpha;
         debugInfo[QStringLiteral("semanticThresholdNaturalLanguageBase")] =
             semanticThresholdNaturalLanguageBase;
         debugInfo[QStringLiteral("semanticThresholdShortAmbiguousBase")] =
@@ -3210,6 +3296,9 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("ltrApplied")] = ltrApplied;
         debugInfo[QStringLiteral("ltrModelVersion")] = ltrModelVersion;
         debugInfo[QStringLiteral("ltrDeltaTop10")] = ltrDeltaTop10;
+        debugInfo[QStringLiteral("onlineRankerApplied")] = onlineRankerApplied;
+        debugInfo[QStringLiteral("onlineRankerModelVersion")] = onlineRankerModelVersion;
+        debugInfo[QStringLiteral("onlineRankerDeltaTop10")] = onlineRankerDeltaTop10;
         debugInfo[QStringLiteral("queryAfterParse")] = query;
         debugInfo[QStringLiteral("clipboardSignalsProvided")] =
             (context.clipboardBasename.has_value()
@@ -4075,6 +4164,22 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         readBoolRuntimeSetting(QStringLiteral("qaSnippetEnabled"), true);
     runtimeSettings[QStringLiteral("personalizedLtrEnabled")] =
         readBoolRuntimeSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    runtimeSettings[QStringLiteral("behaviorStreamEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("behaviorStreamEnabled"), false);
+    runtimeSettings[QStringLiteral("learningEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("learningEnabled"), false);
+    runtimeSettings[QStringLiteral("behaviorRawRetentionDays")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("behaviorRawRetentionDays"), 30));
+    runtimeSettings[QStringLiteral("learningIdleCpuPctMax")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("learningIdleCpuPctMax"), 35));
+    runtimeSettings[QStringLiteral("learningMemMbMax")] = std::max(
+        64, readIntRuntimeSetting(QStringLiteral("learningMemMbMax"), 256));
+    runtimeSettings[QStringLiteral("learningThermalMax")] = std::max(
+        0, readIntRuntimeSetting(QStringLiteral("learningThermalMax"), 2));
+    runtimeSettings[QStringLiteral("learningPauseOnUserInput")] =
+        readBoolRuntimeSetting(QStringLiteral("learningPauseOnUserInput"), true);
+    runtimeSettings[QStringLiteral("onlineRankerBlendAlpha")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerBlendAlpha"), 0.15), 0.0, 1.0);
     runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
         20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
     runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(
@@ -4307,6 +4412,12 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         (m_personalizedLtr && m_personalizedLtr->isAvailable());
     runtimeComponents[QStringLiteral("personalizedLtrModelVersion")] =
         m_personalizedLtr ? m_personalizedLtr->modelVersion() : QString();
+    runtimeComponents[QStringLiteral("onlineLearningAvailable")] =
+        (m_learningEngine != nullptr);
+    runtimeComponents[QStringLiteral("onlineRankerAvailable")] =
+        (m_learningEngine && m_learningEngine->modelAvailable());
+    runtimeComponents[QStringLiteral("onlineRankerModelVersion")] =
+        m_learningEngine ? m_learningEngine->modelVersion() : QString();
     runtimeComponents[QStringLiteral("qaExtractiveAvailable")] =
         useInferenceQa
             ? (inferenceRoleStatusForComponents.value(QStringLiteral("qa-extractive")).toString()
@@ -4329,6 +4440,9 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     runtimeComponents[QStringLiteral("modelRegistryInitialized")] =
         (m_modelRegistry != nullptr);
     indexHealth[QStringLiteral("runtimeComponents")] = runtimeComponents;
+    if (m_learningEngine) {
+        indexHealth[QStringLiteral("learningHealth")] = m_learningEngine->healthSnapshot();
+    }
 
     const QString modelsDirResolved = m_modelRegistry
         ? m_modelRegistry->modelsDir()

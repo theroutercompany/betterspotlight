@@ -33,6 +33,9 @@ struct QueryContext {
     std::optional<QString> clipboardBasename;
     std::optional<QString> clipboardDirname;
     std::optional<QString> clipboardExtension;
+    std::optional<QString> contextEventId;
+    std::optional<int> contextFeatureVersion;
+    std::optional<QString> activityDigest;
     std::vector<QString> recentPaths;
 };
 

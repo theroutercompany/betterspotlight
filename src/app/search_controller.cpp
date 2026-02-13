@@ -9,11 +9,13 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QGuiApplication>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QUrl>
+#include <QUuid>
 
 #include <algorithm>
 #include <chrono>
@@ -103,6 +105,30 @@ void SearchController::setClipboardSignalsEnabled(bool enabled)
     }
 
     handleClipboardChanged();
+}
+
+void SearchController::recordBehaviorEvent(const QJsonObject& event)
+{
+    QJsonObject payload = event;
+    const QString existingEventId = payload.value(QStringLiteral("eventId")).toString().trimmed();
+    if (existingEventId.isEmpty()) {
+        payload[QStringLiteral("eventId")] =
+            QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    if (!payload.contains(QStringLiteral("timestamp"))) {
+        payload[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+    }
+    const QString existingSource = payload.value(QStringLiteral("source")).toString().trimmed();
+    if (existingSource.isEmpty()) {
+        payload[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+    }
+
+    SocketClient* client = ensureQueryClient(150);
+    if (!client || !client->isConnected()) {
+        return;
+    }
+    client->sendNotification(QStringLiteral("record_behavior_event"), payload);
 }
 
 QString SearchController::query() const
@@ -206,6 +232,35 @@ void SearchController::openResult(int index)
         params[QStringLiteral("query")] = m_query;
         params[QStringLiteral("position")] = resultIndex;
         client->sendNotification(QStringLiteral("recordFeedback"), params);
+
+        QJsonObject interactionParams;
+        interactionParams[QStringLiteral("query")] = m_query;
+        interactionParams[QStringLiteral("selectedItemId")] =
+            item.value(QStringLiteral("itemId")).toLongLong();
+        interactionParams[QStringLiteral("selectedPath")] = path;
+        interactionParams[QStringLiteral("matchType")] =
+            item.value(QStringLiteral("matchType")).toString();
+        interactionParams[QStringLiteral("resultPosition")] = resultIndex + 1;
+        client->sendNotification(QStringLiteral("record_interaction"), interactionParams);
+
+        QJsonObject behaviorParams;
+        behaviorParams[QStringLiteral("eventId")] =
+            QUuid::createUuid().toString(QUuid::WithoutBraces);
+        behaviorParams[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        behaviorParams[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        behaviorParams[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        behaviorParams[QStringLiteral("query")] = m_query;
+        behaviorParams[QStringLiteral("itemId")] =
+            item.value(QStringLiteral("itemId")).toLongLong();
+        behaviorParams[QStringLiteral("itemPath")] = path;
+        if (!m_lastContextEventId.isEmpty()) {
+            behaviorParams[QStringLiteral("contextEventId")] = m_lastContextEventId;
+        }
+        if (!m_lastActivityDigest.isEmpty()) {
+            behaviorParams[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
+        }
+        recordBehaviorEvent(behaviorParams);
     }
 }
 
@@ -512,6 +567,12 @@ void SearchController::executeSearch()
     params[QStringLiteral("query")] = trimmedQuery;
     params[QStringLiteral("limit")] = 20;
     QJsonObject context;
+    m_lastContextEventId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_lastActivityDigest = QString::fromUtf8(
+        QCryptographicHash::hash(trimmedQuery.toUtf8(), QCryptographicHash::Sha256).toHex());
+    context[QStringLiteral("contextEventId")] = m_lastContextEventId;
+    context[QStringLiteral("contextFeatureVersion")] = 1;
+    context[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
     if (m_clipboardSignalsEnabled) {
         if (m_clipboardBasenameSignal.has_value()) {
             context[QStringLiteral("clipboardBasename")] = *m_clipboardBasenameSignal;
@@ -525,6 +586,25 @@ void SearchController::executeSearch()
     }
     if (!context.isEmpty()) {
         params[QStringLiteral("context")] = context;
+    }
+
+    if (client && client->isConnected()) {
+        QJsonObject behaviorParams;
+        behaviorParams[QStringLiteral("eventId")] = m_lastContextEventId;
+        behaviorParams[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        behaviorParams[QStringLiteral("eventType")] = QStringLiteral("query_submitted");
+        behaviorParams[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        behaviorParams[QStringLiteral("activityDigest")] = m_lastActivityDigest.left(32);
+        behaviorParams[QStringLiteral("contextEventId")] = m_lastContextEventId;
+        behaviorParams[QStringLiteral("query")] = trimmedQuery;
+        QJsonObject inputMeta;
+        inputMeta[QStringLiteral("keyEventCount")] = trimmedQuery.size();
+        inputMeta[QStringLiteral("shortcutCount")] = 0;
+        inputMeta[QStringLiteral("scrollCount")] = 0;
+        inputMeta[QStringLiteral("metadataOnly")] = true;
+        behaviorParams[QStringLiteral("inputMeta")] = inputMeta;
+        recordBehaviorEvent(behaviorParams);
     }
 
     auto response = client->sendRequest(QStringLiteral("search"), params, kSearchTimeoutMs);

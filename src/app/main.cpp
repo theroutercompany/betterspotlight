@@ -4,6 +4,7 @@
 #include "service_manager.h"
 #include "settings_controller.h"
 #include "status_bar_bridge.h"
+#include "system_interaction_collector.h"
 #include "runtime_environment.h"
 #include "update_manager.h"
 #include "core/models/model_registry.h"
@@ -247,6 +248,7 @@ int main(int argc, char* argv[])
     bs::SearchController searchController;
     bs::OnboardingController onboardingController;
     bs::SettingsController settingsController;
+    bs::SystemInteractionCollector systemInteractionCollector;
     bs::UpdateManager updateManager;
 
     // Wire search health/state through the actorized service manager.
@@ -263,6 +265,35 @@ int main(int argc, char* argv[])
                      &app, syncClipboardSignalsFromSettings);
     QObject::connect(&settingsController, &bs::SettingsController::enableInteractionTrackingChanged,
                      &app, syncClipboardSignalsFromSettings);
+
+    QObject::connect(&systemInteractionCollector,
+                     &bs::SystemInteractionCollector::behaviorEventCaptured,
+                     &searchController,
+                     &bs::SearchController::recordBehaviorEvent);
+    QObject::connect(&systemInteractionCollector,
+                     &bs::SystemInteractionCollector::collectorHealthChanged,
+                     &app,
+                     [](const QJsonObject& health) {
+        qInfo() << "System interaction collector health:" << health;
+    });
+    const auto syncBehaviorCollectorFromConsent = [&]() {
+        const bool enabled = settingsController.runtimeBoolSetting(
+            QStringLiteral("behaviorStreamEnabled"),
+            false);
+        systemInteractionCollector.setEnabled(enabled);
+    };
+    QObject::connect(&settingsController, &bs::SettingsController::settingsChanged,
+                     &app, [&](const QString& key) {
+        if (key.trimmed() == QLatin1String("behaviorStreamEnabled")) {
+            syncBehaviorCollectorFromConsent();
+        }
+    });
+    QTimer behaviorCollectorSyncTimer;
+    behaviorCollectorSyncTimer.setInterval(5000);
+    QObject::connect(&behaviorCollectorSyncTimer, &QTimer::timeout,
+                     &app, syncBehaviorCollectorFromConsent);
+    behaviorCollectorSyncTimer.start();
+    syncBehaviorCollectorFromConsent();
 
     // Load and keep global hotkey in sync with persisted settings.
     bool hotkeySyncInProgress = false;
@@ -384,6 +415,7 @@ int main(int argc, char* argv[])
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [&]() {
         trayStateController.quiesce();
+        systemInteractionCollector.setEnabled(false);
         serviceManager.stop();
     });
 
