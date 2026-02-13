@@ -7,7 +7,9 @@
 
 set -euo pipefail
 
-QUERY_BIN="/Users/rexliu/betterspotlight/build/src/services/query/betterspotlight-query"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BUILD_DIR="${BS_BENCHMARK_BUILD_DIR:-${ROOT_DIR}/build}"
+QUERY_BIN="${BS_QUERY_BIN:-${BUILD_DIR}/src/services/query/betterspotlight-query}"
 
 if [[ ! -x "$QUERY_BIN" ]]; then
   echo "Error: query service binary not found. Build first."

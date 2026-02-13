@@ -1,6 +1,6 @@
-/Users/rexliu/betterspotlight/src/services/indexer/main.cpp
-/Users/rexliu/betterspotlight/src/services/extractor/main.cpp
-/Users/rexliu/betterspotlight/src/services/inference/main.cpp
-/Users/rexliu/betterspotlight/src/services/query/main.cpp
-/Users/rexliu/betterspotlight/src/core/fs/file_monitor_macos.cpp
-/Users/rexliu/betterspotlight/src/core/fs/file_monitor_macos.h
+src/services/indexer/main.cpp
+src/services/extractor/main.cpp
+src/services/inference/main.cpp
+src/services/query/main.cpp
+src/core/fs/file_monitor_macos.cpp
+src/core/fs/file_monitor_macos.h

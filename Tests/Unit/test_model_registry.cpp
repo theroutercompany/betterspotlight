@@ -2,6 +2,7 @@
 
 #include "core/models/model_manifest.h"
 #include "core/models/model_registry.h"
+#include "../Utils/model_fixture_paths.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -11,7 +12,6 @@
 #include <QJsonObject>
 #include <QScopeGuard>
 #include <QStandardPaths>
-#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 
@@ -42,43 +42,9 @@ private:
     bool hadValue_ = false;
 };
 
-QString fixtureModelsSourceDir()
-{
-    const QString resolved = bs::ModelRegistry::resolveModelsDir();
-    const QString modelPath =
-        QDir(resolved).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
-    const QString vocabPath = QDir(resolved).filePath(QStringLiteral("vocab.txt"));
-    if (QFileInfo::exists(modelPath) && QFileInfo::exists(vocabPath)) {
-        return resolved;
-    }
-    return QStringLiteral("/Users/rexliu/betterspotlight/data/models");
-}
-
-bool linkOrCopyFile(const QString& sourcePath, const QString& destPath)
-{
-    QFile::remove(destPath);
-    if (QFile::link(sourcePath, destPath)) {
-        return true;
-    }
-    return QFile::copy(sourcePath, destPath);
-}
-
 bool prepareCrossEncoderFixtureDir(const QString& modelsDir, bool includeAliasFallbackRole)
 {
-    const QString sourceDir = fixtureModelsSourceDir();
-    const QString sourceModel =
-        QDir(sourceDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx"));
-    const QString sourceVocab = QDir(sourceDir).filePath(QStringLiteral("vocab.txt"));
-    if (!QFileInfo::exists(sourceModel) || !QFileInfo::exists(sourceVocab)) {
-        return false;
-    }
-
-    if (!linkOrCopyFile(sourceModel,
-                        QDir(modelsDir).filePath(QStringLiteral("bge-small-en-v1.5-int8.onnx")))) {
-        return false;
-    }
-    if (!linkOrCopyFile(sourceVocab,
-                        QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
+    if (!bs::test::prepareFixtureEmbeddingModelFiles(modelsDir)) {
         return false;
     }
 

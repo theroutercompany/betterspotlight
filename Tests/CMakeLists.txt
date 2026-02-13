@@ -110,9 +110,15 @@ bs_add_unit_test(test-doctype-classifier Unit/test_doctype_classifier.cpp)
 bs_add_unit_test(test-rules-engine Unit/test_rules_engine.cpp)
 
 # M3 unit tests
-bs_add_unit_test(test-model-registry Unit/test_model_registry.cpp)
+bs_add_unit_test(test-model-registry Unit/test_model_registry.cpp
+    SOURCES
+        Utils/model_fixture_paths.cpp
+)
 bs_add_unit_test(test-query-router Unit/test_query_router.cpp)
-bs_add_unit_test(test-reranker-cascade Unit/test_reranker_cascade.cpp)
+bs_add_unit_test(test-reranker-cascade Unit/test_reranker_cascade.cpp
+    SOURCES
+        Utils/model_fixture_paths.cpp
+)
 bs_add_unit_test(test-personalized-ltr Unit/test_personalized_ltr.cpp)
 bs_add_unit_test(test-learning-engine Unit/test_learning_engine.cpp)
 bs_add_unit_test(test-online-ranker Unit/test_online_ranker.cpp)
@@ -132,7 +138,10 @@ bs_add_unit_test(test-query-cache Unit/test_query_cache.cpp)
 
 # Cross-encoder + StructuredQuery tests
 bs_add_unit_test(test-tokenizer-pair Unit/test_tokenizer_pair.cpp)
-bs_add_unit_test(test-cross-encoder-reranker Unit/test_cross_encoder_reranker.cpp)
+bs_add_unit_test(test-cross-encoder-reranker Unit/test_cross_encoder_reranker.cpp
+    SOURCES
+        Utils/model_fixture_paths.cpp
+)
 bs_add_unit_test(test-structured-query-boost Unit/test_structured_query_boost.cpp)
 
 # M2 unit tests
@@ -185,7 +194,10 @@ bs_add_unit_test(test-vector-store Unit/test_vector_store.cpp)
 bs_add_unit_test(test-model-session Unit/test_model_session.cpp)
 bs_add_unit_test(test-tokenizer-factory Unit/test_tokenizer_factory.cpp)
 bs_add_unit_test(test-mdls-text-extractor Unit/test_mdls_text_extractor.cpp)
-bs_add_unit_test(test-qa-extractive-model Unit/test_qa_extractive_model.cpp)
+bs_add_unit_test(test-qa-extractive-model Unit/test_qa_extractive_model.cpp
+    SOURCES
+        Utils/model_fixture_paths.cpp
+)
 
 # Non-runtime docs/lint check
 bs_add_test(test-docs-memo-location Unit/test_docs_memo_location.cpp

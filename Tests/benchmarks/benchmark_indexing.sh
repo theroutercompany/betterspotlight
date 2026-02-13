@@ -13,8 +13,10 @@ set -euo pipefail
 
 FILE_COUNT="${1:-1000}"
 TEMP_DIR=$(mktemp -d)
-INDEXER_BIN="/Users/rexliu/betterspotlight/build/src/services/indexer/betterspotlight-indexer"
-QUERY_BIN="/Users/rexliu/betterspotlight/build/src/services/query/betterspotlight-query"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BUILD_DIR="${BS_BENCHMARK_BUILD_DIR:-${ROOT_DIR}/build}"
+INDEXER_BIN="${BS_INDEXER_BIN:-${BUILD_DIR}/src/services/indexer/betterspotlight-indexer}"
+QUERY_BIN="${BS_QUERY_BIN:-${BUILD_DIR}/src/services/query/betterspotlight-query}"
 
 trap "rm -rf '$TEMP_DIR'" EXIT
 
