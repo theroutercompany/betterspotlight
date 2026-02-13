@@ -2445,7 +2445,9 @@ QJsonObject LearningEngine::healthSnapshot() const
     health[QStringLiteral("replayCapacity")] = std::max(256,
         getSettingInt(QStringLiteral("onlineRankerReplayCapacity"), kDefaultReplayCapacity));
     health[QStringLiteral("replaySeenCount")] = static_cast<qint64>(m_replaySeenCount);
-    health[QStringLiteral("pendingExamples")] = pendingExamples();
+    const int pending = pendingExamples();
+    health[QStringLiteral("pendingExamples")] = pending;
+    health[QStringLiteral("queueDepth")] = pending;
     health[QStringLiteral("fallbackMissingModel")] = m_fallbackMissingModel;
     health[QStringLiteral("fallbackLearningDisabled")] = m_fallbackLearningDisabled;
     health[QStringLiteral("fallbackResourceBudget")] = m_fallbackResourceBudget;
