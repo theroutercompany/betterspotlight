@@ -59,6 +59,90 @@ void TestMigration::testApplyMigrationsUpToV4()
     QVERIFY(sqlite3_column_int(stmt, 0) == 1);
     sqlite3_finalize(stmt);
 
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerHealthWindowDays';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawHealthWindow = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawHealthWindow ? rawHealthWindow : ""), QStringLiteral("7"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerRecentCycleHistoryLimit';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawRecentCycleLimit = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawRecentCycleLimit ? rawRecentCycleLimit : ""), QStringLiteral("50"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='onlineRankerPromotionGateMinPositives';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawPromotionMinPos = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawPromotionMinPos ? rawPromotionMinPos : ""), QStringLiteral("80"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='behaviorCaptureAppActivityEnabled';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawCaptureApp = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawCaptureApp ? rawCaptureApp : ""), QStringLiteral("1"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='behaviorCaptureInputActivityEnabled';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawCaptureInput = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawCaptureInput ? rawCaptureInput : ""), QStringLiteral("1"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='behaviorCaptureSearchEventsEnabled';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawCaptureSearch = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawCaptureSearch ? rawCaptureSearch : ""), QStringLiteral("1"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='behaviorCaptureWindowTitleHashEnabled';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawCaptureWindowTitle =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawCaptureWindowTitle ? rawCaptureWindowTitle : ""),
+             QStringLiteral("1"));
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(
+                 db,
+                 "SELECT value FROM settings WHERE key='behaviorCaptureBrowserHostHashEnabled';",
+                 -1, &stmt, nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawCaptureBrowserHost =
+        reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    QCOMPARE(QString::fromUtf8(rawCaptureBrowserHost ? rawCaptureBrowserHost : ""),
+             QStringLiteral("1"));
+    sqlite3_finalize(stmt);
+
     sqlite3_close(db);
 }
 

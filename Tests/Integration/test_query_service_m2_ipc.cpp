@@ -171,6 +171,9 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         params[QStringLiteral("matchType")] = QStringLiteral("exact");
         params[QStringLiteral("resultPosition")] = 1;
         params[QStringLiteral("frontmostApp")] = QStringLiteral("Finder");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-m2-ipc-report");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-m2-ipc-report");
         const QJsonObject response =
             harness.request(QStringLiteral("record_interaction"), params, 10000);
         QVERIFY(bs::test::isResponse(response));
@@ -215,8 +218,22 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         const QJsonObject response = harness.request(QStringLiteral("export_interaction_data"));
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
+        const QJsonArray interactions = result.value(QStringLiteral("interactions")).toArray();
         QVERIFY(result.value(QStringLiteral("interactions")).isArray());
         QVERIFY(result.value(QStringLiteral("count")).toInt() >= 1);
+
+        bool foundSeeded = false;
+        for (const QJsonValue& value : interactions) {
+            const QJsonObject row = value.toObject();
+            if (row.value(QStringLiteral("query")).toString() == QLatin1String("report")
+                && row.value(QStringLiteral("itemId")).toInteger(0) == seededItemId) {
+                foundSeeded = true;
+                QCOMPARE(row.value(QStringLiteral("frontmostApp")).toString(),
+                         QStringLiteral("com.apple.finder"));
+                break;
+            }
+        }
+        QVERIFY(foundSeeded);
     }
 
     {
@@ -224,6 +241,13 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(result.value(QStringLiteral("learning")).isObject());
+        const QJsonObject learning = result.value(QStringLiteral("learning")).toObject();
+        QVERIFY(learning.value(QStringLiteral("attributionMetrics")).isObject());
+        QVERIFY(learning.value(QStringLiteral("behaviorCoverageMetrics")).isObject());
+        QVERIFY(learning.value(QStringLiteral("promotionAttributionGate")).isObject());
+        QVERIFY(learning.value(QStringLiteral("recentLearningCycles")).isArray());
+        QVERIFY(learning.value(QStringLiteral("scheduler")).isObject());
+        QVERIFY(learning.value(QStringLiteral("captureScope")).isObject());
     }
 
     {
@@ -234,12 +258,28 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QJsonArray denylist;
         denylist.append(QStringLiteral("com.example.secret"));
         params[QStringLiteral("denylistApps")] = denylist;
+        QJsonObject captureScope;
+        captureScope[QStringLiteral("appActivityEnabled")] = false;
+        captureScope[QStringLiteral("inputActivityEnabled")] = false;
+        captureScope[QStringLiteral("searchEventsEnabled")] = true;
+        captureScope[QStringLiteral("windowTitleHashEnabled")] = false;
+        captureScope[QStringLiteral("browserHostHashEnabled")] = false;
+        params[QStringLiteral("captureScope")] = captureScope;
 
         const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(result.value(QStringLiteral("updated")).toBool(false));
         QVERIFY(result.value(QStringLiteral("learning")).isObject());
+        const QJsonObject learning = result.value(QStringLiteral("learning")).toObject();
+        QVERIFY(learning.value(QStringLiteral("captureScope")).isObject());
+        const QJsonObject returnedScope = learning.value(QStringLiteral("captureScope")).toObject();
+        QVERIFY(!returnedScope.value(QStringLiteral("appActivityEnabled")).toBool(true));
+        QVERIFY(!returnedScope.value(QStringLiteral("inputActivityEnabled")).toBool(true));
+        QVERIFY(returnedScope.value(QStringLiteral("searchEventsEnabled")).toBool(false));
+        QVERIFY(!returnedScope.value(QStringLiteral("windowTitleHashEnabled")).toBool(true));
+        QVERIFY(!returnedScope.value(QStringLiteral("browserHostHashEnabled")).toBool(true));
+        QVERIFY(learning.value(QStringLiteral("scheduler")).isObject());
     }
 
     {
@@ -251,6 +291,9 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         params[QStringLiteral("itemId")] = seededItemId;
         params[QStringLiteral("itemPath")] = seededPath;
         params[QStringLiteral("query")] = QStringLiteral("report");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("contextEventId")] = QStringLiteral("ctx-behavior-stream-fixture");
+        params[QStringLiteral("activityDigest")] = QStringLiteral("digest-behavior-stream-fixture");
         params[QStringLiteral("attributionConfidence")] = 0.95;
 
         QJsonObject inputMeta;
@@ -272,6 +315,38 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(result.value(QStringLiteral("recorded")).toBool(false));
         QVERIFY(result.value(QStringLiteral("learningHealth")).isObject());
+        const QJsonObject learning = result.value(QStringLiteral("learningHealth")).toObject();
+        QVERIFY(learning.value(QStringLiteral("attributionMetrics")).isObject());
+        QVERIFY(learning.value(QStringLiteral("behaviorCoverageMetrics")).isObject());
+        QVERIFY(learning.value(QStringLiteral("promotionAttributionGate")).isObject());
+        QVERIFY(learning.value(QStringLiteral("recentLearningCycles")).isArray());
+        const QJsonObject attribution =
+            learning.value(QStringLiteral("attributionMetrics")).toObject();
+        const QJsonObject coverage =
+            learning.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+        QVERIFY(attribution.value(QStringLiteral("positiveExamples")).toInt(0) >= 1);
+        QVERIFY(coverage.value(QStringLiteral("events")).toInt(0) >= 1);
+    }
+
+    {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("report");
+        params[QStringLiteral("limit")] = 5;
+        params[QStringLiteral("debug")] = true;
+
+        const QJsonObject response = harness.request(QStringLiteral("search"), params, 12000);
+        QVERIFY(bs::test::isResponse(response));
+        const QJsonObject result = bs::test::resultPayload(response);
+        QVERIFY(result.value(QStringLiteral("results")).isArray());
+        const QJsonObject debugInfo = result.value(QStringLiteral("debugInfo")).toObject();
+        QVERIFY(!debugInfo.isEmpty());
+        QVERIFY(debugInfo.value(QStringLiteral("contextFallbackApplied")).toBool(false));
+        QCOMPARE(debugInfo.value(QStringLiteral("contextFrontmostAppBundleId")).toString(),
+                 QStringLiteral("com.apple.finder"));
+        QCOMPARE(debugInfo.value(QStringLiteral("contextEventId")).toString(),
+                 QStringLiteral("ctx-behavior-stream-fixture"));
+        QCOMPARE(debugInfo.value(QStringLiteral("contextActivityDigest")).toString(),
+                 QStringLiteral("digest-behavior-stream-fixture"));
     }
 
     {

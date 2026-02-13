@@ -35,7 +35,8 @@ void insertTrainingRow(sqlite3* db,
                        int64_t itemId,
                        int label,
                        double f0,
-                       double f1)
+                       double f1,
+                       double attributionConfidence = 1.0)
 {
     const QString featuresJson = QStringLiteral("[%1,%2,0,0,0,0,0,0,1,0,1,1,0]")
         .arg(f0, 0, 'f', 6)
@@ -53,8 +54,9 @@ void insertTrainingRow(sqlite3* db,
             label,
             weight,
             features_json,
+            attribution_confidence,
             consumed
-        ) VALUES (?1, ?2, 'report', 'report', ?3, '/tmp/report.md', ?4, 1.0, ?5, 0)
+        ) VALUES (?1, ?2, 'report', 'report', ?3, '/tmp/report.md', ?4, 1.0, ?5, ?6, 0)
     )";
 
     QCOMPARE(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr), SQLITE_OK);
@@ -65,6 +67,23 @@ void insertTrainingRow(sqlite3* db,
     sqlite3_bind_int64(stmt, 3, itemId);
     sqlite3_bind_int(stmt, 4, label);
     sqlite3_bind_text(stmt, 5, featuresUtf8.constData(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 6, std::clamp(attributionConfidence, 0.0, 1.0));
+    QCOMPARE(sqlite3_step(stmt), SQLITE_DONE);
+    sqlite3_finalize(stmt);
+}
+
+void upsertSetting(sqlite3* db, const QString& key, const QString& value)
+{
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        INSERT INTO settings (key, value) VALUES (?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    )";
+    QCOMPARE(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr), SQLITE_OK);
+    const QByteArray keyUtf8 = key.toUtf8();
+    const QByteArray valueUtf8 = value.toUtf8();
+    sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, valueUtf8.constData(), -1, SQLITE_TRANSIENT);
     QCOMPARE(sqlite3_step(stmt), SQLITE_DONE);
     sqlite3_finalize(stmt);
 }
@@ -77,7 +96,12 @@ class TestLearningEngine : public QObject {
 private slots:
     void testRecordBehaviorEventWithConsent();
     void testRecordBehaviorEventDenylistFilter();
+    void testRecordBehaviorEventRedactedFilter();
+    void testRecordBehaviorEventCaptureScopeFilter();
     void testExposureAndPositiveAttribution();
+    void testPositiveAttributionPrefersContextEvent();
+    void testHealthSnapshotReportsAttributionAndCoverage();
+    void testTriggerLearningCycleRejectsAttributionGate();
     void testTriggerLearningCyclePromotesModel();
     void testCoreMlBootstrapSeededFromEnvOverride();
 };
@@ -157,6 +181,134 @@ void TestLearningEngine::testRecordBehaviorEventDenylistFilter()
     sqlite3_finalize(stmt);
 }
 
+void TestLearningEngine::testRecordBehaviorEventRedactedFilter()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    bs::BehaviorEvent event;
+    event.eventId = QStringLiteral("evt-redacted-1");
+    event.source = QStringLiteral("system_collector");
+    event.eventType = QStringLiteral("input_activity");
+    event.privacyFlags.redacted = true;
+    event.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(event));
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM behavior_events_v1",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 0);
+    sqlite3_finalize(stmt);
+}
+
+void TestLearningEngine::testRecordBehaviorEventCaptureScopeFilter()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true,
+                              true,
+                              true,
+                              {},
+                              nullptr,
+                              QString(),
+                              false,
+                              false,
+                              false,
+                              false,
+                              false));
+
+    bs::BehaviorEvent appEvent;
+    appEvent.eventId = QStringLiteral("evt-capture-app");
+    appEvent.source = QStringLiteral("system_collector");
+    appEvent.eventType = QStringLiteral("app_activated");
+    appEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(appEvent));
+
+    bs::BehaviorEvent inputEvent;
+    inputEvent.eventId = QStringLiteral("evt-capture-input");
+    inputEvent.source = QStringLiteral("system_collector");
+    inputEvent.eventType = QStringLiteral("input_activity");
+    inputEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(inputEvent));
+
+    bs::BehaviorEvent searchEvent;
+    searchEvent.eventId = QStringLiteral("evt-capture-search");
+    searchEvent.source = QStringLiteral("betterspotlight");
+    searchEvent.eventType = QStringLiteral("query_submitted");
+    searchEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(searchEvent));
+
+    bs::BehaviorEvent keptEvent;
+    keptEvent.eventId = QStringLiteral("evt-capture-custom");
+    keptEvent.source = QStringLiteral("betterspotlight");
+    keptEvent.eventType = QStringLiteral("custom_activity");
+    keptEvent.windowTitleHash = QStringLiteral("hash-window");
+    keptEvent.browserHostHash = QStringLiteral("hash-host");
+    keptEvent.timestamp = QDateTime::currentDateTimeUtc();
+    QVERIFY(engine.recordBehaviorEvent(keptEvent));
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM behavior_events_v1",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 1);
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COALESCE(window_title_hash, ''), "
+                                "COALESCE(browser_host_hash, '') "
+                                "FROM behavior_events_v1 WHERE event_id = 'evt-capture-custom'",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    const char* rawWindowHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    const char* rawBrowserHostHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    QCOMPARE(QString::fromUtf8(rawWindowHash ? rawWindowHash : ""), QString());
+    QCOMPARE(QString::fromUtf8(rawBrowserHostHash ? rawBrowserHostHash : ""), QString());
+    sqlite3_finalize(stmt);
+
+    const QJsonObject health = engine.healthSnapshot();
+    const QJsonObject scope = health.value(QStringLiteral("captureScope")).toObject();
+    QVERIFY(scope.contains(QStringLiteral("appActivityEnabled")));
+    QVERIFY(scope.contains(QStringLiteral("inputActivityEnabled")));
+    QVERIFY(scope.contains(QStringLiteral("searchEventsEnabled")));
+    QVERIFY(scope.contains(QStringLiteral("windowTitleHashEnabled")));
+    QVERIFY(scope.contains(QStringLiteral("browserHostHashEnabled")));
+    QVERIFY(!scope.value(QStringLiteral("appActivityEnabled")).toBool(true));
+    QVERIFY(!scope.value(QStringLiteral("inputActivityEnabled")).toBool(true));
+    QVERIFY(!scope.value(QStringLiteral("searchEventsEnabled")).toBool(true));
+    QVERIFY(!scope.value(QStringLiteral("windowTitleHashEnabled")).toBool(true));
+    QVERIFY(!scope.value(QStringLiteral("browserHostHashEnabled")).toBool(true));
+}
+
 void TestLearningEngine::testExposureAndPositiveAttribution()
 {
     QTemporaryDir tempDir;
@@ -210,6 +362,8 @@ void TestLearningEngine::testExposureAndPositiveAttribution()
                                              itemIdOpt.value(),
                                              path,
                                              QStringLiteral("com.apple.finder"),
+                                             QStringLiteral("ctx-1"),
+                                             QStringLiteral("digest-1"),
                                              QDateTime::currentDateTimeUtc()));
 
     QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
@@ -221,6 +375,289 @@ void TestLearningEngine::testExposureAndPositiveAttribution()
     QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
     QCOMPARE(sqlite3_column_int(stmt, 0), 1);
     sqlite3_finalize(stmt);
+}
+
+void TestLearningEngine::testPositiveAttributionPrefersContextEvent()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString path = QDir(tempDir.path()).filePath(QStringLiteral("report.md"));
+    auto itemIdOpt = seedItem(store, path, QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    bs::SearchResult result;
+    result.itemId = itemIdOpt.value();
+    result.path = path;
+    result.name = QStringLiteral("report.md");
+    result.score = 120.0;
+    result.semanticNormalized = 0.64;
+    result.crossEncoderScore = 0.55f;
+
+    bs::QueryContext contextA;
+    contextA.contextEventId = QStringLiteral("ctx-a");
+    contextA.activityDigest = QStringLiteral("digest-a");
+    QVERIFY(engine.recordExposure(QStringLiteral("report"),
+                                  result,
+                                  contextA,
+                                  bs::QueryClass::NaturalLanguage,
+                                  0.8f,
+                                  0.6f,
+                                  0));
+
+    bs::QueryContext contextB;
+    contextB.contextEventId = QStringLiteral("ctx-b");
+    contextB.activityDigest = QStringLiteral("digest-b");
+    QVERIFY(engine.recordExposure(QStringLiteral("report"),
+                                  result,
+                                  contextB,
+                                  bs::QueryClass::NaturalLanguage,
+                                  0.8f,
+                                  0.6f,
+                                  1));
+
+    QVERIFY(engine.recordPositiveInteraction(QStringLiteral("report"),
+                                             itemIdOpt.value(),
+                                             path,
+                                             QStringLiteral("com.apple.finder"),
+                                             QStringLiteral("ctx-b"),
+                                             QStringLiteral("digest-b"),
+                                             QDateTime::currentDateTimeUtc()));
+
+    sqlite3_stmt* stmt = nullptr;
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM training_examples_v1 "
+                                "WHERE label = 1 AND context_event_id = 'ctx-b'",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 1);
+    sqlite3_finalize(stmt);
+
+    QCOMPARE(sqlite3_prepare_v2(store.rawDb(),
+                                "SELECT COUNT(*) FROM training_examples_v1 "
+                                "WHERE label = 1 AND context_event_id = 'ctx-a'",
+                                -1,
+                                &stmt,
+                                nullptr),
+             SQLITE_OK);
+    QCOMPARE(sqlite3_step(stmt), SQLITE_ROW);
+    QCOMPARE(sqlite3_column_int(stmt, 0), 0);
+    sqlite3_finalize(stmt);
+}
+
+void TestLearningEngine::testHealthSnapshotReportsAttributionAndCoverage()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString path = QDir(tempDir.path()).filePath(QStringLiteral("report.md"));
+    auto itemIdOpt = seedItem(store, path, QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+
+    bs::SearchResult result;
+    result.itemId = itemIdOpt.value();
+    result.path = path;
+    result.name = QStringLiteral("report.md");
+    result.score = 120.0;
+    result.semanticNormalized = 0.64;
+    result.crossEncoderScore = 0.55f;
+
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+
+    bs::QueryContext contextMatch;
+    contextMatch.contextEventId = QStringLiteral("ctx-metrics");
+    contextMatch.activityDigest = QStringLiteral("digest-metrics-context");
+    QVERIFY(engine.recordExposure(QStringLiteral("query context"),
+                                  result,
+                                  contextMatch,
+                                  bs::QueryClass::NaturalLanguage,
+                                  0.8f,
+                                  0.6f,
+                                  0));
+    QVERIFY(engine.recordPositiveInteraction(QStringLiteral("query context"),
+                                             itemIdOpt.value(),
+                                             path,
+                                             QStringLiteral("com.apple.finder"),
+                                             QStringLiteral("ctx-metrics"),
+                                             QStringLiteral("digest-metrics-context"),
+                                             now));
+
+    bs::QueryContext digestMatch;
+    digestMatch.activityDigest = QStringLiteral("digest-metrics-only");
+    QVERIFY(engine.recordExposure(QStringLiteral("query digest"),
+                                  result,
+                                  digestMatch,
+                                  bs::QueryClass::NaturalLanguage,
+                                  0.8f,
+                                  0.6f,
+                                  1));
+    QVERIFY(engine.recordPositiveInteraction(QStringLiteral("query digest"),
+                                             itemIdOpt.value(),
+                                             path,
+                                             QStringLiteral("com.apple.finder"),
+                                             QString(),
+                                             QStringLiteral("digest-metrics-only"),
+                                             now.addSecs(1)));
+
+    bs::QueryContext queryOnlyMatch;
+    QVERIFY(engine.recordExposure(QStringLiteral("query only"),
+                                  result,
+                                  queryOnlyMatch,
+                                  bs::QueryClass::NaturalLanguage,
+                                  0.8f,
+                                  0.6f,
+                                  2));
+    QVERIFY(engine.recordPositiveInteraction(QStringLiteral("query only"),
+                                             itemIdOpt.value(),
+                                             path,
+                                             QStringLiteral("com.apple.finder"),
+                                             QString(),
+                                             QString(),
+                                             now.addSecs(2)));
+
+    bs::BehaviorEvent eventA;
+    eventA.eventId = QStringLiteral("metrics-event-a");
+    eventA.source = QStringLiteral("system");
+    eventA.eventType = QStringLiteral("activity");
+    eventA.appBundleId = QStringLiteral("com.apple.finder");
+    eventA.contextEventId = QStringLiteral("ctx-stream-a");
+    eventA.activityDigest = QStringLiteral("digest-stream-a");
+    eventA.timestamp = now;
+    QVERIFY(engine.recordBehaviorEvent(eventA));
+
+    bs::BehaviorEvent eventB;
+    eventB.eventId = QStringLiteral("metrics-event-b");
+    eventB.source = QStringLiteral("system");
+    eventB.eventType = QStringLiteral("activity");
+    eventB.appBundleId = QStringLiteral("com.apple.finder");
+    eventB.timestamp = now.addSecs(1);
+    QVERIFY(engine.recordBehaviorEvent(eventB));
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("metricsWindowDays")).toInt(), 7);
+    QVERIFY(health.value(QStringLiteral("recentLearningCycles")).isArray());
+    QCOMPARE(health.value(QStringLiteral("recentLearningCyclesCount")).toInt(), 0);
+
+    const QJsonObject attribution = health.value(QStringLiteral("attributionMetrics")).toObject();
+    QCOMPARE(attribution.value(QStringLiteral("positiveExamples")).toInt(), 3);
+    QCOMPARE(attribution.value(QStringLiteral("attributedExamples")).toInt(), 3);
+    QCOMPARE(attribution.value(QStringLiteral("contextHits")).toInt(), 1);
+    QCOMPARE(attribution.value(QStringLiteral("digestHits")).toInt(), 1);
+    QCOMPARE(attribution.value(QStringLiteral("queryOnlyHits")).toInt(), 1);
+    QCOMPARE(attribution.value(QStringLiteral("unattributedPositives")).toInt(), 0);
+    QVERIFY(qAbs(attribution.value(QStringLiteral("contextHitRate")).toDouble() - (1.0 / 3.0)) < 0.001);
+    QVERIFY(qAbs(attribution.value(QStringLiteral("digestHitRate")).toDouble() - (1.0 / 3.0)) < 0.001);
+    QVERIFY(qAbs(attribution.value(QStringLiteral("queryOnlyRate")).toDouble() - (1.0 / 3.0)) < 0.001);
+    QVERIFY(qAbs(attribution.value(QStringLiteral("attributedRate")).toDouble() - 1.0) < 0.001);
+
+    const QJsonObject coverage = health.value(QStringLiteral("behaviorCoverageMetrics")).toObject();
+    QCOMPARE(coverage.value(QStringLiteral("events")).toInt(), 2);
+    QCOMPARE(coverage.value(QStringLiteral("appBundlePresent")).toInt(), 2);
+    QCOMPARE(coverage.value(QStringLiteral("activityDigestPresent")).toInt(), 1);
+    QCOMPARE(coverage.value(QStringLiteral("contextEventPresent")).toInt(), 1);
+    QCOMPARE(coverage.value(QStringLiteral("eventsWithAnyContextSignal")).toInt(), 2);
+    QCOMPARE(coverage.value(QStringLiteral("eventsWithFullContextSignals")).toInt(), 1);
+    QVERIFY(qAbs(coverage.value(QStringLiteral("activityDigestCoverage")).toDouble() - 0.5) < 0.001);
+    QVERIFY(qAbs(coverage.value(QStringLiteral("contextEventCoverage")).toDouble() - 0.5) < 0.001);
+    QVERIFY(qAbs(coverage.value(QStringLiteral("anyContextSignalCoverage")).toDouble() - 1.0) < 0.001);
+    QVERIFY(qAbs(coverage.value(QStringLiteral("fullContextSignalsCoverage")).toDouble() - 0.5) < 0.001);
+}
+
+void TestLearningEngine::testTriggerLearningCycleRejectsAttributionGate()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    auto itemIdOpt = seedItem(store,
+                              QDir(tempDir.path()).filePath(QStringLiteral("report.md")),
+                              QStringLiteral("report.md"));
+    QVERIFY(itemIdOpt.has_value());
+
+    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    QVERIFY(engine.initialize());
+    QVERIFY(engine.setConsent(true, true, true, {}));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                  QStringLiteral("80"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                  QStringLiteral("0.5"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                  QStringLiteral("0.3"));
+
+    for (int i = 0; i < 180; ++i) {
+        const int label = (i % 2 == 0) ? 1 : 0;
+        const double f0 = label > 0 ? 0.85 : 0.15;
+        const double f1 = label > 0 ? 0.75 : 0.25;
+        // 0.7 maps to query-only attribution, so context+digest coverage should be 0.
+        insertTrainingRow(store.rawDb(),
+                          QStringLiteral("gate-%1").arg(i),
+                          itemIdOpt.value(),
+                          label,
+                          f0,
+                          f1,
+                          0.7);
+    }
+
+    QString reason;
+    const bool promoted = engine.triggerLearningCycle(true, &reason);
+    QVERIFY(!promoted);
+    QCOMPARE(reason, QStringLiteral("attribution_quality_gate_failed_context_digest_rate"));
+
+    const QJsonObject health = engine.healthSnapshot();
+    QCOMPARE(health.value(QStringLiteral("lastCycleStatus")).toString(),
+             QStringLiteral("rejected"));
+    QCOMPARE(health.value(QStringLiteral("lastCycleReason")).toString(),
+             QStringLiteral("attribution_quality_gate_failed_context_digest_rate"));
+
+    const QJsonObject lastBatch = health.value(QStringLiteral("lastBatchAttribution")).toObject();
+    QCOMPARE(lastBatch.value(QStringLiteral("positiveExamples")).toInt(), 90);
+    QCOMPARE(lastBatch.value(QStringLiteral("contextHits")).toInt(), 0);
+    QCOMPARE(lastBatch.value(QStringLiteral("digestHits")).toInt(), 0);
+    QCOMPARE(lastBatch.value(QStringLiteral("queryOnlyHits")).toInt(), 90);
+    const QJsonArray recentCycles = health.value(QStringLiteral("recentLearningCycles")).toArray();
+    QVERIFY(!recentCycles.isEmpty());
+    const QJsonObject latestCycle = recentCycles.first().toObject();
+    QCOMPARE(latestCycle.value(QStringLiteral("status")).toString(), QStringLiteral("rejected"));
+    QCOMPARE(latestCycle.value(QStringLiteral("reason")).toString(),
+             QStringLiteral("attribution_quality_gate_failed_context_digest_rate"));
+    QVERIFY(latestCycle.value(QStringLiteral("batchAttribution")).isObject());
+    QVERIFY(health.value(QStringLiteral("recentLearningCyclesCount")).toInt() >= 1);
+
+    const QJsonObject gate = health.value(QStringLiteral("promotionAttributionGate")).toObject();
+    QCOMPARE(gate.value(QStringLiteral("minPositiveExamples")).toInt(), 80);
+    QVERIFY(qAbs(gate.value(QStringLiteral("minAttributedRate")).toDouble() - 0.5) < 0.0001);
+    QVERIFY(qAbs(gate.value(QStringLiteral("minContextDigestRate")).toDouble() - 0.3) < 0.0001);
 }
 
 void TestLearningEngine::testTriggerLearningCyclePromotesModel()
@@ -241,6 +678,9 @@ void TestLearningEngine::testTriggerLearningCyclePromotesModel()
     bs::LearningEngine engine(store.rawDb(), tempDir.path());
     QVERIFY(engine.initialize());
     QVERIFY(engine.setConsent(true, true, true, {}));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerRolloutMode"),
+                  QStringLiteral("blended_ranking"));
 
     for (int i = 0; i < 180; ++i) {
         const int label = (i % 2 == 0) ? 1 : 0;
