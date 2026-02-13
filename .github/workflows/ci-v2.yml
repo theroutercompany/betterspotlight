@@ -1,0 +1,280 @@
+name: CI v2 (Shadow)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-v2-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_OSX_DEPLOYMENT_TARGET: "14.0"
+  BS_CI_RUNNER_MD: ${{ vars.NS_RUNNER_MACOS_MD }}
+  BS_CI_RUNNER_SM: ${{ vars.NS_RUNNER_MACOS_SM }}
+  BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+
+jobs:
+  verify-action-pins:
+    name: verify-action-pins
+    runs-on: ${{ vars.NS_RUNNER_MACOS_SM != '' && vars.NS_RUNNER_MACOS_SM || 'macos-15' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Enforce workflow SHA pinning
+        run: |
+          set -euo pipefail
+          ./tools/ci/verify_workflow_action_pins.sh
+
+  pr-build-release:
+    name: pr-build-release
+    runs-on: ${{ vars.NS_RUNNER_MACOS_MD != '' && vars.NS_RUNNER_MACOS_MD || 'macos-15' }}
+    if: ${{ github.event_name != 'schedule' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Namespace setup
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-setup@c6632952a35520871cba41ff746832af8068b65c # v0.0.9
+
+      - name: Namespace cache
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-cache-action@4d61c33d0b4333a518e975a0c4de7633d28713bb # v1.4.1
+        with:
+          path: |
+            /nix
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${BS_MODEL_MIRROR_BASE_URL:-}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/configure.sh build-release Release \
+            -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/build.sh build-release
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/test.sh build-release
+
+  pr-build-sanitizers:
+    name: pr-build-sanitizers
+    runs-on: ${{ vars.NS_RUNNER_MACOS_MD != '' && vars.NS_RUNNER_MACOS_MD || 'macos-15' }}
+    if: ${{ github.event_name != 'schedule' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Namespace setup
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-setup@c6632952a35520871cba41ff746832af8068b65c # v0.0.9
+
+      - name: Namespace cache
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-cache-action@4d61c33d0b4333a518e975a0c4de7633d28713bb # v1.4.1
+        with:
+          path: |
+            /nix
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${BS_MODEL_MIRROR_BASE_URL:-}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/configure.sh build-sanitizers Debug \
+            -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/build.sh build-sanitizers
+
+      - name: Unit + Integration tests (fail fast)
+        env:
+          BS_CTEST_LABEL_REGEX: unit|integration
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/test.sh build-sanitizers --stop-on-failure
+
+      - name: Service IPC tests (blocking)
+        env:
+          BS_CTEST_LABEL_REGEX: service_ipc
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/test.sh build-sanitizers --stop-on-failure
+
+      - name: Critical repeat-until-fail
+        env:
+          BS_CTEST_LABEL_REGEX: ''
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/test.sh build-sanitizers \
+            --repeat until-fail:3 \
+            -R "(test-query-service-core-improvements|test-query-service-relevance-fixture|test-indexer-service-ipc|test-extractor-service-ipc|test-inference-service-ipc|test-query-service-m2-ipc)"
+
+  pr-coverage-gate:
+    name: pr-coverage-gate
+    runs-on: ${{ vars.NS_RUNNER_MACOS_MD != '' && vars.NS_RUNNER_MACOS_MD || 'macos-15' }}
+    if: ${{ github.event_name != 'schedule' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Namespace setup
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-setup@c6632952a35520871cba41ff746832af8068b65c # v0.0.9
+
+      - name: Namespace cache
+        if: ${{ vars.NS_RUNNER_MACOS_MD != '' }}
+        uses: namespacelabs/nscloud-cache-action@4d61c33d0b4333a518e975a0c4de7633d28713bb # v1.4.1
+        with:
+          path: |
+            /nix
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${BS_MODEL_MIRROR_BASE_URL:-}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: Coverage gate
+        env:
+          BS_COVERAGE_PHASE: phase1
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/coverage.sh
+
+  canary-gh-hosted-macos:
+    name: canary-gh-hosted-macos
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${BS_MODEL_MIRROR_BASE_URL:-}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/configure.sh build-canary Release \
+            -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/build.sh build-canary
+
+      - name: Deterministic test labels
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/test.sh build-canary
+
+  required-pr-core:
+    name: required-pr-core
+    runs-on: ${{ vars.NS_RUNNER_MACOS_SM != '' && vars.NS_RUNNER_MACOS_SM || 'macos-15' }}
+    needs:
+      - verify-action-pins
+      - pr-build-release
+      - pr-build-sanitizers
+      - pr-coverage-gate
+      - canary-gh-hosted-macos
+    if: ${{ always() && github.event_name != 'schedule' }}
+
+    steps:
+      - id: status
+        name: Determine status
+        run: |
+          set -euo pipefail
+          results=$(tr -d '\n' <<< '${{ toJSON(needs.*.result) }}')
+          if grep -Eq '(failure|cancelled)' <<< "${results}"; then
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi
+          echo "results=${results}" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if any required lane failed
+        if: ${{ steps.status.outputs.result != 'success' }}
+        run: |
+          echo "One or more required lanes failed: ${{ steps.status.outputs.results }}"
+          exit 1

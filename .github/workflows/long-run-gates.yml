@@ -37,13 +37,29 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install dependencies
         run: |
           if command -v brew >/dev/null 2>&1; then
             brew install qt@6 poppler tesseract leptonica pkg-config || true
           fi
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+          BS_FETCH_MAX_QUALITY_MODEL: '1'
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
 
       - name: Configure
         run: |
@@ -80,7 +96,7 @@ jobs:
 
       - name: Upload stress artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: stress_48h_artifacts
           path: |
@@ -95,13 +111,29 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install dependencies
         run: |
           if command -v brew >/dev/null 2>&1; then
             brew install qt@6 poppler tesseract leptonica pkg-config || true
           fi
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+          BS_FETCH_MAX_QUALITY_MODEL: '1'
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
 
       - name: Configure
         run: |
@@ -140,7 +172,7 @@ jobs:
 
       - name: Upload memory artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: memory_drift_24h_artifacts
           path: |

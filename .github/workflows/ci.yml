@@ -5,94 +5,151 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CMAKE_OSX_DEPLOYMENT_TARGET: "14.0"
 
 jobs:
-  release-tests:
-    name: Release Build + CTest
-    runs-on: macos-14
+  verify-action-pins:
+    name: verify-action-pins
+    runs-on: macos-15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Enforce workflow SHA pinning
+        run: |
+          set -euo pipefail
+          ./tools/ci/verify_workflow_action_pins.sh
+
+  release-tests:
+    name: Release Build + CTest
+    runs-on: macos-15
+    needs: [verify-action-pins]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install dependencies
         run: |
           brew install qt@6 poppler tesseract leptonica pkg-config
 
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
+
       - name: Configure
         run: |
-          cmake -S . -B build-release \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          BS_QT_PREFIX_PATH="$(brew --prefix qt@6)" \
+          ./scripts/ci/configure.sh build-release Release -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
 
       - name: Build
-        run: cmake --build build-release -j"$(sysctl -n hw.ncpu)"
+        run: ./scripts/ci/build.sh build-release
 
       - name: Test
-        run: |
-          ctest --test-dir build-release \
-            -L "^(unit|integration|service_ipc|relevance|docs_lint)$" \
-            --output-on-failure
+        run: ./scripts/ci/test.sh build-release
 
   sanitizers:
     name: Debug ASAN/UBSAN
-    runs-on: macos-14
+    runs-on: macos-15
+    needs: [verify-action-pins]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install dependencies
         run: |
           brew install qt@6 poppler tesseract leptonica pkg-config
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
 
       - name: Configure
         run: |
-          cmake -S . -B build-sanitizers \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+          BS_QT_PREFIX_PATH="$(brew --prefix qt@6)" \
+          ./scripts/ci/configure.sh build-sanitizers Debug -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
 
       - name: Build
-        run: cmake --build build-sanitizers -j"$(sysctl -n hw.ncpu)"
+        run: ./scripts/ci/build.sh build-sanitizers
 
       - name: Unit + Integration tests (fail fast)
-        run: |
-          ctest --test-dir build-sanitizers \
-            -L "unit|integration" \
-            --stop-on-failure \
-            --output-on-failure
+        env:
+          BS_CTEST_LABEL_REGEX: unit|integration
+        run: ./scripts/ci/test.sh build-sanitizers --stop-on-failure
 
       - name: Service IPC tests (blocking)
-        run: |
-          ctest --test-dir build-sanitizers \
-            -L "service_ipc" \
-            --stop-on-failure \
-            --output-on-failure
+        env:
+          BS_CTEST_LABEL_REGEX: service_ipc
+        run: ./scripts/ci/test.sh build-sanitizers --stop-on-failure
 
       - name: Critical repeat-until-fail
+        env:
+          BS_CTEST_LABEL_REGEX: ''
         run: |
-          ctest --test-dir build-sanitizers \
+          ./scripts/ci/test.sh build-sanitizers \
             --repeat until-fail:3 \
-            -R "(test-query-service-core-improvements|test-query-service-relevance-fixture|test-indexer-service-ipc|test-extractor-service-ipc|test-inference-service-ipc|test-query-service-m2-ipc)" \
-            --output-on-failure
+            -R "(test-query-service-core-improvements|test-query-service-relevance-fixture|test-indexer-service-ipc|test-extractor-service-ipc|test-inference-service-ipc|test-query-service-m2-ipc)"
 
   coverage-gate:
     name: Coverage Gate
-    runs-on: macos-14
+    runs-on: macos-15
+    needs: [verify-action-pins]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install dependencies
         run: |
           brew install qt@6 poppler tesseract leptonica pkg-config
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for locked model prefetch."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          ./tools/prefetch_model_assets.sh
 
       - name: Run coverage gate
         run: |
           BS_COVERAGE_PHASE=phase1 \
           BS_QT_PREFIX_PATH="$(brew --prefix qt@6)" \
-          /bin/bash tools/coverage/run_gate.sh
+          ./scripts/ci/coverage.sh

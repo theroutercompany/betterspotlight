@@ -1,0 +1,109 @@
+name: Fallback Drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 11 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fallback-drill
+  cancel-in-progress: false
+
+jobs:
+  namespace-drill:
+    name: namespace-drill
+    runs-on: ${{ vars.NS_RUNNER_MACOS_MD != '' && vars.NS_RUNNER_MACOS_MD || 'macos-15' }}
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for fallback drills."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: Namespace drill build + test
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/configure.sh build-fallback-drill-ns Release -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+          nix develop -c ./scripts/ci/build.sh build-fallback-drill-ns
+          nix develop -c ./scripts/ci/test.sh build-fallback-drill-ns
+
+  gh-hosted-drill:
+    name: gh-hosted-drill
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@cd46bde16ab981b0a7b2dce0574509104543276e # v9
+        with:
+          determinate: true
+
+      - name: Validate model mirror URL
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ vars.BS_MODEL_MIRROR_BASE_URL }}" ]]; then
+            echo "BS_MODEL_MIRROR_BASE_URL repository variable is required for fallback drills."
+            exit 1
+          fi
+
+      - name: Prefetch locked model assets
+        env:
+          BS_MODEL_MIRROR_BASE_URL: ${{ vars.BS_MODEL_MIRROR_BASE_URL }}
+        run: |
+          set -euo pipefail
+          nix develop -c ./tools/prefetch_model_assets.sh
+
+      - name: GH fallback drill build + test
+        run: |
+          set -euo pipefail
+          nix develop -c ./scripts/ci/configure.sh build-fallback-drill-gh Release -DBETTERSPOTLIGHT_FETCH_MODELS=OFF
+          nix develop -c ./scripts/ci/build.sh build-fallback-drill-gh
+          nix develop -c ./scripts/ci/test.sh build-fallback-drill-gh
+
+  drill-report:
+    name: fallback-drill-report
+    runs-on: macos-15
+    needs: [namespace-drill, gh-hosted-drill]
+    if: always()
+
+    steps:
+      - name: Evaluate drill status
+        run: |
+          set -euo pipefail
+          ns_result='${{ needs.namespace-drill.result }}'
+          gh_result='${{ needs.gh-hosted-drill.result }}'
+          echo "Namespace lane result: ${ns_result}"
+          echo "GitHub-hosted lane result: ${gh_result}"
+
+          if [[ "${gh_result}" != "success" ]]; then
+            echo "Fallback drill failed: GitHub-hosted lane must stay healthy for outage cutover."
+            exit 1
+          fi
+
+          if [[ "${ns_result}" != "success" ]]; then
+            echo "Namespace lane failed during drill (expected in outage simulations)."
+          fi
