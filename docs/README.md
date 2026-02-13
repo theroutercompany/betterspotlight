@@ -66,11 +66,11 @@ Operations, release engineering, reproducibility, and migration tracking.
 
 | Document | Description |
 |----------|-------------|
-| [Reproducibility Index](operations/reproducibility-index.md) | Program entrypoint: Nix-first, deterministic hygiene, provenance, and CI strategy |
-| [Nix-First Build/Test/Dev](operations/nix-first-build-test-dev.md) | Toolchain reproducibility contract, flake integration design, and macOS boundary rules |
-| [Deterministic Build Hygiene](operations/deterministic-build-hygiene.md) | Determinism threat model, required controls, verification protocol, and incident playbook |
-| [Provenance System](operations/provenance-system.md) | Artifact/source/builder identity model, attestations, and trust verification matrix |
-| [macOS CI: Namespace-First + GitHub-Hosted Fallback](operations/github-hosted-macos-ci.md) | Runner topology, required-check contracts, fallback runbook, and governance |
+| [Reproducibility Index](operations/reproducibility-index.md) | Program entrypoint: implementation inventory, phase status, and definition-of-done checklist |
+| [Nix-First Build/Test/Dev](operations/nix-first-build-test-dev.md) | Implemented flake + `scripts/ci/*` command contract, with macOS host boundary rules |
+| [Deterministic Build Hygiene](operations/deterministic-build-hygiene.md) | Determinism controls implemented across tests, coverage, model locking, and CI pin policy |
+| [Provenance System](operations/provenance-system.md) | Release manifest contract, attestation workflows, verification commands, and Apple trust model |
+| [macOS CI: Namespace-First + GitHub-Hosted Fallback](operations/github-hosted-macos-ci.md) | Namespace/GH lane topology, variables/secrets contract, cutover policy, and outage drills |
 | [Dependency Audit](operations/dependency-audit.md) | Third-party library evaluation and status |
 | [Migration Mapping](operations/migration-mapping.md) | Swift → C++ component mapping |
 | [Swift Deprecation Audit](operations/swift-deprecation-audit.md) | File-by-file classification: delete, port, keep |

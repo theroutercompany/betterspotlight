@@ -4,194 +4,138 @@ Document status: Active
 Last updated: 2026-02-13
 Owner: Release Engineering
 
-## 1. Runner Strategy
+## 1. Strategy
 
-BetterSpotlight uses a dual-runner strategy:
+Locked strategy:
 
-1. Namespace-first required PR lanes for performance and repeatability.
-2. GitHub-hosted macOS fallback/canary lane for resilience and independent validation.
+1. Namespace-first required PR gates.
+2. GitHub-hosted macOS fallback/canary lane kept active.
+3. Release/notarization paths are separate from PR-required gates.
 
-This keeps CI operational during provider incidents and continuously validates portability across runner providers.
+## 2. Implemented Workflows
 
-## 2. CI Lane Topology
+Primary/legacy CI:
 
-## 2.1 Required PR Gates (Namespace)
+- `/Users/rexliu/betterspotlight/.github/workflows/ci.yml`
+- `/Users/rexliu/betterspotlight/.github/workflows/ci-v2.yml`
 
-Primary required checks run on Namespace macOS profiles.
+Release/provenance/drills:
 
-Required lanes (target contract):
+- `/Users/rexliu/betterspotlight/.github/workflows/release.yml`
+- `/Users/rexliu/betterspotlight/.github/workflows/provenance.yml`
+- `/Users/rexliu/betterspotlight/.github/workflows/fallback-drill.yml`
+- `/Users/rexliu/betterspotlight/.github/workflows/provenance-drill.yml`
 
-- `required-pr-core` (aggregate gate)
-- `pr-build-release`
-- `pr-build-sanitizers`
-- `pr-coverage-gate`
-
-All required lanes must use canonical command contracts and lock-pinned toolchain.
-
-## 2.2 GitHub-Hosted Fallback/Canary
-
-Run a minimal parity lane on GitHub-hosted macOS.
-
-Lane contract:
-
-- name: `canary-gh-hosted-macos`
-- trigger: `pull_request`, `workflow_dispatch`, and optional nightly schedule
-- scope: configure + build + deterministic test labels
-- purpose: parity signal and outage readiness
-
-## 2.3 Long-Run and Notarization Lanes
-
-Long-duration stress and notarization verification workflows are non-PR-required operational gates:
+Operational/manual lanes:
 
 - `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
 - `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
 
-These must remain separate from fast PR-required checks.
+## 2.1 Baseline Snapshot (2026-02-13)
 
-## 3. Trigger Policy Contract
+Legacy baseline jobs preserved for shadow migration context:
 
-- `pull_request`: required PR lanes + optional canary
-- `push` to `main`: required PR-equivalent lanes for merge health
-- `workflow_dispatch`: manual reruns and incident drills
-- `schedule`: canary, long-run reliability, and drift checks
+- `Release Build + CTest`
+- `Debug ASAN/UBSAN`
+- `Coverage Gate`
 
-Release publication workflows use explicit manual/tag triggers only.
+Shadow migration is implemented by running `/Users/rexliu/betterspotlight/.github/workflows/ci.yml` alongside `/Users/rexliu/betterspotlight/.github/workflows/ci-v2.yml` until branch-protection cutover.
 
-## 4. Branch Protection Model
+## 3. Required Check Contract
 
-Use an aggregate required-check job pattern.
+Canonical gate name:
 
-Pattern:
+- `required-pr-core`
 
-1. Individual jobs run independently.
-2. Final aggregate job evaluates `needs.*.result`.
-3. Branch protection requires only the aggregate check name.
+Canonical lane names:
 
-Benefits:
-
-- stable required check contract,
-- easy lane evolution without branch-protection churn,
-- single pass/fail signal for reviewers.
-
-## 4.1 Current to Target Check Name Mapping
-
-Current job names in `/Users/rexliu/betterspotlight/.github/workflows/ci.yml`:
-
-- `release-tests`
-- `sanitizers`
-- `coverage-gate`
-
-Target canonical required-check contract:
-
-- `required-pr-core` (aggregate required check)
 - `pr-build-release`
 - `pr-build-sanitizers`
 - `pr-coverage-gate`
+- `canary-gh-hosted-macos`
 
-Migration rule: during transition, keep old and new checks green until branch protection is updated to require `required-pr-core`.
+Trigger contract:
 
-## 5. Recommended Workflow Shape
+- `pull_request`
+- `push` to `main`
+- `workflow_dispatch`
+- scheduled canary/drill workflows
 
-Representative shape (abbreviated):
+## 4. Repository Variables and Secrets Contract
 
-```yaml
-name: CI
-on:
-  pull_request:
-  push:
-    branches: [main]
+Required repository variables:
 
-jobs:
-  pr-build-release:
-    runs-on: namespace-profile-betterspotlight-macos-md
-    steps:
-      - uses: actions/checkout@<pinned-sha>
-      - uses: DeterminateSystems/nix-installer-action@<pinned-sha>
-      - uses: namespacelabs/nscloud-cache-action@<pinned-sha>
-        with:
-          path: |
-            /nix
-      - run: nix develop -c cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
-      - run: nix develop -c cmake --build build-release -j"$(sysctl -n hw.ncpu)"
-      - run: nix develop -c ctest --test-dir build-release -L "^(unit|integration|service_ipc|relevance|docs_lint)$" --output-on-failure
+- `NS_RUNNER_MACOS_SM`
+- `NS_RUNNER_MACOS_MD`
+- `NS_RUNNER_MACOS_LG`
+- `BS_MODEL_MIRROR_BASE_URL`
 
-  canary-gh-hosted-macos:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@<pinned-sha>
-      - uses: DeterminateSystems/nix-installer-action@<pinned-sha>
-      - run: nix develop -c cmake -S . -B build-canary -DCMAKE_BUILD_TYPE=Release
-      - run: nix develop -c cmake --build build-canary -j"$(sysctl -n hw.ncpu)"
-      - run: nix develop -c ctest --test-dir build-canary -L "^(unit|integration|service_ipc|relevance|docs_lint)$" --output-on-failure
+Required release/notarization secrets:
 
-  required-pr-core:
-    runs-on: namespace-profile-betterspotlight-macos-sm
-    needs: [pr-build-release, canary-gh-hosted-macos]
-    steps:
-      - run: |
-          results='${{ toJSON(needs.*.result) }}'
-          echo "$results" | grep -Eq 'failure|cancelled' && exit 1 || exit 0
-```
+- `DEVELOPER_ID`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `TEAM_ID`
 
-## 6. Cost and Performance Governance
+## 5. Branch Protection Cutover (Two-Step)
 
-## 6.1 Runner Sizing Policy
+## Step 1: Shadow
 
-| Lane Type | Recommended Profile Size | Notes |
-|---|---|---|
-| Fast PR checks | small/medium | prioritize queue throughput |
-| Coverage + sanitizer | medium/large | heavier CPU and memory demand |
-| Release packaging | medium/large macOS | includes packaging and signing operations |
-| Long-run stress | dedicated long-running profile | isolated from PR queue |
+- keep old and new checks required temporarily
+- require green runs over a stability window before switching
 
-## 6.2 Cache Policy
+## Step 2: Switch
 
-- Attach cache volumes for deterministic dependency directories (`/nix` and any compiler caches).
-- Keep cache keys independent from nondeterministic fields.
-- Periodically clean stale cache state during incident triage.
+- require only `required-pr-core`
+- remove old required check names after stable window
 
-## 6.3 Concurrency Guardrails
+## 6. CI/Release Separation Policy
 
-- Use workflow-level `concurrency` groups.
-- Cancel in-progress for non-main PR runs where safe.
-- Keep release workflows single-flight when artifacts can be corrupted by parallelism.
+PR-required CI lanes must never publish production release artifacts.
+
+Production publication/signing is restricted to:
+
+- `/Users/rexliu/betterspotlight/.github/workflows/release.yml`
+- manual notarization verification in `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
 
 ## 7. Outage Fallback Runbook
 
-When Namespace lanes are degraded:
+If Namespace lanes are degraded:
 
-1. Confirm incident scope and expected duration.
-2. Temporarily switch branch protection required check from Namespace aggregate to GitHub-hosted aggregate.
-3. Keep production release workflows paused unless emergency release is approved.
-4. Disable non-critical heavy lanes first (for example long-run stress) before disabling core checks.
-5. Restore Namespace required checks and revert temporary rules after recovery.
+1. confirm incident scope
+2. temporarily elevate GitHub-hosted gate as required
+3. keep heavy/non-critical lanes disabled first (long-run stress before core checks)
+4. restore Namespace requirement after recovery
 
-## 8. Ghostty Case Study: Adopt vs Avoid
+Scheduled fallback rehearsal workflow:
 
-## 8.1 Adopt
+- `/Users/rexliu/betterspotlight/.github/workflows/fallback-drill.yml`
 
-- Required-check aggregator pattern.
-- Nix-first command execution in CI.
-- Cache-aware CI structure.
-- Explicit separation of test and release workflows.
+## 8. Cost and Performance Governance
 
-## 8.2 Avoid Blind Copy
+- small/medium profiles for fast PR checks
+- medium/large profiles for sanitizer/coverage/release lanes
+- explicit concurrency groups on long-running or release workflows
+- cache `/nix` on Namespace-backed lanes where applicable
 
-- Ghostty's runner labels (for example `namespace-profile-ghostty-*`) are org-specific and must not be copied verbatim.
-- Do not copy `@main` action refs into required lanes.
-- Do not copy full matrix breadth without BetterSpotlight-specific ROI.
+## 9. Ghostty Lessons Applied
 
-## 9. Source Anchors in BetterSpotlight
+Adopted:
 
-- `/Users/rexliu/betterspotlight/.github/workflows/ci.yml`
-- `/Users/rexliu/betterspotlight/.github/workflows/long-run-gates.yml`
-- `/Users/rexliu/betterspotlight/.github/workflows/notarization-verify.yml`
+- aggregate required check pattern
+- Nix-first build/test discipline
+- strong action SHA pinning
+- CI vs release separation
+
+Not copied directly:
+
+- Ghostty runner labels
+- any floating action refs (`@main`)
+- Ghostty matrix breadth not justified for BetterSpotlight constraints
 
 ## 10. Sources
 
-- Ghostty CI workflow: <https://raw.githubusercontent.com/ghostty-org/ghostty/main/.github/workflows/test.yml>
+- Ghostty test workflow: <https://raw.githubusercontent.com/ghostty-org/ghostty/main/.github/workflows/test.yml>
 - Ghostty release workflow: <https://raw.githubusercontent.com/ghostty-org/ghostty/main/.github/workflows/release-tag.yml>
-- Namespace cache action README: <https://raw.githubusercontent.com/namespacelabs/nscloud-cache-action/main/README.md>
-- Namespace setup action README: <https://raw.githubusercontent.com/namespacelabs/nscloud-setup/main/README.md>
-- GitHub hosted runners: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>
+- GitHub-hosted runners: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>
 - GitHub larger runners: <https://docs.github.com/en/actions/reference/runners/larger-runners>

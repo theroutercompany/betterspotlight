@@ -6,165 +6,120 @@ Owner: Core Platform / Quality Engineering
 
 ## 1. Objective
 
-Define mandatory controls so the same source revision produces equivalent build and test outcomes across:
+Guarantee stable build/test outcomes for the same commit across:
 
-- local developer machine,
-- Namespace macOS CI,
-- GitHub-hosted macOS fallback/canary CI.
+- local macOS developer environment
+- Namespace macOS CI lanes
+- GitHub-hosted macOS canary/fallback lanes
 
-This document is strict by design and intended for mission-critical reliability.
+## 2. Determinism Threat Model
 
-## 2. Threat Model for Nondeterminism
+Primary nondeterminism vectors:
 
-| Threat | Typical Cause | Impact | Required Control |
-|---|---|---|---|
-| Toolchain drift | Unpinned package manager installs | Different compiler/linker behavior | Pin via `flake.lock`; forbid floating CI toolchain versions |
-| Action drift | `uses: org/action@vX` mutable tags | CI behavior changes without repo changes | Pin all Actions to commit SHA |
-| Timestamp drift | Build IDs, archive mtimes, metadata | Hash mismatch for equivalent outputs | Set stable build timestamp inputs (`SOURCE_DATE_EPOCH`) |
-| Absolute path leakage | Debug paths, macros, diagnostics | Output differs by workspace path | Apply path-prefix-map controls and normalize compare artifacts |
-| Network fetch drift | Download latest assets during build | Reproducibility and availability failures | Locked artifact manifests with hash verification |
-| Environment drift | Locale/TZ/random seeds/CPU feature dispatch | Test flakiness and binary differences | Stable env contract and deterministic test partitioning |
-| Host trust variance | Signing/notarization external service | Signature and notarization metadata differ | Treat trust metadata separately from unsigned artifact reproducibility |
+- mutable tool versions and action refs
+- opportunistic network downloads
+- absolute path leakage in tests and filters
+- environment drift (`LANG`, `TZ`, timestamps)
+- trust-service side effects (signing/notarization metadata)
 
-## 3. Mandatory Controls
+## 3. Mandatory Controls (Implemented)
 
-## 3.1 Toolchain and Dependency Pinning
+## 3.1 Toolchain Pinning
 
-1. Introduce and enforce `flake.lock` in repo root.
-2. CI required lanes must use lock-pinned Nix toolchain, not ad hoc latest Homebrew versions.
-3. Lockfile updates require dedicated PR review.
+- `/Users/rexliu/betterspotlight/flake.nix`
+- `/Users/rexliu/betterspotlight/flake.lock`
 
-## 3.2 GitHub Action Pinning
+All Nix-backed CI lanes execute canonical scripts with `nix develop -c`.
 
-- Every `uses:` entry in workflow files must pin to a commit SHA.
-- Floating references (`@v4`, `@main`, branch refs) are not allowed for required lanes.
+## 3.2 Action SHA Pinning + Enforcement
 
-## 3.3 Offline/Locked Model Asset Strategy
+- Workflows pin every `uses:` reference to immutable commit SHA.
+- Enforcement script:
+  - `/Users/rexliu/betterspotlight/tools/ci/verify_workflow_action_pins.sh`
+- Enforcement wired into CI:
+  - `/Users/rexliu/betterspotlight/.github/workflows/ci.yml`
+  - `/Users/rexliu/betterspotlight/.github/workflows/ci-v2.yml`
 
-Current script `/Users/rexliu/betterspotlight/tools/fetch_embedding_models.sh` pulls from network URLs.
+## 3.3 Locked Model Asset Supply Chain
 
-Required target state:
+Implemented model lock contract:
 
-1. Produce a versioned model manifest with:
-- logical model ID,
-- source URL,
-- expected digest,
-- size floor,
-- fetch timestamp and provenance fields.
+- lockfile: `/Users/rexliu/betterspotlight/tools/model_assets.lock.json`
+- required fields per asset: `name`, `url`, `sha256`, `size_bytes`, `version`
+- verifier/fetcher: `/Users/rexliu/betterspotlight/tools/fetch_embedding_models.sh`
+- bootstrap helper: `/Users/rexliu/betterspotlight/tools/prefetch_model_assets.sh`
 
-2. CI required lanes must consume locked, hash-verified assets.
-3. Network fetches in required deterministic lanes are prohibited unless pinned digest verification is enforced.
-4. CMake option `BETTERSPOTLIGHT_FETCH_MODELS` should default to deterministic behavior in CI (off unless explicitly staged).
+Behavior:
 
-## 3.4 Stable Environment Contract
+- hash and size are always verified
+- mismatch fails fast
+- required CI lanes prefetch explicitly and configure CMake with `-DBETTERSPOTLIGHT_FETCH_MODELS=OFF`
 
-Set and enforce in deterministic lanes:
+## 3.4 Test Path Determinism Hardening
 
-- `LC_ALL=C`
-- `LANG=C`
-- `TZ=UTC`
-- `SOURCE_DATE_EPOCH=<commit timestamp or release timestamp>`
-
-Where compiler support exists, use path normalization flags for reproducibility:
-
-- Clang/GCC prefix-map options (for example `-ffile-prefix-map` / `-fdebug-prefix-map` style controls)
-- apply consistently in deterministic compare builds.
-
-## 3.5 Test Determinism Hardening
-
-Deterministic test suites must not depend on machine-specific absolute paths.
-
-Known path-sensitive tests to fix first:
+Path-sensitive unit tests were refactored to remove machine-local fallbacks:
 
 - `/Users/rexliu/betterspotlight/Tests/Unit/test_cross_encoder_reranker.cpp`
 - `/Users/rexliu/betterspotlight/Tests/Unit/test_model_registry.cpp`
 - `/Users/rexliu/betterspotlight/Tests/Unit/test_reranker_cascade.cpp`
 - `/Users/rexliu/betterspotlight/Tests/Unit/test_qa_extractive_model.cpp`
 
-Required policy:
+Shared fixture resolver:
 
-1. Deterministic unit/integration lanes use repo-relative or temp-directory paths only.
-2. Host-conformance tests (FDA, FSEvents, mdls/mdimport, notarization) are isolated into separate labels/lanes.
+- `/Users/rexliu/betterspotlight/Tests/Utils/model_fixture_paths.h`
+- `/Users/rexliu/betterspotlight/Tests/Utils/model_fixture_paths.cpp`
 
-## 3.6 CI/Release Separation
+## 3.5 Coverage Path Stability
 
-- PR required CI checks do not run production release publication/signing pipelines.
-- Release workflows are manual/tag gated and run separately from required PR checks.
+- exclusions now repo-relative:
+  - `/Users/rexliu/betterspotlight/Tests/coverage_exclusions.txt`
+- gate resolves relative exclusions against repo root:
+  - `/Users/rexliu/betterspotlight/tools/coverage/run_gate.sh`
 
-## 4. Current Repository Gaps (Must Be Tracked)
+## 3.6 Benchmark Path Stability
 
-1. `/Users/rexliu/betterspotlight/.github/workflows/ci.yml` currently installs mutable Homebrew dependencies.
-2. `/Users/rexliu/betterspotlight/CMakeLists.txt` defines `BETTERSPOTLIGHT_FETCH_MODELS` with current default behavior that is not deterministic enough for CI unless explicitly controlled.
-3. Machine-specific absolute paths exist in several tests (listed above).
-4. Current workflow Actions use tag refs (`@v4`) instead of immutable SHAs.
+Removed absolute local build paths:
 
-## 5. Reproducibility Verification Protocol
+- `/Users/rexliu/betterspotlight/Tests/benchmarks/benchmark_search.sh`
+- `/Users/rexliu/betterspotlight/Tests/benchmarks/benchmark_indexing.sh`
 
-## 5.1 Build Surfaces Under Comparison
+## 3.7 Environment Contract
 
-Use unsigned, unstapled artifacts for strict reproducibility comparison.
+Deterministic lanes standardize:
 
-Do not compare notarized/signature-bearing artifacts byte-for-byte, because trust metadata is expected to differ.
+- `LC_ALL=C`
+- `LANG=C`
+- `TZ=UTC`
+- `SOURCE_DATE_EPOCH`
 
-## 5.2 Protocol Steps
+## 4. Reproducibility Verification Protocol
 
-1. Select commit `X` and set fixed env contract.
-2. Build twice on local machine with clean build directories.
-3. Build once on Namespace required lane.
-4. Build once on GitHub-hosted fallback/canary lane.
-5. Collect:
-- artifact digests,
-- build metadata (toolchain identity, runner label, command contract version),
-- test result summaries.
-6. Compare normalized outputs and document deviations.
+1. Build the same commit twice locally with clean build dirs.
+2. Build/test on Namespace lane.
+3. Build/test on GitHub-hosted canary lane.
+4. Compare deterministic outputs and test outcomes.
 
-## 5.3 Acceptance Criteria
+Comparison surface for strict parity:
 
-- Deterministic surfaces: equivalent digests after normalization.
-- Test outcomes: no unexpected pass/fail divergence for deterministic labels.
-- Any divergence must have root cause classification and owner.
+- unsigned, unstapled artifacts
+- normalized metadata fields only
 
-## 5.4 Acceptable Nondeterministic Fields
+Allowed nondeterministic fields:
 
-Allowed differences (must be documented):
+- code signatures
+- notarization tickets/staples
+- external trust-service response metadata
 
-- code signature blobs,
-- notarization tickets/staples,
-- release packaging timestamps if not normalized,
-- external trust-service response metadata.
+## 5. Incident Playbook (Determinism Regression)
 
-## 6. Incident Playbook (Determinism Regression)
+1. Detect divergence via CI parity or local rehearsal.
+2. Freeze lock/action/tool updates while triaging.
+3. Classify source: toolchain, actions, network asset, environment, source code.
+4. Apply minimal fix with rollback path.
+5. Add regression guard (test/script/policy) before closing incident.
 
-1. Detect: reproducibility check or parity lane fails.
-2. Contain:
-- freeze lockfile/toolchain updates,
-- pause non-critical workflow changes.
-3. Triage categories:
-- toolchain drift,
-- action drift,
-- network asset drift,
-- environment drift,
-- source-level nondeterministic code path.
-4. Mitigate with smallest reversible patch.
-5. Backfill:
-- add regression test/check,
-- add policy guard where gap was found.
-6. Record in incident log with timeline, impact, fix commit, and prevention action.
+## 6. Sources
 
-## 7. Pull Request Hygiene Checklist
-
-- [ ] No mutable Action references in touched workflows.
-- [ ] Lockfile changes reviewed and justified.
-- [ ] No new absolute machine paths in deterministic tests.
-- [ ] Network downloads in required lanes are hash-locked or removed.
-- [ ] Command contract remains stable across local and CI lanes.
-
-## 8. Sources
-
-- SOURCE_DATE_EPOCH specification: <https://reproducible-builds.org/specs/source-date-epoch/>
-- Build path prefix map specification: <https://reproducible-builds.org/specs/build-path-prefix-map/>
-- Clang command line reference: <https://clang.llvm.org/docs/ClangCommandLineReference.html>
-- GCC option reference: <https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html>
-- GitHub hosted runners: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>
-- Ghostty CI workflow (Nix-first pattern): <https://raw.githubusercontent.com/ghostty-org/ghostty/main/.github/workflows/test.yml>
-- BetterSpotlight CI workflow (current state): `/Users/rexliu/betterspotlight/.github/workflows/ci.yml`
+- SOURCE_DATE_EPOCH: <https://reproducible-builds.org/specs/source-date-epoch/>
+- Build path prefix map: <https://reproducible-builds.org/specs/build-path-prefix-map/>
+- Ghostty CI reference: <https://raw.githubusercontent.com/ghostty-org/ghostty/main/.github/workflows/test.yml>
