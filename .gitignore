@@ -44,6 +44,7 @@ Icon?
 *.dSYM.zip
 *.profraw
 *.profdata
+Tests/Fixtures/sample_documents/*.log
 
 # Build products
 *.app
