@@ -163,6 +163,13 @@ bool writeCompiledModel(MLModel<MLWritable>* model, const QString& outputPath, Q
 {
     NSError* error = nil;
     NSFileManager* fileManager = [NSFileManager defaultManager];
+    if (!QDir().mkpath(QFileInfo(outputPath).absolutePath())) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("create_compiled_model_dir_failed:%1")
+                .arg(QFileInfo(outputPath).absolutePath());
+        }
+        return false;
+    }
     NSString* output = toNSString(outputPath);
     if ([fileManager fileExistsAtPath:output]) {
         [fileManager removeItemAtPath:output error:nil];
@@ -385,7 +392,8 @@ id<MLBatchProvider> makeTrainingBatch(const QVector<TrainingExample>& trainSet,
 
         NSDictionary* dict = @{
             toNSString(inputFeatureName): [MLFeatureValue featureValueWithMultiArray:inputArray],
-            toNSString(labelFeatureName): [MLFeatureValue featureValueWithInt64:(ex.label > 0 ? 1 : 0)],
+            toNSString(labelFeatureName): [MLFeatureValue featureValueWithString:
+                (ex.label > 0 ? @"1" : @"0")],
         };
         MLDictionaryFeatureProvider* provider =
             [[MLDictionaryFeatureProvider alloc] initWithDictionary:dict error:&error];
@@ -681,7 +689,9 @@ bool CoreMlRanker::trainAndPromote(const QVector<TrainingExample>& samples,
         updateConfig.computeUnits = MLComputeUnitsAll;
     }
     NSMutableDictionary* params = [[NSMutableDictionary alloc] init];
-    params[MLParameterKey.epochs] = @(std::max(1, config.epochs));
+    // The current bootstrap updatable model constrains epochs to an enumerated set {1}.
+    // Run one epoch per cycle and rely on repeated micro-batch cycles for continued adaptation.
+    params[MLParameterKey.epochs] = @(1);
     params[MLParameterKey.learningRate] = @(clamp(config.learningRate, 1e-4, 1.0));
     params[MLParameterKey.miniBatchSize] = @(32);
     params[MLParameterKey.shuffle] = @YES;
