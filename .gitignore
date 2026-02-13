@@ -33,6 +33,7 @@ Icon?
 
 # IDE
 .idea/
+.cl[a]ude/
 *.xcworkspace/
 !*.xcworkspace/contents.xcworkspacedata
 
