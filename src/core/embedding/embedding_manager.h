@@ -56,7 +56,7 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 
-    ModelRegistry* m_registry = nullptr;
+    [[maybe_unused]] ModelRegistry* m_registry = nullptr;
     std::string m_role;
     std::unique_ptr<WordPieceTokenizer> m_tokenizer;
     int m_embeddingSize = 0;

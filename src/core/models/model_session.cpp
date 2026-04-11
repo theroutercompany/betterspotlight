@@ -17,6 +17,7 @@ namespace bs {
 
 namespace {
 
+#if BS_WITH_ONNX
 #ifdef BETTERSPOTLIGHT_PREFER_COREML_DEFAULT
 constexpr bool kPreferCoreMlByDefault = BETTERSPOTLIGHT_PREFER_COREML_DEFAULT != 0;
 #else
@@ -32,7 +33,6 @@ bool envFlagEnabled(const QString& value)
         || normalized == QStringLiteral("on");
 }
 
-#if BS_WITH_ONNX
 constexpr uint32_t kCoreMlFlagUseCpuAndGpu = 0U;
 
 #ifdef ORT_COREML_FLAG_CREATE_MLPROGRAM

@@ -172,15 +172,15 @@ QStringList modelDownloadUrlsForRole(const QString& role)
     }
     if (role == QLatin1String("cross-encoder")) {
         return {
-            QStringLiteral("https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model_int8.onnx"),
-            QStringLiteral("https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model.onnx"),
+            QStringLiteral("https://huggingface.co/Xenova/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/Xenova/ms-marco-MiniLM-L-6-v2/resolve/main/onnx/model.onnx"),
         };
     }
     if (role == QLatin1String("cross-encoder-fast")) {
         return {
-            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/onnx/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/onnx/model_quantized.onnx"),
             QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/onnx/model.onnx"),
-            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/model_int8.onnx"),
+            QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/model_quantized.onnx"),
             QStringLiteral("https://huggingface.co/mixedbread-ai/mxbai-rerank-xsmall-v1/resolve/main/model.onnx"),
         };
     }

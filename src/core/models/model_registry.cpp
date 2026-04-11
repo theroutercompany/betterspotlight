@@ -251,18 +251,32 @@ bool ModelRegistry::ensureWritableModelsSeeded(QString* errorOut)
         return false;
     }
 
-    // Seed bootstrap artifacts only; larger optional models are downloaded on demand.
+    const std::optional<ModelManifest> manifest = ModelManifest::loadFromFile(manifestDst);
+    if (!manifest.has_value()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to load seeded manifest.json from writable models dir");
+        }
+        return false;
+    }
+
+    for (const auto& [role, entry] : manifest->models) {
+        if (entry.file.trimmed().isEmpty()) {
+            continue;
+        }
+        const QString modelSrc = sourceDir + QStringLiteral("/") + entry.file;
+        const QString modelDst = destDir + QStringLiteral("/") + entry.file;
+        if (!copyIfMissing(modelSrc, modelDst)) {
+            LOG_INFO(bsCore,
+                     "ModelRegistry: runtime model for role '%s' not seeded from %s (download may still be required)",
+                     role.c_str(),
+                     qPrintable(modelSrc));
+        }
+    }
+
     const QString vocabSrc = sourceDir + QStringLiteral("/vocab.txt");
     const QString vocabDst = destDir + QStringLiteral("/vocab.txt");
     if (!copyIfMissing(vocabSrc, vocabDst)) {
         LOG_WARN(bsCore, "ModelRegistry: vocab seed missing at %s", qPrintable(vocabSrc));
-    }
-
-    const QString smallSrc = sourceDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-    const QString smallDst = destDir + QStringLiteral("/bge-small-en-v1.5-int8.onnx");
-    if (!copyIfMissing(smallSrc, smallDst)) {
-        LOG_WARN(bsCore, "ModelRegistry: bootstrap embedding model missing at %s",
-                 qPrintable(smallSrc));
     }
 
     const QString onlineRankerSrc =

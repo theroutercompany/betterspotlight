@@ -59,7 +59,7 @@ option(BETTERSPOTLIGHT_FETCH_MODELS
        ON)
 option(BETTERSPOTLIGHT_FETCH_MAX_QUALITY_MODEL
        "Fetch the 1024d max-quality embedding model as part of model asset bootstrap"
-       OFF)
+       ON)
 option(BETTERSPOTLIGHT_GENERATE_ONLINE_RANKER_BOOTSTRAP
        "Generate CoreML online-ranker bootstrap artifacts (requires coremltools + xcrun)"
        OFF)
