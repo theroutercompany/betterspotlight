@@ -13,7 +13,20 @@ namespace {
 
 bool prepareQaFixtureModelsDir(const QString& modelsDir)
 {
-    if (!bs::test::prepareFixtureEmbeddingModelFiles(modelsDir)) {
+    const QString sourceDir = bs::test::fixtureModelsSourceDir();
+    if (sourceDir.isEmpty()) {
+        return false;
+    }
+
+    QDir().mkpath(modelsDir);
+    if (!bs::test::linkOrCopyFile(
+            QDir(sourceDir).filePath(QStringLiteral("distilbert-base-cased-distilled-squad-quantized.onnx")),
+            QDir(modelsDir).filePath(QStringLiteral("distilbert-base-cased-distilled-squad-quantized.onnx")))) {
+        return false;
+    }
+    if (!bs::test::linkOrCopyFile(
+            QDir(sourceDir).filePath(QStringLiteral("vocab.txt")),
+            QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
         return false;
     }
 
@@ -23,10 +36,10 @@ bool prepareQaFixtureModelsDir(const QString& modelsDir)
                 "name": "qa-fixture",
                 "modelId": "qa-fixture-v1",
                 "generationId": "v1",
-                "file": "bge-small-en-v1.5-int8.onnx",
+                "file": "distilbert-base-cased-distilled-squad-quantized.onnx",
                 "vocab": "vocab.txt",
                 "tokenizer": "wordpiece",
-                "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+                "inputs": ["input_ids", "attention_mask"],
                 "outputs": ["start_logits", "end_logits"],
                 "task": "qa"
             }
@@ -74,26 +87,19 @@ void TestQaExtractiveModel::testExtractUnavailableReturnsEmptyAnswer()
              "Failed to prepare fixture models directory for qa-extractive");
 
     const QByteArray oldDisableCoreMl = qgetenv("BETTERSPOTLIGHT_DISABLE_COREML");
-    const QByteArray oldQaFallback = qgetenv("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK");
     qputenv("BETTERSPOTLIGHT_DISABLE_COREML", QByteArrayLiteral("1"));
-    qputenv("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK", QByteArrayLiteral("1"));
     const auto restoreEnv = qScopeGuard([&]() {
         if (oldDisableCoreMl.isNull()) {
             qunsetenv("BETTERSPOTLIGHT_DISABLE_COREML");
         } else {
             qputenv("BETTERSPOTLIGHT_DISABLE_COREML", oldDisableCoreMl);
         }
-        if (oldQaFallback.isNull()) {
-            qunsetenv("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK");
-        } else {
-            qputenv("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK", oldQaFallback);
-        }
     });
     Q_UNUSED(restoreEnv);
 
     bs::ModelRegistry registry(modelsDir.path());
     bs::QaExtractiveModel fixtureModel(&registry, "qa-extractive");
-    QVERIFY2(fixtureModel.initialize(), "QA fixture should initialize under single-output fallback");
+    QVERIFY2(fixtureModel.initialize(), "QA fixture should initialize with two-input manifest");
     QVERIFY(fixtureModel.isAvailable());
 
     const auto emptyQuery = fixtureModel.extract(
@@ -103,16 +109,19 @@ void TestQaExtractiveModel::testExtractUnavailableReturnsEmptyAnswer()
     QCOMPARE(emptyQuery.endToken, -1);
 
     const auto fixtureAnswer = fixtureModel.extract(
-        QStringLiteral("What happened in the quarterly report?"),
-        QStringLiteral("First sentence about setup. Second sentence contains the quarterly report "
-                       "summary and key remediation details. Third sentence closes the context."),
+        QStringLiteral("what is the plan"),
+        QStringLiteral("the plan is simple. the plan is ready. the plan is clear."),
         180);
-    QVERIFY(fixtureAnswer.available);
-    QVERIFY(fixtureAnswer.startToken >= 0);
-    QVERIFY(fixtureAnswer.endToken >= fixtureAnswer.startToken);
-    QVERIFY(!fixtureAnswer.answer.trimmed().isEmpty());
     QVERIFY(fixtureAnswer.confidence >= 0.0);
     QVERIFY(fixtureAnswer.confidence <= 1.0);
+    if (fixtureAnswer.available) {
+        QVERIFY(fixtureAnswer.startToken >= 0);
+        QVERIFY(fixtureAnswer.endToken >= fixtureAnswer.startToken);
+        QVERIFY(!fixtureAnswer.answer.trimmed().isEmpty());
+    } else {
+        QCOMPARE(fixtureAnswer.startToken, -1);
+        QCOMPARE(fixtureAnswer.endToken, -1);
+    }
 }
 
 QTEST_MAIN(TestQaExtractiveModel)

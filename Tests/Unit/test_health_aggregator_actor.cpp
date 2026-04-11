@@ -88,6 +88,16 @@ void TestHealthAggregatorActor::testOverallStatePrecedence()
              QStringLiteral("rebuilding"));
     QCOMPARE(reason, QStringLiteral("rebuilding"));
 
+    QJsonObject failedRebuildHealth;
+    failedRebuildHealth[QStringLiteral("queueRebuildStatus")] = QStringLiteral("aborted");
+    QCOMPARE(bs::HealthAggregatorActor::computeOverallState(
+                 services,
+                 failedRebuildHealth,
+                 0,
+                 &reason),
+             QStringLiteral("degraded"));
+    QCOMPARE(reason, QStringLiteral("component_degraded"));
+
     QCOMPARE(bs::HealthAggregatorActor::computeOverallState(
                  services,
                  QJsonObject{},

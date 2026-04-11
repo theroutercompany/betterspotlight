@@ -89,10 +89,13 @@ Pipeline::ActorMode readActorMode()
     if (raw == QLatin1String("legacy")) {
         return Pipeline::ActorMode::Legacy;
     }
+    if (raw == QLatin1String("dual")) {
+        return Pipeline::ActorMode::Dual;
+    }
     if (raw == QLatin1String("actor_primary")) {
         return Pipeline::ActorMode::ActorPrimary;
     }
-    return Pipeline::ActorMode::Dual;
+    return Pipeline::ActorMode::ActorPrimary;
 }
 
 } // namespace
@@ -214,6 +217,7 @@ void Pipeline::stop()
 
     m_stopping.store(true);
     m_running.store(false);
+    m_rebuildExclusiveMode.store(false);
 
     if (m_monitor) {
         m_monitor->stop();
@@ -365,6 +369,48 @@ void Pipeline::resetRuntimeState()
     }
     m_livePending.store(0);
     m_rebuildPending.store(0);
+    m_rebuildExclusiveMode.store(false);
+}
+
+bool Pipeline::usesActorizedIngress() const
+{
+    return m_actorMode != ActorMode::Legacy;
+}
+
+void Pipeline::clearQueuedWorkForRebuild()
+{
+    if (usesActorizedIngress()) {
+        if (m_schedulerActor) {
+            m_schedulerActor->clearPending();
+        }
+    } else {
+        m_workQueue.clearPending();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_prepMutex);
+        m_prepQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_preparedMutex);
+        m_preparedLiveQueue.clear();
+        m_preparedRebuildQueue.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_coordMutex);
+        m_pathCoordinator.clear();
+    }
+    if (m_pathStateActor) {
+        m_pathStateActor->reset();
+    }
+
+    m_livePending.store(0);
+    m_rebuildPending.store(0);
+    m_writerBatchDepth.store(0);
+    if (m_telemetryActor) {
+        m_telemetryActor->recordWriterBatchDepth(0);
+    }
+    wakeAllStages();
 }
 
 void Pipeline::wakeAllStages()
@@ -378,7 +424,7 @@ void Pipeline::wakeAllStages()
 
 size_t Pipeline::pendingMergedCount() const
 {
-    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+    if (usesActorizedIngress() && m_pathStateActor) {
         return m_pathStateActor->pendingMergedCount();
     }
 
@@ -395,7 +441,7 @@ size_t Pipeline::pendingMergedCount() const
 size_t Pipeline::totalPendingDepth() const
 {
     size_t ingress = 0;
-    if (m_actorMode == ActorMode::ActorPrimary && m_schedulerActor) {
+    if (usesActorizedIngress() && m_schedulerActor) {
         ingress = m_schedulerActor->totalDepth();
     } else {
         ingress = m_workQueue.size();
@@ -477,14 +523,10 @@ bool Pipeline::enqueueLaneWorkItem(const WorkItem& item, PipelineLane lane, int 
         }
 
         bool enqueued = false;
-        if (m_actorMode == ActorMode::ActorPrimary) {
+        if (usesActorizedIngress()) {
             enqueued = m_schedulerActor && m_schedulerActor->enqueue(laneItem, lane);
         } else {
             enqueued = m_workQueue.enqueue(laneItem);
-            if (m_actorMode == ActorMode::Dual && m_schedulerActor) {
-                // Dual mode runs actorized ingress in shadow for drift checks.
-                (void)m_schedulerActor->enqueue(laneItem, lane);
-            }
         }
 
         if (enqueued) {
@@ -511,20 +553,36 @@ bool Pipeline::enqueueLaneWorkItem(const WorkItem& item, PipelineLane lane, int 
     return false;
 }
 
-void Pipeline::waitForPipelineDrain()
+Pipeline::DrainResult Pipeline::waitForPipelineDrain()
 {
+    DrainResult lastSnapshot;
     for (int attempt = 0; attempt < m_runtimeConfig.drainPollAttempts; ++attempt) {
-        const bool drained = (totalPendingDepth() == 0)
-            && (m_preparingCount.load() == 0)
-            && (m_writingCount.load() == 0);
-        if (drained) {
-            return;
+        size_t preparedDepth = 0;
+        {
+            std::lock_guard<std::mutex> preparedLock(m_preparedMutex);
+            preparedDepth = m_preparedLiveQueue.size() + m_preparedRebuildQueue.size();
+        }
+        lastSnapshot.preparing = m_preparingCount.load();
+        lastSnapshot.writing = m_writingCount.load();
+        lastSnapshot.pendingDepth = preparedDepth;
+        lastSnapshot.reason = QStringLiteral("drain_timeout");
+        lastSnapshot.drained = (preparedDepth == 0)
+            && (lastSnapshot.preparing == 0)
+            && (lastSnapshot.writing == 0);
+        if (lastSnapshot.drained) {
+            lastSnapshot.reason = QStringLiteral("drained");
+            return lastSnapshot;
         }
         std::this_thread::sleep_for(
             std::chrono::milliseconds(m_runtimeConfig.drainPollIntervalMs));
     }
 
-    LOG_WARN(bsIndex, "waitForPipelineDrain timed out; continuing rebuild with residual activity");
+    LOG_WARN(bsIndex,
+             "waitForPipelineDrain timed out (pending=%d preparing=%d writing=%d)",
+             static_cast<int>(lastSnapshot.pendingDepth),
+             static_cast<int>(lastSnapshot.preparing),
+             static_cast<int>(lastSnapshot.writing));
+    return lastSnapshot;
 }
 
 WorkItem::Type Pipeline::mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs)
@@ -553,7 +611,7 @@ void Pipeline::reindexPath(const QString& path)
     WorkItem item;
     item.type = WorkItem::Type::ModifiedContent;
     item.filePath = path.toStdString();
-    item.rebuildLane = false;
+    item.rebuildLane = m_rebuildExclusiveMode.load();
 
     LOG_INFO(bsIndex, "Re-index requested: %s", qUtf8Printable(path));
     if (!enqueuePrimaryWorkItem(item, 200)) {
@@ -563,32 +621,50 @@ void Pipeline::reindexPath(const QString& path)
     }
 }
 
-void Pipeline::rebuildAll(const std::vector<std::string>& roots)
+Pipeline::RebuildResult Pipeline::rebuildAll(const std::vector<std::string>& roots)
 {
     std::lock_guard<std::mutex> rebuildLock(m_rebuildMutex);
+    RebuildResult result;
 
     if (!m_running.load()) {
         LOG_WARN(bsIndex, "rebuildAll called while pipeline is not running");
-        return;
+        result.status = QStringLiteral("ignored");
+        result.reason = QStringLiteral("pipeline_not_running");
+        return result;
     }
 
     LOG_INFO(bsIndex, "Rebuild all requested");
 
+    m_rebuildExclusiveMode.store(true);
     pause();
-    waitForPipelineDrain();
+    const DrainResult drain = waitForPipelineDrain();
+    result.pendingDepth = drain.pendingDepth;
+    result.preparing = drain.preparing;
+    result.writing = drain.writing;
+    if (!drain.drained) {
+        m_rebuildExclusiveMode.store(false);
+        resume();
+        result.status = QStringLiteral("aborted");
+        result.reason = drain.reason;
+        LOG_WARN(bsIndex,
+                 "Rebuild all aborted because pipeline drain could not be proven safe");
+        emit indexingError(QStringLiteral("Rebuild aborted: pipeline drain timed out"));
+        return result;
+    }
+
+    clearQueuedWorkForRebuild();
 
     if (!m_store.deleteAll()) {
         LOG_ERROR(bsIndex, "rebuildAll: failed to clear index; aborting rebuild");
+        m_rebuildExclusiveMode.store(false);
         resume();
+        result.status = QStringLiteral("failed");
+        result.reason = QStringLiteral("store_clear_failed");
         emit indexingError(QStringLiteral("Failed to clear index for rebuild"));
-        return;
+        return result;
     }
 
     m_processedCount.store(0);
-    {
-        std::lock_guard<std::mutex> lock(m_coordMutex);
-        m_pathCoordinator.clear();
-    }
 
     FileScanner scanner(&m_pathRules);
     size_t enqueued = 0;
@@ -610,12 +686,23 @@ void Pipeline::rebuildAll(const std::vector<std::string>& roots)
     resume();
 
     LOG_INFO(bsIndex, "Rebuild all: queued %d items", static_cast<int>(enqueued));
+    result.status = QStringLiteral("queued");
+    result.reason = QStringLiteral("rebuild_queued");
+    result.queuedItems = enqueued;
+    return result;
+}
+
+void Pipeline::finishRebuildExclusiveMode()
+{
+    if (m_rebuildExclusiveMode.exchange(false)) {
+        LOG_INFO(bsIndex, "Pipeline rebuild-exclusive lane ownership cleared");
+    }
 }
 
 QueueStats Pipeline::queueStatus() const
 {
     QueueStats stats;
-    if (m_actorMode == ActorMode::ActorPrimary) {
+    if (usesActorizedIngress()) {
         if (m_schedulerActor) {
             const PipelineSchedulerStats schedulerStats = m_schedulerActor->stats();
             stats.depth = schedulerStats.liveDepth + schedulerStats.rebuildDepth;
@@ -722,14 +809,14 @@ void Pipeline::scanEntry()
     }
 
     LOG_INFO(bsIndex, "Initial scan complete, queue depth: %d",
-             static_cast<int>(m_workQueue.size()));
+             static_cast<int>(totalPendingDepth()));
 }
 
 // ── Coordinator helpers ─────────────────────────────────────
 
 std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkItem& item)
 {
-    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+    if (usesActorizedIngress() && m_pathStateActor) {
         const auto actorTask = m_pathStateActor->onIngress(item);
         if (!actorTask.has_value()) {
             if (m_schedulerActor) {
@@ -781,7 +868,7 @@ std::optional<Pipeline::PrepTask> Pipeline::tryDispatchFromIngress(const WorkIte
 
 std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& prepared)
 {
-    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+    if (usesActorizedIngress() && m_pathStateActor) {
         const auto actorTask = m_pathStateActor->onPrepCompleted(prepared);
         if (!actorTask.has_value()) {
             return std::nullopt;
@@ -822,7 +909,7 @@ std::optional<Pipeline::PrepTask> Pipeline::onPrepCompleted(const PreparedWork& 
 
 bool Pipeline::isStalePreparedWork(const PreparedWork& prepared) const
 {
-    if (m_actorMode == ActorMode::ActorPrimary && m_pathStateActor) {
+    if (usesActorizedIngress() && m_pathStateActor) {
         return m_pathStateActor->isStalePrepared(prepared);
     }
 
@@ -850,7 +937,7 @@ void Pipeline::prepDispatcherLoop()
         }
 
         std::optional<WorkItem> ingressItem;
-        if (m_actorMode == ActorMode::ActorPrimary && m_schedulerActor) {
+        if (usesActorizedIngress() && m_schedulerActor) {
             auto scheduled = m_schedulerActor->dequeueBlocking(m_stopping, m_paused);
             if (scheduled.has_value()) {
                 ingressItem = scheduled->item;
@@ -881,10 +968,6 @@ void Pipeline::prepDispatcherLoop()
                         m_livePending.fetch_sub(1);
                     }
                 }
-                // Drain actorized scheduler in dual mode to keep shadow path bounded.
-                if (m_actorMode == ActorMode::Dual && m_schedulerActor) {
-                    (void)m_schedulerActor->tryDequeue();
-                }
             }
         }
 
@@ -896,7 +979,7 @@ void Pipeline::prepDispatcherLoop()
         }
 
         auto prepTask = tryDispatchFromIngress(ingressItem.value());
-        if (m_actorMode != ActorMode::ActorPrimary) {
+        if (!usesActorizedIngress()) {
             m_workQueue.markItemComplete();
         }
 
@@ -1154,7 +1237,7 @@ void Pipeline::writerLoop()
 
         const bool queueDrained = prepQueueEmpty
             && m_preparingCount.load() == 0
-            && ((m_actorMode == ActorMode::ActorPrimary && m_schedulerActor)
+            && ((usesActorizedIngress() && m_schedulerActor)
                     ? (m_schedulerActor->totalDepth() == 0)
                     : (m_workQueue.size() == 0))
             && preparedQueueEmpty
@@ -1191,12 +1274,14 @@ void Pipeline::writerLoop()
 void Pipeline::onFileSystemEvents(const std::vector<WorkItem>& items)
 {
     int enqueued = 0;
+    const bool rebuildExclusive = m_rebuildExclusiveMode.load();
     for (const auto& item : items) {
         auto validation = m_pathRules.validate(item.filePath);
         if (validation == ValidationResult::Exclude) {
             continue;
         }
-        const PipelineLane lane = item.rebuildLane ? PipelineLane::Rebuild : PipelineLane::Live;
+        const PipelineLane lane =
+            (item.rebuildLane || rebuildExclusive) ? PipelineLane::Rebuild : PipelineLane::Live;
         if (item.type == WorkItem::Type::NewFile
             || item.type == WorkItem::Type::ModifiedContent) {
             if (enqueueLaneWorkItem(item, lane, 80)) {

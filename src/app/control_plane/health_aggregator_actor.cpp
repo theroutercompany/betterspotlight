@@ -342,6 +342,10 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
         || mergedHealth.value(QStringLiteral("overallStatus")).toString() == QLatin1String("rebuilding")) {
         rebuilding = true;
     }
+    if (mergedHealth.value(QStringLiteral("queueRebuildStatus")).toString() == QLatin1String("aborted")
+        || mergedHealth.value(QStringLiteral("queueRebuildStatus")).toString() == QLatin1String("failed")) {
+        degradedService = true;
+    }
     if (mergedHealth.value(QStringLiteral("inferenceProbeState")).toString()
             == QLatin1String("unavailable")
         || mergedHealth.value(QStringLiteral("extractorProbeState")).toString()
@@ -488,6 +492,8 @@ void HealthAggregatorActor::buildAndPublishSnapshot(const QJsonObject& queryHeal
             indexerQueue.value(QStringLiteral("rebuildRunning")).toBool(false);
         mergedHealth[QStringLiteral("queueRebuildStatus")] =
             indexerQueue.value(QStringLiteral("rebuildStatus")).toString(QStringLiteral("idle"));
+        mergedHealth[QStringLiteral("queueRebuildReason")] =
+            indexerQueue.value(QStringLiteral("rebuildReason")).toString();
         const QJsonObject lastProgress =
             indexerQueue.value(QStringLiteral("lastProgressReport")).toObject();
         mergedHealth[QStringLiteral("queueScanned")] = lastProgress.value(QStringLiteral("scanned")).toInt();
@@ -588,6 +594,10 @@ void HealthAggregatorActor::buildAndPublishSnapshot(const QJsonObject& queryHeal
     }
     queue[QStringLiteral("embeddingQueue")] = embeddingQueueDepth;
     queue[QStringLiteral("source")] = mergedHealth.value(QStringLiteral("queueSource")).toString();
+    queue[QStringLiteral("rebuildStatus")] =
+        mergedHealth.value(QStringLiteral("queueRebuildStatus")).toString();
+    queue[QStringLiteral("rebuildReason")] =
+        mergedHealth.value(QStringLiteral("queueRebuildReason")).toString();
     const QJsonObject bulkhead = mergedHealth.value(QStringLiteral("pipelineBulkhead")).toObject();
     if (!bulkhead.isEmpty()) {
         queue[QStringLiteral("bulkhead")] = bulkhead;

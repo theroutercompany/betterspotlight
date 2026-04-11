@@ -4071,6 +4071,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     int queueWriting = 0;
     bool queueRebuildRunning = false;
     QString queueRebuildStatus = QStringLiteral("idle");
+    QString queueRebuildReason;
     int queueCoalesced = 0;
     int queueStaleDropped = 0;
     int queuePrepWorkers = 0;
@@ -4101,6 +4102,8 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
                     queueResult.value(QStringLiteral("rebuildRunning")).toBool(false);
                 queueRebuildStatus =
                     queueResult.value(QStringLiteral("rebuildStatus")).toString(queueRebuildStatus);
+                queueRebuildReason =
+                    queueResult.value(QStringLiteral("rebuildReason")).toString();
                 const QJsonObject lastProgress =
                     queueResult.value(QStringLiteral("lastProgressReport")).toObject();
                 queueScanned = lastProgress.value(QStringLiteral("scanned")).toInt();
@@ -4131,6 +4134,10 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         || health.totalIndexedItems == 0) {
         overallStatus = QStringLiteral("rebuilding");
         healthStatusReason = QStringLiteral("rebuilding");
+    } else if (queueRebuildStatus == QLatin1String("aborted")
+               || queueRebuildStatus == QLatin1String("failed")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_rebuild_failed");
     } else if (includeIndexerQueueProbe && queueSource != QLatin1String("indexer_rpc")) {
         overallStatus = QStringLiteral("degraded");
         healthStatusReason = QStringLiteral("indexer_unavailable");
@@ -4169,6 +4176,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     indexHealth[QStringLiteral("queueWriting")] = queueWriting;
     indexHealth[QStringLiteral("queueRebuildRunning")] = queueRebuildRunning;
     indexHealth[QStringLiteral("queueRebuildStatus")] = queueRebuildStatus;
+    indexHealth[QStringLiteral("queueRebuildReason")] = queueRebuildReason;
     indexHealth[QStringLiteral("queueCoalesced")] = queueCoalesced;
     indexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
     indexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;

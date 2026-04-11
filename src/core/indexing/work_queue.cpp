@@ -141,6 +141,15 @@ QueueStats WorkQueue::stats() const
     return s;
 }
 
+void WorkQueue::clearPending()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    while (!m_queue.empty()) {
+        m_queue.pop();
+    }
+    m_cv.notify_all();
+}
+
 // ── Private helpers ─────────────────────────────────────────
 
 bool WorkQueue::dropLowestPriority()

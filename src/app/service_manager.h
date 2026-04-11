@@ -119,6 +119,9 @@ private:
     bool sendIndexerRequest(const QString& method, const QJsonObject& params = {});
     QJsonArray loadIndexRoots() const;
     QJsonArray loadEmbeddingRoots() const;
+    bool verifyOperationalReadiness(QString* reasonOut = nullptr);
+    static bool isInferenceRoleReady(const QJsonObject& roleStatusByModel,
+                                     const QString& roleName);
 
     void startControlPlaneThread();
     void stopControlPlaneThread();

@@ -141,11 +141,13 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
     const QJsonObject rebuildFirst = harness.request(QStringLiteral("rebuildAll"), {}, 15000);
     QVERIFY(bs::test::isResponse(rebuildFirst));
     QVERIFY(bs::test::resultPayload(rebuildFirst).contains(QStringLiteral("started")));
+    QVERIFY(bs::test::resultPayload(rebuildFirst).contains(QStringLiteral("rebuildReason")));
 
     const QJsonObject rebuildSecond = harness.request(QStringLiteral("rebuildAll"), {}, 15000);
     QVERIFY(bs::test::isResponse(rebuildSecond));
     const QJsonObject rebuildSecondResult = bs::test::resultPayload(rebuildSecond);
     QVERIFY(rebuildSecondResult.contains(QStringLiteral("alreadyRunning")));
+    QVERIFY(rebuildSecondResult.contains(QStringLiteral("rebuildReason")));
 
     const bool secondAlreadyRunning =
         rebuildSecondResult.value(QStringLiteral("alreadyRunning")).toBool(false);
@@ -161,6 +163,7 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
         }
         const QJsonObject result = bs::test::resultPayload(queue);
         const bool rebuildRunning = result.value(QStringLiteral("rebuildRunning")).toBool(false);
+        QVERIFY(result.contains(QStringLiteral("rebuildReason")));
         observedRunning = observedRunning || rebuildRunning;
         if (!rebuildRunning && (observedRunning || timer.elapsed() > 1000)) {
             observedIdleAfterRun = true;

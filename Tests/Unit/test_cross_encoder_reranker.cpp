@@ -15,7 +15,20 @@ namespace {
 
 bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
 {
-    if (!bs::test::prepareFixtureEmbeddingModelFiles(modelsDir)) {
+    const QString sourceDir = bs::test::fixtureModelsSourceDir();
+    if (sourceDir.isEmpty()) {
+        return false;
+    }
+
+    QDir().mkpath(modelsDir);
+    if (!bs::test::linkOrCopyFile(
+            QDir(sourceDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx")),
+            QDir(modelsDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx")))) {
+        return false;
+    }
+    if (!bs::test::linkOrCopyFile(
+            QDir(sourceDir).filePath(QStringLiteral("vocab.txt")),
+            QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
         return false;
     }
 
@@ -25,10 +38,10 @@ bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
                 "name": "cross-fixture",
                 "modelId": "cross-fixture-v1",
                 "generationId": "v1",
-                "file": "bge-small-en-v1.5-int8.onnx",
+                "file": "mxbai-rerank-xsmall-v1-int8.onnx",
                 "vocab": "vocab.txt",
                 "tokenizer": "wordpiece",
-                "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+                "inputs": ["input_ids", "attention_mask"],
                 "outputs": ["logits"],
                 "task": "rerank"
             }

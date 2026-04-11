@@ -126,6 +126,14 @@ void PipelineSchedulerActor::notifyAll()
     m_cv.notify_all();
 }
 
+void PipelineSchedulerActor::clearPending()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_liveQueue.clear();
+    m_rebuildQueue.clear();
+    m_cv.notify_all();
+}
+
 void PipelineSchedulerActor::recordDrop(PipelineLane lane, const QString& reason)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

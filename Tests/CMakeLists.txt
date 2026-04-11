@@ -146,7 +146,10 @@ bs_add_unit_test(test-structured-query-boost Unit/test_structured_query_boost.cp
 
 # M2 unit tests
 bs_add_unit_test(test-tokenizer Unit/test_tokenizer.cpp)
-bs_add_unit_test(test-embedding Unit/test_embedding.cpp)
+bs_add_unit_test(test-embedding Unit/test_embedding.cpp
+    SOURCES
+        Utils/model_fixture_paths.cpp
+)
 bs_add_unit_test(test-quantizer Unit/test_quantizer.cpp)
 bs_add_unit_test(test-vector-index Unit/test_vector_index.cpp)
 bs_add_unit_test(test-search-merger Unit/test_search_merger.cpp)

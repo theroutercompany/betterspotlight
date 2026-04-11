@@ -55,6 +55,7 @@ class EmbeddingManager::Impl {
 public:
 #if BS_WITH_ONNX
     Ort::Session* session = nullptr;  // Borrowed from ModelSession — NOT owned
+    std::vector<std::string> inputNames;
     std::string outputName;
 #endif
 };
@@ -117,6 +118,15 @@ bool EmbeddingManager::initialize()
         return false;
     }
     m_providerName = QString::fromStdString(modelSession->selectedProvider());
+    m_impl->inputNames.clear();
+    for (const QString& name : entry.inputs) {
+        if (!name.isEmpty()) {
+            m_impl->inputNames.push_back(name.toStdString());
+        }
+    }
+    if (m_impl->inputNames.empty()) {
+        m_impl->inputNames = {"input_ids", "attention_mask", "token_type_ids"};
+    }
 
     const auto& outputNames = modelSession->outputNames();
     if (outputNames.empty()) {
@@ -222,46 +232,49 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
     try {
         Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(OrtAllocatorType::OrtArenaAllocator,
                                                                  OrtMemTypeDefault);
+        std::vector<Ort::Value> inputTensors;
+        std::vector<const char*> inputNamePtrs;
+        inputTensors.reserve(m_impl->inputNames.size());
+        inputNamePtrs.reserve(m_impl->inputNames.size());
 
-        Ort::Value inputIds = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(tokenized.inputIds.data()),
-            tokenized.inputIds.size(),
-            inputShape,
-            2);
+        for (const std::string& inputName : m_impl->inputNames) {
+            if (inputName == "input_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(tokenized.inputIds.data()),
+                    tokenized.inputIds.size(),
+                    inputShape,
+                    2));
+            } else if (inputName == "attention_mask") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(tokenized.attentionMask.data()),
+                    tokenized.attentionMask.size(),
+                    inputShape,
+                    2));
+            } else if (inputName == "token_type_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(tokenized.tokenTypeIds.data()),
+                    tokenized.tokenTypeIds.size(),
+                    inputShape,
+                    2));
+            } else {
+                qWarning() << "EmbeddingManager initialize mismatch: unsupported manifest input"
+                           << QString::fromStdString(inputName);
+                m_circuitBreaker.recordFailure();
+                return {};
+            }
+            inputNamePtrs.push_back(inputName.c_str());
+        }
 
-        Ort::Value attentionMask = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(tokenized.attentionMask.data()),
-            tokenized.attentionMask.size(),
-            inputShape,
-            2);
-
-        Ort::Value tokenTypeIds = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(tokenized.tokenTypeIds.data()),
-            tokenized.tokenTypeIds.size(),
-            inputShape,
-            2);
-
-        Ort::Value inputTensors[3] = {
-            std::move(inputIds),
-            std::move(attentionMask),
-            std::move(tokenTypeIds),
-        };
-
-        static constexpr const char* inputNames[3] = {
-            "input_ids",
-            "attention_mask",
-            "token_type_ids",
-        };
         const char* outputNames[1] = {m_impl->outputName.c_str()};
 
         std::vector<Ort::Value> outputs = m_impl->session->Run(
             Ort::RunOptions{nullptr},
-            inputNames,
-            inputTensors,
-            3,
+            inputNamePtrs.data(),
+            inputTensors.data(),
+            inputTensors.size(),
             outputNames,
             1);
 

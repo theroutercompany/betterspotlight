@@ -7,12 +7,14 @@
 #include "core/fs/path_rules.h"
 
 #include <QFileSystemWatcher>
+#include <QPair>
 
 #include <optional>
 #include <memory>
 #include <vector>
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 namespace bs {
@@ -39,6 +41,11 @@ private:
     void configureBsignoreWatcher();
     void reloadBsignore();
     QJsonObject bsignoreStatusJson() const;
+    void setRebuildState(const QString& status, const QString& reason = QString());
+    QPair<QString, QString> rebuildState() const;
+    void publishRebuildCompletion(const QString& status,
+                                  const QString& reason,
+                                  qint64 finishedAtMs);
 
 private slots:
     void onBsignorePathChanged(const QString& path);
@@ -53,11 +60,13 @@ private:
 
     bool m_isIndexing = false;
     std::atomic<bool> m_rebuildRunning{false};
-    std::atomic<bool> m_rebuildAwaitingDrain{false};
     std::atomic<qint64> m_rebuildStartedAtMs{0};
     std::atomic<qint64> m_rebuildFinishedAtMs{0};
     std::thread m_rebuildThread;
     bool m_lastQueueActive = false;
+    mutable std::mutex m_rebuildStateMutex;
+    QString m_rebuildStatus = QStringLiteral("idle");
+    QString m_rebuildReason;
 
     // Stored roots for rebuild
     std::vector<std::string> m_currentRoots;

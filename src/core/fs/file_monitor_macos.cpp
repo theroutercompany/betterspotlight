@@ -127,29 +127,37 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
 
 void FileMonitorMacOS::stop()
 {
-    if (!m_running.load()) {
+    if (!m_running.exchange(false)) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-
-    if (m_stream) {
-        FSEventStreamStop(m_stream);
-        FSEventStreamInvalidate(m_stream);
-        FSEventStreamRelease(m_stream);
+    FSEventStreamRef stream = nullptr;
+    dispatch_queue_t queue = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        stream = m_stream;
+        queue = m_queue;
         m_stream = nullptr;
+        m_queue = nullptr;
     }
 
-    if (m_queue) {
-        dispatch_release(m_queue);
-        m_queue = nullptr;
+    if (stream) {
+        FSEventStreamStop(stream);
+        FSEventStreamInvalidate(stream);
+        FSEventStreamRelease(stream);
     }
 
     // Flush any remaining buffered events before clearing the callback.
     flushPendingEvents();
 
-    m_callback = nullptr;
-    m_running.store(false);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_callback = nullptr;
+    }
+
+    if (queue) {
+        dispatch_release(queue);
+    }
 
     LOG_INFO(bsFs, "FileMonitorMacOS stopped");
 }

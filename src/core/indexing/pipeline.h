@@ -66,6 +66,25 @@ public:
         ActorPrimary,
     };
 
+    struct DrainResult {
+        bool drained = false;
+        QString reason = QStringLiteral("unknown");
+        size_t pendingDepth = 0;
+        size_t preparing = 0;
+        size_t writing = 0;
+    };
+
+    struct RebuildResult {
+        QString status = QStringLiteral("ignored");
+        QString reason = QStringLiteral("unknown");
+        size_t queuedItems = 0;
+        size_t pendingDepth = 0;
+        size_t preparing = 0;
+        size_t writing = 0;
+
+        bool queued() const { return status == QLatin1String("queued"); }
+    };
+
     Pipeline(SQLiteStore& store, ExtractionManager& extractor,
              const PathRules& pathRules,
              const PipelineRuntimeConfig& runtimeConfig = {},
@@ -92,7 +111,11 @@ public:
     void reindexPath(const QString& path);
 
     // Drop all indexed data and re-scan from scratch.
-    void rebuildAll(const std::vector<std::string>& roots);
+    RebuildResult rebuildAll(const std::vector<std::string>& roots);
+
+    // Clears rebuild-only lane ownership after the caller has observed
+    // rebuild completion or an aborted/failed rebuild transition.
+    void finishRebuildExclusiveMode();
 
     // Hint that the user is actively interacting (e.g. typing a query).
     // Active mode clamps prep concurrency to one worker.
@@ -144,7 +167,7 @@ private:
     // Runtime helpers.
     void resetRuntimeState();
     void wakeAllStages();
-    void waitForPipelineDrain();
+    DrainResult waitForPipelineDrain();
     size_t pendingMergedCount() const;
     size_t totalPendingDepth() const;
     static WorkItem::Type mergeWorkTypes(WorkItem::Type lhs, WorkItem::Type rhs);
@@ -153,6 +176,8 @@ private:
     bool enqueueLaneWorkItem(const WorkItem& item,
                              PipelineLane lane,
                              int maxAttempts = 1200);
+    bool usesActorizedIngress() const;
+    void clearQueuedWorkForRebuild();
 
     // Concurrency policy helpers.
     void updatePrepConcurrencyPolicy();
@@ -178,6 +203,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_paused{false};
+    std::atomic<bool> m_rebuildExclusiveMode{false};
 
     // Stage queues
     mutable std::mutex m_prepMutex;
@@ -220,7 +246,7 @@ private:
 
     std::vector<std::string> m_scanRoots;
     PipelineRuntimeConfig m_runtimeConfig;
-    ActorMode m_actorMode = ActorMode::Dual;
+    ActorMode m_actorMode = ActorMode::ActorPrimary;
     std::unique_ptr<PipelineSchedulerActor> m_schedulerActor;
     std::unique_ptr<PipelineTelemetryActor> m_telemetryActor;
 };

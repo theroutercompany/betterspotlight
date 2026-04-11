@@ -50,6 +50,7 @@ class CrossEncoderReranker::Impl {
 public:
 #if BS_WITH_ONNX
     Ort::Session* session = nullptr;  // Borrowed from ModelSession
+    std::vector<std::string> inputNames;
     std::string outputName;
 #endif
     std::unique_ptr<WordPieceTokenizer> tokenizer;
@@ -96,6 +97,15 @@ bool CrossEncoderReranker::initialize()
     if (!m_impl->session) {
         qWarning() << "CrossEncoderReranker: null ONNX session";
         return false;
+    }
+    m_impl->inputNames.clear();
+    for (const QString& name : entry.inputs) {
+        if (!name.isEmpty()) {
+            m_impl->inputNames.push_back(name.toStdString());
+        }
+    }
+    if (m_impl->inputNames.empty()) {
+        m_impl->inputNames = {"input_ids", "attention_mask", "token_type_ids"};
     }
 
     const auto& outputNames = modelSession->outputNames();
@@ -153,39 +163,43 @@ int CrossEncoderReranker::rerank(const QString& query,
 
         Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(
             OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault);
+        std::vector<Ort::Value> inputTensors;
+        std::vector<const char*> inputNamePtrs;
+        inputTensors.reserve(m_impl->inputNames.size());
+        inputNamePtrs.reserve(m_impl->inputNames.size());
 
-        Ort::Value inputIds = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(batch.inputIds.data()),
-            batch.inputIds.size(),
-            inputShape, 2);
+        for (const std::string& inputName : m_impl->inputNames) {
+            if (inputName == "input_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(batch.inputIds.data()),
+                    batch.inputIds.size(),
+                    inputShape, 2));
+            } else if (inputName == "attention_mask") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(batch.attentionMask.data()),
+                    batch.attentionMask.size(),
+                    inputShape, 2));
+            } else if (inputName == "token_type_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(batch.tokenTypeIds.data()),
+                    batch.tokenTypeIds.size(),
+                    inputShape, 2));
+            } else {
+                qWarning() << "CrossEncoderReranker manifest input unsupported:"
+                           << QString::fromStdString(inputName);
+                return 0;
+            }
+            inputNamePtrs.push_back(inputName.c_str());
+        }
 
-        Ort::Value attentionMask = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(batch.attentionMask.data()),
-            batch.attentionMask.size(),
-            inputShape, 2);
-
-        Ort::Value tokenTypeIds = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(batch.tokenTypeIds.data()),
-            batch.tokenTypeIds.size(),
-            inputShape, 2);
-
-        Ort::Value inputTensors[3] = {
-            std::move(inputIds),
-            std::move(attentionMask),
-            std::move(tokenTypeIds),
-        };
-
-        static constexpr const char* inputNames[3] = {
-            "input_ids", "attention_mask", "token_type_ids",
-        };
         const char* outputNames[1] = {m_impl->outputName.c_str()};
 
         std::vector<Ort::Value> outputs = m_impl->session->Run(
             Ort::RunOptions{nullptr},
-            inputNames, inputTensors, 3,
+            inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
             outputNames, 1);
 
         if (outputs.empty() || !outputs[0].IsTensor()) {

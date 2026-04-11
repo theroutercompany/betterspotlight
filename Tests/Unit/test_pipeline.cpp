@@ -18,6 +18,7 @@ class TestPipeline : public QObject {
 private slots:
     void testLifecycleAndBehaviorPaths();
     void testTransientExtractionFailureTriggersBoundedRetriesWithBackoff();
+    void testRebuildAbortsWhenDrainCannotSettle();
 };
 
 void TestPipeline::testLifecycleAndBehaviorPaths()
@@ -107,7 +108,10 @@ void TestPipeline::testLifecycleAndBehaviorPaths()
     pipeline.setUserActive(false);
     QVERIFY(pipeline.queueStatus().prepWorkers >= 2);
 
-    pipeline.rebuildAll({rootPath.toStdString()});
+    const bs::Pipeline::RebuildResult rebuildResult =
+        pipeline.rebuildAll({rootPath.toStdString()});
+    QCOMPARE(rebuildResult.status, QStringLiteral("queued"));
+    QCOMPARE(rebuildResult.reason, QStringLiteral("rebuild_queued"));
     timer.restart();
     bool drainedAfterRebuild = false;
     while (timer.elapsed() < 12000) {
@@ -185,6 +189,65 @@ void TestPipeline::testTransientExtractionFailureTriggersBoundedRetriesWithBacko
              "Expected transient extraction failure to retry and settle cleanly");
     QVERIFY2(timer.elapsed() >= 40,
              "Retry path should include backoff delay before terminal failure");
+
+    pipeline.stop();
+}
+
+void TestPipeline::testRebuildAbortsWhenDrainCannotSettle()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString rootPath = QDir(tempDir.path()).filePath(QStringLiteral("root"));
+    QVERIFY(QDir().mkpath(rootPath));
+    for (int i = 0; i < 200; ++i) {
+        QFile f(QDir(rootPath).filePath(QStringLiteral("fixture_%1.txt").arg(i)));
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(QByteArray(2048, 'a'));
+        f.close();
+    }
+
+    bs::ExtractionManager extractor;
+    bs::PathRules rules;
+    rules.setExplicitIncludeRoots({rootPath.toStdString()});
+
+    bs::PipelineRuntimeConfig cfg;
+    cfg.batchCommitSize = 1;
+    cfg.batchCommitIntervalMs = 10;
+    cfg.enqueueRetrySleepMs = 1;
+    cfg.memoryPressureSleepMs = 1;
+    cfg.drainPollAttempts = 1;
+    cfg.drainPollIntervalMs = 1;
+    cfg.rssProvider = []() { return 64; };
+
+    bs::Pipeline pipeline(store, extractor, rules, cfg);
+    pipeline.start({rootPath.toStdString()});
+
+    QTest::qWait(25);
+    const bs::Pipeline::RebuildResult rebuildResult =
+        pipeline.rebuildAll({rootPath.toStdString()});
+    QCOMPARE(rebuildResult.status, QStringLiteral("aborted"));
+    QCOMPARE(rebuildResult.reason, QStringLiteral("drain_timeout"));
+    QVERIFY(!pipeline.queueStatus().isPaused);
+
+    QElapsedTimer timer;
+    timer.start();
+    bool drainedAfterAbort = false;
+    while (timer.elapsed() < 12000) {
+        const bs::QueueStats stats = pipeline.queueStatus();
+        if (stats.depth == 0 && stats.preparing == 0 && stats.writing == 0) {
+            drainedAfterAbort = true;
+            break;
+        }
+        QTest::qWait(20);
+    }
+    QVERIFY2(drainedAfterAbort,
+             "Pipeline should resume and drain normally after an aborted rebuild");
 
     pipeline.stop();
 }

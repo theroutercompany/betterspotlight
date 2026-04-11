@@ -58,6 +58,7 @@ public:
     std::optional<ScheduledItem> tryDequeue();
     void shutdown();
     void notifyAll();
+    void clearPending();
 
     void recordDrop(PipelineLane lane, const QString& reason);
     void recordCoalesced();

@@ -82,6 +82,9 @@ public:
     // Snapshot of queue statistics.
     QueueStats stats() const;
 
+    // Clears queued work while preserving lifecycle flags and counters.
+    void clearPending();
+
 private:
     // Comparator: lower numeric Type value = higher priority.
     // std::priority_queue is a max-heap, so we invert the comparison

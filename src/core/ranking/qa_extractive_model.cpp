@@ -26,6 +26,7 @@ namespace bs {
 
 namespace {
 
+#if BS_WITH_ONNX
 bool envFlagEnabled(const QString& raw)
 {
     const QString normalized = raw.trimmed().toLower();
@@ -79,6 +80,7 @@ QString extractSentenceAround(const QString& context, int centerChar, int maxCha
     }
     return normalizeAnswerText(sentence, maxChars);
 }
+#endif
 
 } // namespace
 
@@ -136,7 +138,7 @@ bool QaExtractiveModel::initialize()
             m_impl->inputNames.push_back(name.toStdString());
         }
     }
-    if (m_impl->inputNames.size() < 3) {
+    if (m_impl->inputNames.empty()) {
         m_impl->inputNames = {"input_ids", "attention_mask", "token_type_ids"};
     }
 
@@ -210,30 +212,33 @@ QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
             encoded.inputIds.size(),
             inputShape.data(),
             static_cast<size_t>(inputShape.size()));
-        Ort::Value attentionMask = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(encoded.attentionMask.data()),
-            encoded.attentionMask.size(),
-            inputShape.data(),
-            static_cast<size_t>(inputShape.size()));
-        Ort::Value tokenTypeIds = Ort::Value::CreateTensor<int64_t>(
-            memoryInfo,
-            const_cast<int64_t*>(encoded.tokenTypeIds.data()),
-            encoded.tokenTypeIds.size(),
-            inputShape.data(),
-            static_cast<size_t>(inputShape.size()));
+        std::vector<Ort::Value> inputTensors;
+        std::vector<const char*> inputNamePtrs;
+        inputTensors.reserve(m_impl->inputNames.size());
+        inputNamePtrs.reserve(m_impl->inputNames.size());
 
-        std::array<Ort::Value, 3> inputTensors = {
-            std::move(inputIds),
-            std::move(attentionMask),
-            std::move(tokenTypeIds),
-        };
-
-        const char* inputNamePtrs[3] = {
-            m_impl->inputNames[0].c_str(),
-            m_impl->inputNames[1].c_str(),
-            m_impl->inputNames[2].c_str(),
-        };
+        for (const std::string& inputName : m_impl->inputNames) {
+            if (inputName == "input_ids") {
+                inputTensors.push_back(std::move(inputIds));
+            } else if (inputName == "attention_mask") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(encoded.attentionMask.data()),
+                    encoded.attentionMask.size(),
+                    inputShape.data(),
+                    static_cast<size_t>(inputShape.size())));
+            } else if (inputName == "token_type_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(encoded.tokenTypeIds.data()),
+                    encoded.tokenTypeIds.size(),
+                    inputShape.data(),
+                    static_cast<size_t>(inputShape.size())));
+            } else {
+                return out;
+            }
+            inputNamePtrs.push_back(inputName.c_str());
+        }
         const char* outputNamePtrs[2] = {
             m_impl->startOutputName.c_str(),
             m_impl->endOutputName.c_str(),
@@ -241,7 +246,7 @@ QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
 
         std::vector<Ort::Value> outputs = m_impl->session->Run(
             Ort::RunOptions{nullptr},
-            inputNamePtrs, inputTensors.data(), 3,
+            inputNamePtrs.data(), inputTensors.data(), inputTensors.size(),
             outputNamePtrs, 2);
 
         if (outputs.size() < 2 || !outputs[0].IsTensor() || !outputs[1].IsTensor()) {

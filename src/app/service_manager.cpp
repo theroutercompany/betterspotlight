@@ -677,7 +677,31 @@ void ServiceManager::onAllServicesReady()
     if (m_stopping) {
         return;
     }
-    LOG_INFO(bsCore, "ServiceManager: all services ready");
+
+    QString readinessReason;
+    bool operationalReady = false;
+    for (int attempt = 0; attempt < 8 && !m_stopping; ++attempt) {
+        if (verifyOperationalReadiness(&readinessReason)) {
+            operationalReady = true;
+            break;
+        }
+        if (attempt < 7) {
+            QThread::msleep(300);
+        }
+    }
+
+    if (!operationalReady) {
+        LOG_ERROR(bsCore,
+                  "ServiceManager: helper processes reported ready, but operational readiness failed: %s",
+                  qPrintable(readinessReason));
+        m_allReady = false;
+        emit serviceStatusChanged();
+        emit serviceError(QStringLiteral("startup"), readinessReason);
+        updateTrayState();
+        return;
+    }
+
+    LOG_INFO(bsCore, "ServiceManager: all services operationally ready");
     m_allReady = true;
     emit serviceStatusChanged();
     emit allServicesReady();
@@ -1066,6 +1090,105 @@ ServiceManager::ServiceRequestResult ServiceManager::sendServiceRequestSync(
     out.error = actorResult.value(QStringLiteral("error")).toString();
     out.response = actorResult.value(QStringLiteral("response")).toObject();
     return out;
+}
+
+bool ServiceManager::isInferenceRoleReady(const QJsonObject& roleStatusByModel,
+                                          const QString& roleName)
+{
+    return roleStatusByModel.value(roleName).toString() == QLatin1String("ready");
+}
+
+bool ServiceManager::verifyOperationalReadiness(QString* reasonOut)
+{
+    auto setReason = [&](const QString& reason) {
+        if (reasonOut) {
+            *reasonOut = reason;
+        }
+    };
+
+    const ServiceRequestResult queryResult =
+        sendServiceRequestSync(QStringLiteral("query"),
+                               QStringLiteral("getQueryHealthV3"),
+                               {},
+                               2500);
+    if (!queryResult.ok) {
+        setReason(QStringLiteral("query_health_unavailable:%1").arg(queryResult.error));
+        return false;
+    }
+
+    const QJsonObject queryPayload = queryResult.response.value(QStringLiteral("result")).toObject();
+    const QString queryOverallStatus =
+        queryPayload.value(QStringLiteral("overallStatus")).toString(QStringLiteral("unknown"));
+    if (queryOverallStatus == QLatin1String("degraded")) {
+        setReason(QStringLiteral("query_health_degraded:%1").arg(
+            queryPayload.value(QStringLiteral("healthStatusReason"))
+                .toString(QStringLiteral("unknown"))));
+        return false;
+    }
+
+    const ServiceRequestResult indexerResult =
+        sendServiceRequestSync(QStringLiteral("indexer"),
+                               QStringLiteral("getQueueStatus"),
+                               {},
+                               2500);
+    if (!indexerResult.ok) {
+        setReason(QStringLiteral("indexer_queue_unavailable:%1").arg(indexerResult.error));
+        return false;
+    }
+
+    const QJsonObject indexerPayload =
+        indexerResult.response.value(QStringLiteral("result")).toObject();
+    const QString rebuildStatus =
+        indexerPayload.value(QStringLiteral("rebuildStatus")).toString(QStringLiteral("idle"));
+    if (rebuildStatus == QLatin1String("aborted")
+        || rebuildStatus == QLatin1String("failed")) {
+        setReason(QStringLiteral("indexer_rebuild_%1:%2")
+                      .arg(rebuildStatus,
+                           indexerPayload.value(QStringLiteral("rebuildReason"))
+                               .toString(QStringLiteral("unknown"))));
+        return false;
+    }
+
+    const ServiceRequestResult inferenceResult =
+        sendServiceRequestSync(QStringLiteral("inference"),
+                               QStringLiteral("get_inference_health"),
+                               {},
+                               2500);
+    if (!inferenceResult.ok) {
+        setReason(QStringLiteral("inference_health_unavailable:%1").arg(inferenceResult.error));
+        return false;
+    }
+
+    const QJsonObject inferencePayload =
+        inferenceResult.response.value(QStringLiteral("result")).toObject();
+    if (!inferencePayload.value(QStringLiteral("connected")).toBool(false)) {
+        setReason(QStringLiteral("inference_not_connected"));
+        return false;
+    }
+
+    const QJsonObject roleStatusByModel =
+        inferencePayload.value(QStringLiteral("roleStatusByModel")).toObject();
+    if (!isInferenceRoleReady(roleStatusByModel, QStringLiteral("bi-encoder"))) {
+        setReason(QStringLiteral("inference_role_unavailable:bi-encoder"));
+        return false;
+    }
+    if (!isInferenceRoleReady(roleStatusByModel, QStringLiteral("cross-encoder"))) {
+        setReason(QStringLiteral("inference_role_unavailable:cross-encoder"));
+        return false;
+    }
+
+    const ServiceRequestResult extractorResult =
+        sendServiceRequestSync(QStringLiteral("extractor"),
+                               QStringLiteral("ping"),
+                               {},
+                               2500);
+    if (!extractorResult.ok) {
+        setReason(QStringLiteral("extractor_probe_unavailable:%1").arg(extractorResult.error));
+        return false;
+    }
+
+    setReason(QStringLiteral("ready"));
+    return true;
 }
 
 QJsonArray ServiceManager::loadIndexRoots() const
