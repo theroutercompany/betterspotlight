@@ -4,6 +4,7 @@
 DerivedData/
 Build/
 build/
+build-*/
 build-codex/
 build-coverage/
 build-local/
