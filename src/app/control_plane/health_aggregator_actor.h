@@ -5,9 +5,10 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
-#include <QTimer>
 #include <functional>
 #include <memory>
+
+class QTimer;
 
 namespace bs {
 
@@ -45,14 +46,15 @@ private:
                                        qint64 stalenessMs,
                                        QString* reason);
 
-    QTimer m_pollTimer;
-    QTimer m_eventDebounceTimer;
+    QTimer* m_pollTimer = nullptr;
+    QTimer* m_eventDebounceTimer = nullptr;
     QString m_instanceId;
     QJsonArray m_managedServices;
     qint64 m_lastSnapshotTimeMs = 0;
     bool m_running = false;
     bool m_refreshInFlight = false;
     bool m_refreshPending = false;
+    quint64 m_refreshGeneration = 0;
 
     std::unique_ptr<SocketClient> m_queryClient;
     std::unique_ptr<SocketClient> m_indexerClient;

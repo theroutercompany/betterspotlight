@@ -9,6 +9,9 @@
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QThread>
+
+#include <atomic>
 
 #define private public
 #include "core/ipc/supervisor.h"
@@ -48,6 +51,96 @@ bool writeExecutableScript(const QString& path, const QByteArray& contents)
             | QFileDevice::ReadGroup | QFileDevice::ExeGroup
             | QFileDevice::ReadOther | QFileDevice::ExeOther);
 }
+
+class ThreadedMockService final {
+public:
+    enum class PingMode {
+        Ok,
+        Error,
+    };
+
+    ~ThreadedMockService()
+    {
+        stop();
+    }
+
+    void setMode(PingMode mode)
+    {
+        m_mode.store(static_cast<int>(mode));
+    }
+
+    bool start(const QString& socketPath)
+    {
+        stop();
+
+        m_server = new bs::SocketServer();
+        m_server->setRequestHandler([this](const QJsonObject& request) {
+            const uint64_t id = static_cast<uint64_t>(
+                request.value(QStringLiteral("id")).toInteger());
+            const QString method = request.value(QStringLiteral("method")).toString();
+
+            if (method == QLatin1String("ping")) {
+                if (m_mode.load() == static_cast<int>(PingMode::Error)) {
+                    return bs::IpcMessage::makeError(id,
+                                                     bs::IpcErrorCode::InternalError,
+                                                     QStringLiteral("forced heartbeat failure"));
+                }
+                QJsonObject result;
+                result[QStringLiteral("pong")] = true;
+                return bs::IpcMessage::makeResponse(id, result);
+            }
+            if (method == QLatin1String("shutdown")) {
+                QJsonObject result;
+                result[QStringLiteral("shutting_down")] = true;
+                return bs::IpcMessage::makeResponse(id, result);
+            }
+            return bs::IpcMessage::makeError(id,
+                                             bs::IpcErrorCode::NotFound,
+                                             QStringLiteral("unsupported method"));
+        });
+        m_server->moveToThread(&m_thread);
+        QObject::connect(&m_thread, &QThread::finished,
+                         m_server, &QObject::deleteLater);
+        QObject::connect(&m_thread, &QThread::finished, [this]() {
+            m_server = nullptr;
+        });
+
+        m_thread.start();
+
+        bool listened = false;
+        QMetaObject::invokeMethod(
+            m_server,
+            [&]() {
+                listened = m_server->listen(socketPath);
+            },
+            Qt::BlockingQueuedConnection);
+        return listened;
+    }
+
+    void stop()
+    {
+        if (m_server) {
+            QMetaObject::invokeMethod(
+                m_server,
+                [this]() {
+                    if (m_server) {
+                        m_server->close();
+                    }
+                },
+                Qt::BlockingQueuedConnection);
+        }
+        if (m_thread.isRunning()) {
+            m_thread.quit();
+            m_thread.wait();
+        }
+        m_server = nullptr;
+    }
+
+private:
+    std::atomic<int> m_mode{static_cast<int>(PingMode::Ok)};
+    QThread m_thread;
+    bs::SocketServer* m_server = nullptr;
+};
 
 } // namespace
 
@@ -144,38 +237,8 @@ void TestSupervisor::testHeartbeatTransitionsOnPingAndErrorResponses()
     removeSocketPath(socketPath);
     QVERIFY(QDir().mkpath(QFileInfo(socketPath).absolutePath()));
 
-    enum class PingMode {
-        Ok,
-        Error,
-    };
-    PingMode mode = PingMode::Ok;
-
-    bs::SocketServer mockServer;
-    mockServer.setRequestHandler([&mode](const QJsonObject& request) {
-        const uint64_t id = static_cast<uint64_t>(
-            request.value(QStringLiteral("id")).toInteger());
-        const QString method = request.value(QStringLiteral("method")).toString();
-
-        if (method == QLatin1String("ping")) {
-            if (mode == PingMode::Error) {
-                return bs::IpcMessage::makeError(id,
-                                                 bs::IpcErrorCode::InternalError,
-                                                 QStringLiteral("forced heartbeat failure"));
-            }
-            QJsonObject result;
-            result[QStringLiteral("pong")] = true;
-            return bs::IpcMessage::makeResponse(id, result);
-        }
-        if (method == QLatin1String("shutdown")) {
-            QJsonObject result;
-            result[QStringLiteral("shutting_down")] = true;
-            return bs::IpcMessage::makeResponse(id, result);
-        }
-        return bs::IpcMessage::makeError(id,
-                                         bs::IpcErrorCode::NotFound,
-                                         QStringLiteral("unsupported method"));
-    });
-    QVERIFY(mockServer.listen(socketPath));
+    ThreadedMockService mockService;
+    QVERIFY(mockService.start(socketPath));
 
     bs::Supervisor supervisor;
     QSignalSpy startedSpy(&supervisor, &bs::Supervisor::serviceStarted);
@@ -196,15 +259,17 @@ void TestSupervisor::testHeartbeatTransitionsOnPingAndErrorResponses()
     QVERIFY(snapshot.first().toObject().value(QStringLiteral("ready")).toBool());
     QVERIFY(snapshot.first().toObject().value(QStringLiteral("pid")).toInteger(0) > 0);
 
-    mode = PingMode::Error;
+    mockService.setMode(ThreadedMockService::PingMode::Error);
     supervisor.heartbeat();
-    snapshot = supervisor.serviceSnapshot();
-    QVERIFY(!snapshot.first().toObject().value(QStringLiteral("ready")).toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(!supervisor.serviceSnapshot().first().toObject()
+                                  .value(QStringLiteral("ready")).toBool(),
+                             3000);
 
-    mode = PingMode::Ok;
+    mockService.setMode(ThreadedMockService::PingMode::Ok);
     supervisor.heartbeat();
-    snapshot = supervisor.serviceSnapshot();
-    QVERIFY(snapshot.first().toObject().value(QStringLiteral("ready")).toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(supervisor.serviceSnapshot().first().toObject()
+                                  .value(QStringLiteral("ready")).toBool(),
+                             3000);
 
     // Close stdin so /bin/cat exits quickly and stopAll remains fast.
     auto* svc = supervisor.findService(serviceName);
@@ -214,7 +279,7 @@ void TestSupervisor::testHeartbeatTransitionsOnPingAndErrorResponses()
     QTRY_VERIFY_WITH_TIMEOUT(svc->process->state() == QProcess::NotRunning, 3000);
 
     supervisor.stopAll();
-    mockServer.close();
+    mockService.stop();
     removeSocketPath(socketPath);
 }
 

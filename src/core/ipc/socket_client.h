@@ -3,6 +3,9 @@
 #include "core/ipc/message.h"
 #include <QObject>
 #include <QLocalSocket>
+#include <QMap>
+#include <QPointer>
+#include <QTimer>
 #include <functional>
 #include <memory>
 
@@ -64,6 +67,9 @@ private:
     struct PendingRequest {
         QJsonObject response;
         bool completed = false;
+        bool asynchronous = false;
+        RequestCallback callback;
+        QPointer<QTimer> timeoutTimer;
     };
     QMap<uint64_t, std::shared_ptr<PendingRequest>> m_pending;
 
@@ -74,6 +80,10 @@ private:
     int m_reconnectBaseDelayMs = 500;
     int m_reconnectAttempt = 0;
 
+    void completePendingRequest(uint64_t id,
+                                const std::shared_ptr<PendingRequest>& pending,
+                                const std::optional<QJsonObject>& response);
+    void failAllPendingRequests(const QString& reason);
     void attemptReconnect();
 };
 

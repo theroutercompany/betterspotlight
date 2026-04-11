@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
 BUILD_LAUNCH_SCRIPT="${ROOT_DIR}/scripts/dev/build_launch.sh"
+TARGETS_SCRIPT="${ROOT_DIR}/scripts/dev/test_targets.sh"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
 BUILD_DIR_DEFAULT="${ROOT_DIR}/build-dev-verify"
 
@@ -65,6 +66,10 @@ done
 
 [[ -x "${SETUP_SCRIPT}" ]] || fail "setup script is missing or not executable: ${SETUP_SCRIPT}"
 [[ -x "${BUILD_LAUNCH_SCRIPT}" ]] || fail "build launch script is missing or not executable: ${BUILD_LAUNCH_SCRIPT}"
+[[ -f "${TARGETS_SCRIPT}" ]] || fail "targets script is missing: ${TARGETS_SCRIPT}"
+
+# shellcheck disable=SC1090
+source "${TARGETS_SCRIPT}"
 
 "${SETUP_SCRIPT}" --write-env-file "${ENV_FILE}"
 # shellcheck disable=SC1090
@@ -94,31 +99,15 @@ CMAKE_ARGS=(
 log "Configuring ${BUILD_DIR} (${BUILD_TYPE})..."
 "${ROOT_DIR}/scripts/ci/configure.sh" "${BUILD_DIR}" "${BUILD_TYPE}" "${CMAKE_ARGS[@]}"
 
-TEST_TARGETS=(
-    betterspotlight
-    betterspotlight-indexer
-    betterspotlight-extractor
-    betterspotlight-query
-    betterspotlight-inference
-    test-pipeline
-    test-indexer
-    test-indexer-service-ipc
-    test-full-pipeline
-    test-index-backpressure
-    test-index-persistence
-    test-incremental-update
-    test-supervisor
-    test-embedding
-    test-cross-encoder-reranker
-    test-qa-extractive-model
-    test-health-aggregator-actor
-)
+mapfile -t APP_TARGETS < <(bs_dev_app_targets)
+mapfile -t TEST_TARGETS < <(bs_dev_extended_reliability_test_targets)
+BUILD_TARGETS=("${APP_TARGETS[@]}" "${TEST_TARGETS[@]}")
 
 log "Building stabilization targets..."
-"${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${TEST_TARGETS[@]}"
+"${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
 
-TEST_REGEX='test-(pipeline|indexer|indexer-service-ipc|full-pipeline|index-backpressure|index-persistence|incremental-update|supervisor|embedding|cross-encoder-reranker|qa-extractive-model|health-aggregator-actor)$'
-log "Running focused stabilization tests..."
+TEST_REGEX="$(bs_dev_targets_regex extended)"
+log "Running extended reliability tests..."
 ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 300 -R "${TEST_REGEX}"
 
 if [[ "${SKIP_LAUNCH}" -eq 0 ]]; then

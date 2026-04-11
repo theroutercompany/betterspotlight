@@ -1,5 +1,6 @@
 #include "service_manager.h"
 #include "app/control_plane/control_plane_actor.h"
+#include "app/control_plane/health_contract.h"
 #include "app/control_plane/health_aggregator_actor.h"
 #include "core/models/model_manifest.h"
 #include "core/models/model_registry.h"
@@ -504,6 +505,31 @@ void ServiceManager::onHealthSnapshotUpdated(const QJsonObject& snapshot)
         m_indexingActive = queueActive;
         updateTrayState();
     }
+
+    QString readinessReason;
+    const bool operationalReady =
+        snapshotSatisfiesOperationalReadiness(snapshot, &readinessReason);
+
+    if (!m_operationalReadinessPending) {
+        if (m_allReady && !operationalReady) {
+            LOG_WARN(bsCore,
+                     "ServiceManager: operational readiness lost: %s",
+                     qPrintable(readinessReason));
+            m_allReady = false;
+            emit serviceStatusChanged();
+            emit serviceError(QStringLiteral("runtime"), readinessReason);
+            updateTrayState();
+        }
+        return;
+    }
+
+    if (operationalReady) {
+        completeOperationalReadiness();
+    } else {
+        LOG_INFO(bsCore,
+                 "ServiceManager: operational readiness still pending: %s",
+                 qPrintable(readinessReason));
+    }
 }
 
 QVariantMap ServiceManager::latestHealthSnapshot() const
@@ -530,6 +556,7 @@ void ServiceManager::start()
 
     LOG_INFO(bsCore, "ServiceManager: starting services");
     m_stopping = false;
+    resetOperationalReadiness();
     m_initialIndexingStarted = false;
     m_indexingActive = false;
     m_lastQueueRebuildRunning = false;
@@ -602,6 +629,7 @@ void ServiceManager::stop()
 
     joinModelDownloadThreadIfNeeded();
     LOG_INFO(bsCore, "ServiceManager: stopping services");
+    resetOperationalReadiness();
     if (m_started && m_controlPlaneActor) {
         QMetaObject::invokeMethod(
             m_controlPlaneActor,
@@ -648,6 +676,7 @@ void ServiceManager::onServiceStopped(const QString& name)
 {
     LOG_INFO(bsCore, "ServiceManager: service '%s' stopped", qPrintable(name));
     m_allReady = false;
+    resetOperationalReadiness();
     if (name == QLatin1String("indexer")) {
         m_indexingActive = false;
     }
@@ -663,6 +692,7 @@ void ServiceManager::onServiceCrashed(const QString& name, int crashCount)
     LOG_WARN(bsCore, "ServiceManager: service '%s' crashed (count=%d)",
              qPrintable(name), crashCount);
     m_allReady = false;
+    resetOperationalReadiness();
     if (name == QLatin1String("indexer")) {
         m_indexingActive = false;
     }
@@ -678,38 +708,16 @@ void ServiceManager::onAllServicesReady()
         return;
     }
 
-    QString readinessReason;
-    bool operationalReady = false;
-    for (int attempt = 0; attempt < 8 && !m_stopping; ++attempt) {
-        if (verifyOperationalReadiness(&readinessReason)) {
-            operationalReady = true;
-            break;
-        }
-        if (attempt < 7) {
-            QThread::msleep(300);
-        }
-    }
-
-    if (!operationalReady) {
-        LOG_ERROR(bsCore,
-                  "ServiceManager: helper processes reported ready, but operational readiness failed: %s",
-                  qPrintable(readinessReason));
-        m_allReady = false;
-        emit serviceStatusChanged();
-        emit serviceError(QStringLiteral("startup"), readinessReason);
-        updateTrayState();
+    if (m_healthModeLegacy || !m_healthAggregatorActor) {
+        completeOperationalReadiness();
         return;
     }
 
-    LOG_INFO(bsCore, "ServiceManager: all services operationally ready");
-    m_allReady = true;
+    LOG_INFO(bsCore, "ServiceManager: process-level readiness reached, awaiting operational health");
+    m_operationalReadinessPending = true;
+    m_allReady = false;
     emit serviceStatusChanged();
-    emit allServicesReady();
-    if (!m_indexingStatusTimer.isActive()) {
-        m_indexingStatusTimer.start();
-    }
-    refreshIndexerQueueStatus();
-    updateTrayState();
+    QMetaObject::invokeMethod(m_healthAggregatorActor, "triggerRefresh", Qt::QueuedConnection);
 }
 
 void ServiceManager::startIndexing()
@@ -1092,13 +1100,32 @@ ServiceManager::ServiceRequestResult ServiceManager::sendServiceRequestSync(
     return out;
 }
 
-bool ServiceManager::isInferenceRoleReady(const QJsonObject& roleStatusByModel,
-                                          const QString& roleName)
+void ServiceManager::completeOperationalReadiness()
 {
-    return roleStatusByModel.value(roleName).toString() == QLatin1String("ready");
+    if (m_allReady) {
+        m_operationalReadinessPending = false;
+        return;
+    }
+
+    m_operationalReadinessPending = false;
+    m_allReady = true;
+    LOG_INFO(bsCore, "ServiceManager: all services operationally ready");
+    emit serviceStatusChanged();
+    emit allServicesReady();
+    if (!m_indexingStatusTimer.isActive()) {
+        m_indexingStatusTimer.start();
+    }
+    refreshIndexerQueueStatus();
+    updateTrayState();
 }
 
-bool ServiceManager::verifyOperationalReadiness(QString* reasonOut)
+void ServiceManager::resetOperationalReadiness()
+{
+    m_operationalReadinessPending = false;
+}
+
+bool ServiceManager::snapshotSatisfiesOperationalReadiness(const QJsonObject& snapshot,
+                                                           QString* reasonOut) const
 {
     auto setReason = [&](const QString& reason) {
         if (reasonOut) {
@@ -1106,85 +1133,57 @@ bool ServiceManager::verifyOperationalReadiness(QString* reasonOut)
         }
     };
 
-    const ServiceRequestResult queryResult =
-        sendServiceRequestSync(QStringLiteral("query"),
-                               QStringLiteral("getQueryHealthV3"),
-                               {},
-                               2500);
-    if (!queryResult.ok) {
-        setReason(QStringLiteral("query_health_unavailable:%1").arg(queryResult.error));
+    if (snapshot.isEmpty()) {
+        setReason(QStringLiteral("health_snapshot_unavailable"));
         return false;
     }
 
-    const QJsonObject queryPayload = queryResult.response.value(QStringLiteral("result")).toObject();
-    const QString queryOverallStatus =
-        queryPayload.value(QStringLiteral("overallStatus")).toString(QStringLiteral("unknown"));
-    if (queryOverallStatus == QLatin1String("degraded")) {
-        setReason(QStringLiteral("query_health_degraded:%1").arg(
-            queryPayload.value(QStringLiteral("healthStatusReason"))
-                .toString(QStringLiteral("unknown"))));
-        return false;
-    }
-
-    const ServiceRequestResult indexerResult =
-        sendServiceRequestSync(QStringLiteral("indexer"),
-                               QStringLiteral("getQueueStatus"),
-                               {},
-                               2500);
-    if (!indexerResult.ok) {
-        setReason(QStringLiteral("indexer_queue_unavailable:%1").arg(indexerResult.error));
-        return false;
-    }
-
-    const QJsonObject indexerPayload =
-        indexerResult.response.value(QStringLiteral("result")).toObject();
-    const QString rebuildStatus =
-        indexerPayload.value(QStringLiteral("rebuildStatus")).toString(QStringLiteral("idle"));
-    if (rebuildStatus == QLatin1String("aborted")
-        || rebuildStatus == QLatin1String("failed")) {
-        setReason(QStringLiteral("indexer_rebuild_%1:%2")
-                      .arg(rebuildStatus,
-                           indexerPayload.value(QStringLiteral("rebuildReason"))
+    const QString overallStatus =
+        snapshot.value(QStringLiteral("overallStatus")).toString(QStringLiteral("unknown"));
+    if (overallStatus == QLatin1String("degraded")
+        || overallStatus == QLatin1String("unavailable")
+        || overallStatus == QLatin1String("stale")) {
+        setReason(QStringLiteral("overall_status_%1:%2")
+                      .arg(overallStatus,
+                           snapshot.value(QStringLiteral("healthStatusReason"))
                                .toString(QStringLiteral("unknown"))));
         return false;
     }
 
-    const ServiceRequestResult inferenceResult =
-        sendServiceRequestSync(QStringLiteral("inference"),
-                               QStringLiteral("get_inference_health"),
-                               {},
-                               2500);
-    if (!inferenceResult.ok) {
-        setReason(QStringLiteral("inference_health_unavailable:%1").arg(inferenceResult.error));
+    const QJsonObject queue = snapshot.value(QStringLiteral("queue")).toObject();
+    const QString rebuildStatus =
+        queue.value(QStringLiteral("rebuildStatus")).toString(QStringLiteral("idle"));
+    if (rebuildStatus == QLatin1String("aborted")
+        || rebuildStatus == QLatin1String("failed")) {
+        setReason(QStringLiteral("indexer_rebuild_%1:%2").arg(
+            rebuildStatus,
+            queue.value(QStringLiteral("rebuildReason")).toString(QStringLiteral("unknown"))));
         return false;
     }
 
-    const QJsonObject inferencePayload =
-        inferenceResult.response.value(QStringLiteral("result")).toObject();
+    const QJsonObject components = snapshot.value(QStringLiteral("components")).toObject();
+    for (const QString& serviceName : health_contract::requiredServiceNames()) {
+        const QString state =
+            components.value(serviceName).toObject().value(QStringLiteral("state")).toString();
+        if (!health_contract::isOperationalComponentState(state)) {
+            setReason(QStringLiteral("required_service_%1:%2")
+                          .arg(serviceName, state.isEmpty() ? QStringLiteral("missing") : state));
+            return false;
+        }
+    }
+
+    const QJsonObject inferencePayload = snapshot.value(QStringLiteral("inference")).toObject();
     if (!inferencePayload.value(QStringLiteral("connected")).toBool(false)) {
         setReason(QStringLiteral("inference_not_connected"));
         return false;
     }
-
     const QJsonObject roleStatusByModel =
         inferencePayload.value(QStringLiteral("roleStatusByModel")).toObject();
-    if (!isInferenceRoleReady(roleStatusByModel, QStringLiteral("bi-encoder"))) {
-        setReason(QStringLiteral("inference_role_unavailable:bi-encoder"));
-        return false;
-    }
-    if (!isInferenceRoleReady(roleStatusByModel, QStringLiteral("cross-encoder"))) {
-        setReason(QStringLiteral("inference_role_unavailable:cross-encoder"));
-        return false;
-    }
-
-    const ServiceRequestResult extractorResult =
-        sendServiceRequestSync(QStringLiteral("extractor"),
-                               QStringLiteral("ping"),
-                               {},
-                               2500);
-    if (!extractorResult.ok) {
-        setReason(QStringLiteral("extractor_probe_unavailable:%1").arg(extractorResult.error));
-        return false;
+    for (const QString& roleName : health_contract::coreRequiredInferenceRoles()) {
+        if (roleStatusByModel.value(roleName).toString() != QLatin1String("ready")) {
+            setReason(QStringLiteral("inference_role_unavailable:%1").arg(roleName));
+            return false;
+        }
     }
 
     setReason(QStringLiteral("ready"));

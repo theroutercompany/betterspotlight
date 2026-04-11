@@ -38,6 +38,8 @@ QString Supervisor::stateToString(ServiceLifecycleState state)
         return QStringLiteral("starting");
     case ServiceLifecycleState::Ready:
         return QStringLiteral("ready");
+    case ServiceLifecycleState::Degraded:
+        return QStringLiteral("degraded");
     case ServiceLifecycleState::Backoff:
         return QStringLiteral("backoff");
     case ServiceLifecycleState::Crashed:
@@ -56,6 +58,9 @@ void Supervisor::transitionState(ManagedService& svc, ServiceLifecycleState next
         return;
     }
     svc.info.state = nextState;
+    if (nextState != ServiceLifecycleState::Ready) {
+        m_allReadyNotified = false;
+    }
     emit serviceStateChanged(svc.info.name, stateToString(nextState));
 }
 
@@ -96,6 +101,7 @@ bool Supervisor::startAll()
 {
     createRuntimeDirectories();
     m_stopping = false;
+    m_allReadyNotified = false;
 
     bool allStarted = true;
     for (auto& svc : m_services) {
@@ -117,6 +123,7 @@ void Supervisor::stopAll()
         return;
     }
     m_stopping = true;
+    m_allReadyNotified = false;
     m_heartbeatTimer->stop();
 
     for (auto& svc : m_services) {
@@ -146,6 +153,8 @@ void Supervisor::stopAll()
         }
 
         svc->ready = false;
+        svc->probeInFlight = false;
+        svc->probeGeneration += 1;
         transitionState(*svc, ServiceLifecycleState::Stopped);
 
         // Remove PID file
@@ -231,6 +240,8 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
         return;
     }
 
+    svc->probeInFlight = false;
+    svc->probeGeneration += 1;
     if (status == QProcess::CrashExit || exitCode != 0) {
         transitionState(*svc, ServiceLifecycleState::Crashed);
         int64_t now = QDateTime::currentSecsSinceEpoch();
@@ -282,9 +293,6 @@ void Supervisor::onServiceFinished(int exitCode, QProcess::ExitStatus status)
 
 void Supervisor::heartbeat()
 {
-    bool allReady = true;
-    bool anyChanged = false;
-
     // Reset crash counter for services that have been stable since being blacklisted
     {
         const int64_t now = QDateTime::currentSecsSinceEpoch();
@@ -302,12 +310,13 @@ void Supervisor::heartbeat()
 
     for (auto& svc : m_services) {
         if (!svc->process || svc->process->state() != QProcess::Running) {
+            svc->ready = false;
+            svc->probeInFlight = false;
             if (svc->info.crashCount >= kMaxCrashesBeforeGiveUp) {
                 transitionState(*svc, ServiceLifecycleState::GivingUp);
             } else {
                 transitionState(*svc, ServiceLifecycleState::Stopped);
             }
-            allReady = false;
             continue;
         }
 
@@ -316,56 +325,22 @@ void Supervisor::heartbeat()
             svc->client = std::make_unique<SocketClient>(this);
         }
 
+        if (svc->probeInFlight) {
+            continue;
+        }
+
         if (!svc->client->isConnected()) {
             QString path = ServiceBase::socketPath(svc->info.name);
-            if (svc->client->connectToServer(path, 1000)) {
+            if (svc->client->connectToServer(path, kHeartbeatConnectTimeoutMs)) {
                 qCInfo(bsIpc, "Connected to service '%s'", qPrintable(svc->info.name));
             } else {
+                svc->ready = false;
                 transitionState(*svc, ServiceLifecycleState::Starting);
-                allReady = false;
                 continue;
             }
         }
 
-        // Send ping with 5s timeout
-        auto response = svc->client->sendRequest(QStringLiteral("ping"), {}, 5000);
-        if (!response) {
-            qCWarning(bsIpc, "Heartbeat failed for service '%s'", qPrintable(svc->info.name));
-
-            if (svc->ready) {
-                svc->ready = false;
-                anyChanged = true;
-                transitionState(*svc, ServiceLifecycleState::Starting);
-            }
-            allReady = false;
-            continue;
-        }
-
-        // Check for error response
-        QString type = response->value(QStringLiteral("type")).toString();
-        if (type == QLatin1String("error")) {
-            qCWarning(bsIpc, "Heartbeat error for service '%s'", qPrintable(svc->info.name));
-            if (svc->ready) {
-                svc->ready = false;
-                anyChanged = true;
-                transitionState(*svc, ServiceLifecycleState::Starting);
-            }
-            allReady = false;
-            continue;
-        }
-
-        if (!svc->ready) {
-            svc->ready = true;
-            anyChanged = true;
-            transitionState(*svc, ServiceLifecycleState::Ready);
-            qCInfo(bsIpc, "Service '%s' is ready", qPrintable(svc->info.name));
-            emit serviceStarted(svc->info.name);
-        }
-    }
-
-    if (allReady && anyChanged && !m_services.empty()) {
-        qCInfo(bsIpc, "All services ready");
-        emit allServicesReady();
+        probeServiceAsync(*svc, kHeartbeatRequestTimeoutMs);
     }
 }
 
@@ -413,28 +388,19 @@ void Supervisor::startService(ManagedService& svc)
     // Create client and attempt initial connection after a short delay.
     // The service needs a moment to set up its socket.
     svc.client = std::make_unique<SocketClient>(this);
-    QTimer::singleShot(500, this, [this, name = svc.info.name]() {
+    svc.probeInFlight = false;
+    QTimer::singleShot(kInitialProbeDelayMs, this, [this, name = svc.info.name]() {
         ManagedService* s = findService(name);
         if (!s || !s->client) return;
+        if (!s->process || s->process->state() != QProcess::Running) return;
 
         QString path = ServiceBase::socketPath(name);
         if (s->client->connectToServer(path, 3000)) {
-            s->ready = true;
-            transitionState(*s, ServiceLifecycleState::Ready);
             qCInfo(bsIpc, "Initial connection to service '%s' succeeded", qPrintable(name));
-            emit serviceStarted(name);
-
-            // Check if all services are now ready
-            bool everyoneReady = true;
-            for (const auto& managed : m_services) {
-                if (!managed->ready) {
-                    everyoneReady = false;
-                    break;
-                }
-            }
-            if (everyoneReady && !m_services.empty()) {
-                emit allServicesReady();
-            }
+            probeServiceAsync(*s, kInitialProbeTimeoutMs);
+        } else {
+            s->ready = false;
+            transitionState(*s, ServiceLifecycleState::Starting);
         }
     });
 }
@@ -463,6 +429,8 @@ void Supervisor::restartService(ManagedService& svc)
     }
 
     svc.ready = false;
+    svc.probeInFlight = false;
+    svc.probeGeneration += 1;
     transitionState(svc, ServiceLifecycleState::Starting);
 
     // Remove stale PID file before restarting
@@ -470,6 +438,92 @@ void Supervisor::restartService(ManagedService& svc)
     QFile::remove(pidPath);
 
     startService(svc);
+}
+
+void Supervisor::probeServiceAsync(ManagedService& svc, int timeoutMs)
+{
+    if (!svc.client || svc.probeInFlight || m_stopping) {
+        return;
+    }
+
+    svc.probeInFlight = true;
+    const quint64 probeGeneration = ++svc.probeGeneration;
+    svc.client->sendRequestAsync(
+        QStringLiteral("ping"),
+        {},
+        timeoutMs,
+        [this, serviceName = svc.info.name, probeGeneration](const std::optional<QJsonObject>& response) {
+            onProbeFinished(serviceName, probeGeneration, response);
+        });
+}
+
+void Supervisor::onProbeFinished(const QString& serviceName,
+                                 quint64 probeGeneration,
+                                 const std::optional<QJsonObject>& response)
+{
+    ManagedService* svc = findService(serviceName);
+    if (!svc) {
+        return;
+    }
+
+    if (svc->probeGeneration != probeGeneration) {
+        return;
+    }
+
+    svc->probeInFlight = false;
+
+    if (m_stopping || !svc->process || svc->process->state() != QProcess::Running) {
+        svc->ready = false;
+        transitionState(*svc, ServiceLifecycleState::Stopped);
+        return;
+    }
+
+    if (!response.has_value()) {
+        qCWarning(bsIpc, "Heartbeat failed for service '%s'", qPrintable(serviceName));
+        svc->ready = false;
+        transitionState(*svc,
+                        svc->client && svc->client->isConnected()
+                            ? ServiceLifecycleState::Degraded
+                            : ServiceLifecycleState::Starting);
+        return;
+    }
+
+    const QString type = response->value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("error")) {
+        qCWarning(bsIpc, "Heartbeat error for service '%s'", qPrintable(serviceName));
+        svc->ready = false;
+        transitionState(*svc, ServiceLifecycleState::Degraded);
+        return;
+    }
+
+    const bool wasReady = svc->ready;
+    svc->ready = true;
+    transitionState(*svc, ServiceLifecycleState::Ready);
+    if (!wasReady) {
+        qCInfo(bsIpc, "Service '%s' is ready", qPrintable(serviceName));
+        emit serviceStarted(serviceName);
+    }
+    maybeEmitAllServicesReady();
+}
+
+void Supervisor::maybeEmitAllServicesReady()
+{
+    if (m_allReadyNotified || m_services.empty()) {
+        return;
+    }
+
+    for (const auto& svc : m_services) {
+        if (!svc->process || svc->process->state() != QProcess::Running) {
+            return;
+        }
+        if (!svc->ready || svc->probeInFlight) {
+            return;
+        }
+    }
+
+    m_allReadyNotified = true;
+    qCInfo(bsIpc, "All services ready");
+    emit allServicesReady();
 }
 
 int Supervisor::restartDelayMs(int crashCount) const

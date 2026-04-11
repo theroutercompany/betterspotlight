@@ -99,6 +99,10 @@ private:
     static bool envFlagEnabled(const char* key, bool fallback = false);
 
     QString findServiceBinary(const QString& name) const;
+    void completeOperationalReadiness();
+    void resetOperationalReadiness();
+    bool snapshotSatisfiesOperationalReadiness(const QJsonObject& snapshot,
+                                               QString* reasonOut = nullptr) const;
     void updateServiceStatus(const QString& name, const QString& status);
     void updateTrayState();
     void refreshIndexerQueueStatus();
@@ -119,9 +123,6 @@ private:
     bool sendIndexerRequest(const QString& method, const QJsonObject& params = {});
     QJsonArray loadIndexRoots() const;
     QJsonArray loadEmbeddingRoots() const;
-    bool verifyOperationalReadiness(QString* reasonOut = nullptr);
-    static bool isInferenceRoleReady(const QJsonObject& roleStatusByModel,
-                                     const QString& roleName);
 
     void startControlPlaneThread();
     void stopControlPlaneThread();
@@ -143,6 +144,7 @@ private:
     QString m_queryStatus;
     QString m_inferenceStatus;
     bool m_allReady = false;
+    bool m_operationalReadinessPending = false;
     bool m_initialIndexingStarted = false;
     bool m_indexingActive = false;
     TrayState m_trayState = TrayState::Indexing;

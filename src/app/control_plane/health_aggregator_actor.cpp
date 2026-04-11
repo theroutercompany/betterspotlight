@@ -1,4 +1,5 @@
 #include "app/control_plane/health_aggregator_actor.h"
+#include "app/control_plane/health_contract.h"
 
 #include "core/ipc/service_base.h"
 #include "core/ipc/socket_client.h"
@@ -6,6 +7,7 @@
 
 #include <QDateTime>
 #include <QPointer>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -48,12 +50,14 @@ QJsonArray capErrors(const QJsonArray& errors, int cap = 50)
 HealthAggregatorActor::HealthAggregatorActor(QObject* parent)
     : QObject(parent)
 {
-    m_pollTimer.setInterval(kPollIntervalMs);
-    connect(&m_pollTimer, &QTimer::timeout, this, &HealthAggregatorActor::refreshNow);
+    m_pollTimer = new QTimer(this);
+    m_pollTimer->setInterval(kPollIntervalMs);
+    connect(m_pollTimer, &QTimer::timeout, this, &HealthAggregatorActor::refreshNow);
 
-    m_eventDebounceTimer.setSingleShot(true);
-    m_eventDebounceTimer.setInterval(kEventDebounceMs);
-    connect(&m_eventDebounceTimer, &QTimer::timeout, this, &HealthAggregatorActor::refreshNow);
+    m_eventDebounceTimer = new QTimer(this);
+    m_eventDebounceTimer->setSingleShot(true);
+    m_eventDebounceTimer->setInterval(kEventDebounceMs);
+    connect(m_eventDebounceTimer, &QTimer::timeout, this, &HealthAggregatorActor::refreshNow);
 }
 
 HealthAggregatorActor::~HealthAggregatorActor()
@@ -75,8 +79,12 @@ void HealthAggregatorActor::start()
         return;
     }
     m_running = true;
-    m_pollTimer.start();
-    m_eventDebounceTimer.start();
+    if (m_pollTimer) {
+        m_pollTimer->start();
+    }
+    if (m_eventDebounceTimer) {
+        m_eventDebounceTimer->start();
+    }
 }
 
 void HealthAggregatorActor::stop()
@@ -87,8 +95,13 @@ void HealthAggregatorActor::stop()
     m_running = false;
     m_refreshPending = false;
     m_refreshInFlight = false;
-    m_pollTimer.stop();
-    m_eventDebounceTimer.stop();
+    ++m_refreshGeneration;
+    if (m_pollTimer) {
+        m_pollTimer->stop();
+    }
+    if (m_eventDebounceTimer) {
+        m_eventDebounceTimer->stop();
+    }
     if (m_queryClient) {
         m_queryClient->disconnect();
     }
@@ -108,7 +121,9 @@ void HealthAggregatorActor::triggerRefresh()
     if (!m_running) {
         return;
     }
-    m_eventDebounceTimer.start();
+    if (m_eventDebounceTimer) {
+        m_eventDebounceTimer->start();
+    }
 }
 
 void HealthAggregatorActor::setManagedServices(const QJsonArray& services)
@@ -318,10 +333,7 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
     for (const QJsonValue& value : services) {
         const QJsonObject row = value.toObject();
         const QString name = row.value(QStringLiteral("name")).toString();
-        const bool required = (name == QLatin1String("indexer")
-                               || name == QLatin1String("query")
-                               || name == QLatin1String("inference")
-                               || name == QLatin1String("extractor"));
+        const bool required = health_contract::isRequiredService(name);
         const bool running = row.value(QStringLiteral("running")).toBool(false);
         const bool ready = row.value(QStringLiteral("ready")).toBool(false);
         const QString state = row.value(QStringLiteral("state")).toString();
@@ -386,43 +398,53 @@ void HealthAggregatorActor::refreshNow()
     }
 
     m_refreshInFlight = true;
+    const quint64 generation = ++m_refreshGeneration;
+    struct RefreshResults {
+        int remaining = 4;
+        QJsonObject queryHealth;
+        QJsonObject indexerQueue;
+        QJsonObject inferenceHealth;
+        QJsonObject extractorHealth;
+    };
+
+    auto results = std::make_shared<RefreshResults>();
     QPointer<HealthAggregatorActor> self(this);
-    fetchQueryHealthAsync([self](QJsonObject queryHealth) {
-        if (!self) {
+    auto completeOne = [self, generation, results]() mutable {
+        if (!self || generation != self->m_refreshGeneration || !self->m_running) {
             return;
         }
-        self->fetchIndexerQueueAsync([self, queryHealth = std::move(queryHealth)](QJsonObject indexerQueue) {
-            if (!self) {
-                return;
-            }
-            self->fetchInferenceHealthAsync(
-                [self,
-                 queryHealth = std::move(queryHealth),
-                 indexerQueue = std::move(indexerQueue)](QJsonObject inferenceHealth) mutable {
-                    if (!self) {
-                        return;
-                    }
-                    self->fetchExtractorHealthAsync(
-                        [self,
-                         queryHealth = std::move(queryHealth),
-                         indexerQueue = std::move(indexerQueue),
-                         inferenceHealth = std::move(inferenceHealth)](QJsonObject extractorHealth) mutable {
-                            if (!self) {
-                                return;
-                            }
-                            self->buildAndPublishSnapshot(
-                                queryHealth,
-                                indexerQueue,
-                                inferenceHealth,
-                                extractorHealth);
-                            self->m_refreshInFlight = false;
-                            if (self->m_refreshPending) {
-                                self->m_refreshPending = false;
-                                QTimer::singleShot(0, self, &HealthAggregatorActor::refreshNow);
-                            }
-                        });
-                });
-        });
+        results->remaining -= 1;
+        if (results->remaining > 0) {
+            return;
+        }
+
+        self->buildAndPublishSnapshot(
+            results->queryHealth,
+            results->indexerQueue,
+            results->inferenceHealth,
+            results->extractorHealth);
+        self->m_refreshInFlight = false;
+        if (self->m_refreshPending) {
+            self->m_refreshPending = false;
+            QTimer::singleShot(0, self, &HealthAggregatorActor::refreshNow);
+        }
+    };
+
+    fetchQueryHealthAsync([results, completeOne](QJsonObject queryHealth) mutable {
+        results->queryHealth = std::move(queryHealth);
+        completeOne();
+    });
+    fetchIndexerQueueAsync([results, completeOne](QJsonObject indexerQueue) mutable {
+        results->indexerQueue = std::move(indexerQueue);
+        completeOne();
+    });
+    fetchInferenceHealthAsync([results, completeOne](QJsonObject inferenceHealth) mutable {
+        results->inferenceHealth = std::move(inferenceHealth);
+        completeOne();
+    });
+    fetchExtractorHealthAsync([results, completeOne](QJsonObject extractorHealth) mutable {
+        results->extractorHealth = std::move(extractorHealth);
+        completeOne();
     });
 }
 

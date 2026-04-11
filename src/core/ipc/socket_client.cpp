@@ -63,13 +63,14 @@ bool SocketClient::connectToServer(const QString& socketPath, int timeoutMs)
         return true;
     }
 
+    failAllPendingRequests(QStringLiteral("Connection reset"));
+
     // Always abort before reconnect attempts to clear stale state.
     if (m_socket->state() != QLocalSocket::UnconnectedState) {
         m_socket->abort();
     }
     m_socket->abort();
     m_readBuffer.clear();
-    m_pending.clear();
 
     qCDebug(bsIpc, "Connecting to %s (timeout=%dms)", qPrintable(normalizedSocketPath), timeoutMs);
 
@@ -94,11 +95,11 @@ bool SocketClient::connectToServer(const QString& socketPath, int timeoutMs)
 
 void SocketClient::disconnect()
 {
+    failAllPendingRequests(QStringLiteral("Disconnected"));
     if (m_socket->state() != QLocalSocket::UnconnectedState) {
         m_socket->disconnectFromServer();
     }
     m_readBuffer.clear();
-    m_pending.clear();
 }
 
 bool SocketClient::isConnected() const
@@ -171,17 +172,58 @@ void SocketClient::sendRequestAsync(const QString& method,
                                     int timeoutMs,
                                     RequestCallback callback)
 {
+    if (!callback) {
+        return;
+    }
+    if (!isConnected()) {
+        qCWarning(bsIpc, "Cannot send async request: not connected");
+        callback(std::nullopt);
+        return;
+    }
+
+    const int effectiveTimeoutMs = std::max(1, timeoutMs);
+    uint64_t id = m_nextRequestId++;
+    QJsonObject request = IpcMessage::makeRequest(id, method, params);
+    QByteArray encoded = IpcMessage::encode(request);
+
+    if (encoded.isEmpty()) {
+        qCWarning(bsIpc, "Failed to encode async request for method=%s", qPrintable(method));
+        callback(std::nullopt);
+        return;
+    }
+
+    auto pending = std::make_shared<PendingRequest>();
+    pending->asynchronous = true;
+    pending->callback = std::move(callback);
+
+    auto* timeoutTimer = new QTimer(this);
+    timeoutTimer->setSingleShot(true);
+    pending->timeoutTimer = timeoutTimer;
+
     QPointer<SocketClient> self(this);
-    QTimer::singleShot(0, this, [self, method, params, timeoutMs, callback = std::move(callback)]() mutable {
-        if (!callback) {
-            return;
-        }
+    connect(timeoutTimer, &QTimer::timeout, this, [self, id, pending]() {
         if (!self) {
-            callback(std::nullopt);
             return;
         }
-        callback(self->sendRequest(method, params, timeoutMs));
+        auto it = self->m_pending.find(id);
+        if (it == self->m_pending.end() || it.value().get() != pending.get()) {
+            return;
+        }
+
+        qCWarning(bsIpc, "Async request timed out: id=%llu timeout=%dms",
+                  static_cast<unsigned long long>(id),
+                  pending->timeoutTimer ? pending->timeoutTimer->interval() : 0);
+        self->completePendingRequest(id, pending, std::nullopt);
     });
+
+    m_pending[id] = pending;
+
+    qCDebug(bsIpc, "Sending async request: method=%s id=%llu",
+            qPrintable(method),
+            static_cast<unsigned long long>(id));
+    m_socket->write(encoded);
+    m_socket->flush();
+    timeoutTimer->start(effectiveTimeoutMs);
 }
 
 bool SocketClient::sendNotification(const QString& method, const QJsonObject& params)
@@ -236,11 +278,16 @@ void SocketClient::onReadyRead()
 
             auto it = m_pending.find(id);
             if (it != m_pending.end()) {
-                it.value()->response = msg;
-                it.value()->completed = true;
+                const auto pending = it.value();
+                if (pending->asynchronous) {
+                    completePendingRequest(id, pending, msg);
+                } else {
+                    pending->response = msg;
+                    pending->completed = true;
+                }
             } else {
-                qCWarning(bsIpc, "Received response for unknown request id=%llu",
-                          static_cast<unsigned long long>(id));
+                qCDebug(bsIpc, "Ignoring late response for request id=%llu",
+                        static_cast<unsigned long long>(id));
             }
         } else if (type == QLatin1String("notification")) {
             QString method = msg.value(QStringLiteral("method")).toString();
@@ -261,13 +308,7 @@ void SocketClient::onDisconnected()
 {
     qCInfo(bsIpc, "Disconnected from server");
 
-    // Mark all pending requests as failed
-    for (auto it = m_pending.begin(); it != m_pending.end(); ++it) {
-        it.value()->completed = true;
-        it.value()->response = IpcMessage::makeError(
-            it.key(), IpcErrorCode::ServiceUnavailable,
-            QStringLiteral("Connection lost"));
-    }
+    failAllPendingRequests(QStringLiteral("Connection lost"));
 
     emit disconnected();
 
@@ -327,6 +368,69 @@ void SocketClient::attemptReconnect()
             attemptReconnect();
         }
     });
+}
+
+void SocketClient::completePendingRequest(
+    uint64_t id,
+    const std::shared_ptr<PendingRequest>& pending,
+    const std::optional<QJsonObject>& response)
+{
+    if (!pending) {
+        return;
+    }
+
+    if (pending->timeoutTimer) {
+        pending->timeoutTimer->stop();
+        pending->timeoutTimer->deleteLater();
+        pending->timeoutTimer = nullptr;
+    }
+
+    pending->completed = true;
+    if (response.has_value()) {
+        pending->response = response.value();
+    } else {
+        pending->response = QJsonObject();
+    }
+
+    const bool removed = m_pending.remove(id) > 0;
+    Q_UNUSED(removed);
+
+    if (pending->callback) {
+        auto callback = std::move(pending->callback);
+        callback(response);
+    }
+}
+
+void SocketClient::failAllPendingRequests(const QString& reason)
+{
+    if (m_pending.isEmpty()) {
+        return;
+    }
+
+    const auto pendingMap = m_pending;
+    m_pending.clear();
+
+    for (auto it = pendingMap.constBegin(); it != pendingMap.constEnd(); ++it) {
+        const auto& pending = it.value();
+        if (!pending) {
+            continue;
+        }
+
+        if (pending->timeoutTimer) {
+            pending->timeoutTimer->stop();
+            pending->timeoutTimer->deleteLater();
+            pending->timeoutTimer = nullptr;
+        }
+
+        pending->completed = true;
+        pending->response = IpcMessage::makeError(
+            it.key(), IpcErrorCode::ServiceUnavailable, reason);
+
+        if (pending->callback) {
+            auto callback = std::move(pending->callback);
+            callback(pending->response);
+        }
+    }
 }
 
 } // namespace bs

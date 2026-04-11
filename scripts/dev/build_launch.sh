@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
+TARGETS_SCRIPT="${ROOT_DIR}/scripts/dev/test_targets.sh"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
 RUNTIME_ROOT_DIR="${ROOT_DIR}/.build/dev-runtime"
 BUILD_DIR_DEFAULT="${ROOT_DIR}/build-dev"
@@ -237,6 +238,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -x "${SETUP_SCRIPT}" ]] || fail "setup script is missing or not executable: ${SETUP_SCRIPT}"
+[[ -f "${TARGETS_SCRIPT}" ]] || fail "targets script is missing: ${TARGETS_SCRIPT}"
+
+# shellcheck disable=SC1090
+source "${TARGETS_SCRIPT}"
 
 "${SETUP_SCRIPT}" --write-env-file "${ENV_FILE}"
 # shellcheck disable=SC1090
@@ -271,28 +276,10 @@ log "Configuring ${BUILD_DIR} (${BUILD_TYPE})..."
 "${ROOT_DIR}/scripts/ci/configure.sh" "${BUILD_DIR}" "${BUILD_TYPE}" "${CMAKE_ARGS[@]}"
 
 log "Building fresh BetterSpotlight dev targets..."
-BUILD_TARGETS=(
-    betterspotlight
-    betterspotlight-indexer
-    betterspotlight-extractor
-    betterspotlight-query
-    betterspotlight-inference
-)
+mapfile -t BUILD_TARGETS < <(bs_dev_app_targets)
 if [[ "${BUILD_PIPELINE_TESTS}" -eq 1 ]]; then
-    BUILD_TARGETS+=(
-        test-pipeline
-        test-indexer
-        test-indexer-service-ipc
-        test-full-pipeline
-        test-index-backpressure
-        test-index-persistence
-        test-incremental-update
-        test-supervisor
-        test-embedding
-        test-cross-encoder-reranker
-        test-qa-extractive-model
-        test-health-aggregator-actor
-    )
+    mapfile -t PIPELINE_TEST_TARGETS < <(bs_dev_stabilization_test_targets)
+    BUILD_TARGETS+=("${PIPELINE_TEST_TARGETS[@]}")
 fi
 "${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
 
@@ -357,6 +344,11 @@ fi
 if ! kill -0 "${APP_PID}" 2>/dev/null; then
     tail_log_on_failure "${APP_LOG}"
     fail "app reached ready state but did not remain alive"
+fi
+
+if grep -Fq "QObject::startTimer: Timers cannot be started from another thread" "${APP_LOG}"; then
+    tail_log_on_failure "${APP_LOG}"
+    fail "app log reported cross-thread timer startup"
 fi
 
 for pid in ${SERVICE_PIDS}; do

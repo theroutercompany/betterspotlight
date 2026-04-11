@@ -34,6 +34,7 @@ private slots:
 
     void testTrayStateTransitions();
     void testInitialIndexingTriggerIsGatedAndSingleShot();
+    void testOperationalReadinessIsHealthDriven();
     void testOnboardingCompletionIsPersistedAndEmittedOnce();
 };
 
@@ -101,6 +102,56 @@ void TestAppLifecycleStates::testInitialIndexingTriggerIsGatedAndSingleShot()
 
     manager.triggerInitialIndexing();
     QVERIFY(manager.m_initialIndexingStarted);
+}
+
+void TestAppLifecycleStates::testOperationalReadinessIsHealthDriven()
+{
+    bs::ServiceManager manager;
+    QSignalSpy readySpy(&manager, &bs::ServiceManager::allServicesReady);
+
+    manager.m_allReady = false;
+    manager.onAllServicesReady();
+    QVERIFY(manager.m_operationalReadinessPending);
+    QVERIFY(!manager.m_allReady);
+    QCOMPARE(readySpy.count(), 0);
+
+    QJsonObject snapshot;
+    snapshot[QStringLiteral("overallStatus")] = QStringLiteral("rebuilding");
+    snapshot[QStringLiteral("healthStatusReason")] = QStringLiteral("rebuilding");
+
+    QJsonObject components;
+    for (const QString& serviceName :
+         {QStringLiteral("indexer"),
+          QStringLiteral("query"),
+          QStringLiteral("inference"),
+          QStringLiteral("extractor")}) {
+        components[serviceName] = QJsonObject{
+            {QStringLiteral("state"), QStringLiteral("ready")},
+        };
+    }
+    snapshot[QStringLiteral("components")] = components;
+
+    QJsonObject inference;
+    inference[QStringLiteral("connected")] = true;
+    inference[QStringLiteral("roleStatusByModel")] = QJsonObject{
+        {QStringLiteral("bi-encoder"), QStringLiteral("ready")},
+        {QStringLiteral("cross-encoder"), QStringLiteral("ready")},
+    };
+    snapshot[QStringLiteral("inference")] = inference;
+
+    snapshot[QStringLiteral("queue")] = QJsonObject{
+        {QStringLiteral("rebuildStatus"), QStringLiteral("idle")},
+    };
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &manager,
+        "onHealthSnapshotUpdated",
+        Qt::DirectConnection,
+        Q_ARG(QJsonObject, snapshot)));
+
+    QVERIFY(!manager.m_operationalReadinessPending);
+    QVERIFY(manager.m_allReady);
+    QCOMPARE(readySpy.count(), 1);
 }
 
 void TestAppLifecycleStates::testOnboardingCompletionIsPersistedAndEmittedOnce()
