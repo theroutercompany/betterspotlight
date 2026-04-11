@@ -1,0 +1,131 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "userDefinedMetadata" : {
+
+    },
+    "classLabels" : [
+      "0",
+      "1"
+    ],
+    "availability" : {
+      "macOS" : "10.15",
+      "tvOS" : "13.0",
+      "visionOS" : "1.0",
+      "watchOS" : "6.0",
+      "iOS" : "13.0",
+      "macCatalyst" : "13.0"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Double",
+        "formattedType" : "MultiArray (Double 13)",
+        "shortDescription" : "Dense ranking\/context features",
+        "shape" : "[13]",
+        "name" : "features",
+        "type" : "MultiArray"
+      }
+    ],
+    "outputSchema" : [
+      {
+        "isOptional" : "0",
+        "keyType" : "String",
+        "formattedType" : "Dictionary (String → Double)",
+        "type" : "Dictionary",
+        "name" : "probabilities",
+        "shortDescription" : "Binary relevance probability distribution"
+      },
+      {
+        "isOptional" : "0",
+        "formattedType" : "String",
+        "type" : "String",
+        "name" : "classLabel",
+        "shortDescription" : ""
+      }
+    ],
+    "trainingInputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Double",
+        "formattedType" : "MultiArray (Double 13)",
+        "shortDescription" : "",
+        "shape" : "[13]",
+        "name" : "features",
+        "type" : "MultiArray"
+      },
+      {
+        "isOptional" : "0",
+        "formattedType" : "String",
+        "type" : "String",
+        "name" : "classLabel",
+        "shortDescription" : ""
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "neuralNetworkLayerTypeHistogram" : {
+      "Softmax" : 1,
+      "InnerProduct" : 1
+    },
+    "storagePrecision" : "Float32",
+    "method" : "predict",
+    "updateParameters" : [
+      {
+        "defaultValue" : "1",
+        "allowedSet" : "[1]",
+        "scope" : "",
+        "name" : "epochs",
+        "dataType" : "Int64",
+        "shortDescription" : "Default number of iterations during training"
+      },
+      {
+        "defaultValue" : "true",
+        "scope" : "",
+        "name" : "shuffle",
+        "dataType" : "Bool",
+        "shortDescription" : "Controls whether data is shuffled on each epoch"
+      },
+      {
+        "defaultValue" : "0.010000",
+        "scope" : "",
+        "allowedRange" : "[0.000000, 1.000000]",
+        "name" : "learningRate",
+        "dataType" : "Double",
+        "shortDescription" : "Controls learning step size. Adjustable in progress"
+      },
+      {
+        "defaultValue" : "32",
+        "allowedSet" : "[32]",
+        "scope" : "",
+        "name" : "miniBatchSize",
+        "dataType" : "Int64",
+        "shortDescription" : "Number of examples used to compute single gradient step"
+      },
+      {
+        "defaultValue" : "0.000000",
+        "scope" : "",
+        "allowedRange" : "[0.000000, 1.000000]",
+        "name" : "momentum",
+        "dataType" : "Double",
+        "shortDescription" : "Helps accelerate gradients vectors in the right directions"
+      }
+    ],
+    "version" : "1.0",
+    "isUpdatable" : "1",
+    "specificationVersion" : 4,
+    "stateSchema" : [
+
+    ],
+    "computePrecision" : "Float16",
+    "shortDescription" : "BetterSpotlight online ranker v1 bootstrap (updatable neuralnetwork classifier)",
+    "generatedClassName" : "online_ranker_v1",
+    "author" : "BetterSpotlight",
+    "modelType" : {
+      "name" : "MLModelType_neuralNetworkClassifier"
+    }
+  }
+]

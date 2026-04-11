@@ -250,10 +250,18 @@ fi
 MODELS_DIR="${ROOT_DIR}/data/models"
 MANIFEST_PATH="${MODELS_DIR}/manifest.json"
 [[ -f "${MANIFEST_PATH}" ]] || fail "runtime model manifest is missing: ${MANIFEST_PATH}"
+ONLINE_RANKER_BOOTSTRAP_DIR="${MODELS_DIR}/online-ranker-v1/bootstrap"
+ONLINE_RANKER_BOOTSTRAP_MODEL_DIR="${ONLINE_RANKER_BOOTSTRAP_DIR}/online_ranker_v1.mlmodelc"
+ONLINE_RANKER_BOOTSTRAP_METADATA="${ONLINE_RANKER_BOOTSTRAP_DIR}/metadata.json"
 
 BOOTSTRAP_READY=1
 if [[ ! -s "${MODELS_DIR}/vocab.txt" || ! -s "${MODELS_DIR}/bge-small-en-v1.5-int8.onnx" ]]; then
     BOOTSTRAP_READY=0
+fi
+
+ONLINE_RANKER_BOOTSTRAP_READY=1
+if [[ ! -d "${ONLINE_RANKER_BOOTSTRAP_MODEL_DIR}" || ! -s "${ONLINE_RANKER_BOOTSTRAP_METADATA}" ]]; then
+    ONLINE_RANKER_BOOTSTRAP_READY=0
 fi
 
 if [[ "${CHECK_ONLY}" -eq 0 ]]; then
@@ -272,6 +280,8 @@ export Qt6QmlTools_DIR="${QTDECLARATIVE_PREFIX}/lib/cmake/Qt6QmlTools"
 export ONNXRuntime_INCLUDE_DIR="${ONNX_INCLUDE_DIR}"
 export ONNXRuntime_LIBRARY="${ONNX_LIBRARY}"
 export BETTERSPOTLIGHT_MODELS_DIR="${MODELS_DIR}"
+export BETTERSPOTLIGHT_ONLINE_RANKER_BOOTSTRAP_DIR="${ONLINE_RANKER_BOOTSTRAP_DIR}"
+export BS_DEV_ONLINE_RANKER_BOOTSTRAP_READY="${ONLINE_RANKER_BOOTSTRAP_READY}"
 export BS_DEV_QMLIMPORTSCANNER="${QMLIMPORTSCANNER_PATH}"
 export BS_DEV_MACDEPLOYQT="${MACDEPLOYQT_PATH}"
 export CMAKE_PREFIX_PATH="${QTBASE_PREFIX}:${QTDECLARATIVE_PREFIX}:${QTTOOLS_PREFIX}:\${CMAKE_PREFIX_PATH:-}"
@@ -285,6 +295,11 @@ fi
 
 log "Validated BetterSpotlight development environment."
 log "Toolchain source: ${TOOLCHAIN_SOURCE} (Qt ${QT_VERSION})"
+if [[ "${ONLINE_RANKER_BOOTSTRAP_READY}" -eq 1 ]]; then
+    log "CoreML online-ranker bootstrap: ready"
+else
+    log "CoreML online-ranker bootstrap: missing (${ONLINE_RANKER_BOOTSTRAP_DIR})"
+fi
 if [[ "${CHECK_ONLY}" -eq 0 ]]; then
     log "Env file: ${OUTPUT_PATH}"
 fi

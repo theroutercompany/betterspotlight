@@ -1,0 +1,47 @@
+{
+  "storage" : "model.espresso.weights",
+  "analyses" : {
+
+  },
+  "properties" : {
+
+  },
+  "format_version" : 200,
+  "metadata_in_weights" : [
+
+  ],
+  "layers" : [
+    {
+      "nB" : 13,
+      "top" : "logits",
+      "has_biases" : 1,
+      "weights" : {
+
+      },
+      "nC" : 2,
+      "blob_weights" : 3,
+      "type" : "inner_product",
+      "has_relu" : 0,
+      "bottom" : "features",
+      "blob_biases" : 1,
+      "has_tanh" : 0,
+      "debug_info" : "online_head_dense",
+      "name" : "online_head_dense",
+      "has_prelu" : 0
+    },
+    {
+      "bottom" : "logits",
+      "attributes" : {
+        "is_output" : 1
+      },
+      "weights" : {
+
+      },
+      "debug_info" : "online_head_softmax",
+      "top" : "probabilities",
+      "C" : 2,
+      "type" : "softmax",
+      "name" : "online_head_softmax"
+    }
+  ]
+}

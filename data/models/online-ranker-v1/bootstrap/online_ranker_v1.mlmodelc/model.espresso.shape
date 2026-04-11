@@ -1,0 +1,25 @@
+{
+  "layer_shapes" : {
+    "features" : {
+      "k" : 1,
+      "w" : 13,
+      "n" : 1,
+      "_rank" : 1,
+      "h" : 1
+    },
+    "probabilities" : {
+      "k" : 1,
+      "w" : 2,
+      "n" : 1,
+      "_rank" : 1,
+      "h" : 1
+    },
+    "logits" : {
+      "k" : 1,
+      "w" : 2,
+      "n" : 1,
+      "_rank" : 1,
+      "h" : 1
+    }
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "models": {
+    "bi-encoder": {
+      "name": "bge-large-en-v1.5",
+      "modelId": "bge-large-en-v1.5-f32",
+      "generationId": "v2",
+      "file": "bge-large-en-v1.5-f32.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 1024,
+      "maxSeqLength": 512,
+      "queryPrefix": "Represent this sentence: ",
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+      "outputs": ["last_hidden_state"],
+      "extractionStrategy": "cls_token",
+      "poolingStrategy": "cls_token",
+      "semanticAggregationMode": "max_softmax_cap",
+      "latencyTier": "strong",
+      "task": "embedding",
+      "fallbackRole": "bi-encoder-legacy",
+      "providerPolicy": {
+        "preferredProvider": "coreml",
+        "preferCoreMl": true,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    },
+    "bi-encoder-legacy": {
+      "name": "bge-small-en-v1.5",
+      "modelId": "bge-small-en-v1.5-int8",
+      "generationId": "v1",
+      "file": "bge-small-en-v1.5-int8.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 384,
+      "maxSeqLength": 512,
+      "queryPrefix": "Represent this sentence: ",
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+      "outputs": ["last_hidden_state"],
+      "extractionStrategy": "cls_token",
+      "poolingStrategy": "cls_token",
+      "semanticAggregationMode": "max_softmax_cap",
+      "latencyTier": "fallback",
+      "task": "embedding",
+      "providerPolicy": {
+        "preferredProvider": "cpu",
+        "preferCoreMl": false,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    },
+    "bi-encoder-fast": {
+      "name": "mxbai-embed-xsmall-v1",
+      "modelId": "mxbai-embed-xsmall-v1-int8",
+      "generationId": "v1",
+      "file": "mxbai-embed-xsmall-v1-int8.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 384,
+      "maxSeqLength": 512,
+      "queryPrefix": "Represent this sentence: ",
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask"],
+      "outputs": ["last_hidden_state"],
+      "extractionStrategy": "cls_token",
+      "poolingStrategy": "cls_token",
+      "semanticAggregationMode": "max_softmax_cap",
+      "latencyTier": "fast",
+      "task": "embedding",
+      "fallbackRole": "bi-encoder-legacy",
+      "providerPolicy": {
+        "preferredProvider": "coreml",
+        "preferCoreMl": true,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    },
+    "cross-encoder": {
+      "name": "ms-marco-MiniLM-L-6-v2",
+      "modelId": "ms-marco-minilm-l6-v2",
+      "generationId": "v1",
+      "file": "ms-marco-minilm-l6-v2.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 1,
+      "maxSeqLength": 512,
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+      "outputs": ["logits"],
+      "extractionStrategy": "single_score",
+      "poolingStrategy": "single_score",
+      "latencyTier": "strong",
+      "task": "rerank",
+      "providerPolicy": {
+        "preferredProvider": "coreml",
+        "preferCoreMl": true,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    },
+    "cross-encoder-fast": {
+      "name": "mxbai-rerank-xsmall-v1",
+      "modelId": "mxbai-rerank-xsmall-v1-int8",
+      "generationId": "v1",
+      "file": "mxbai-rerank-xsmall-v1-int8.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 1,
+      "maxSeqLength": 512,
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask"],
+      "outputs": ["logits"],
+      "extractionStrategy": "single_score",
+      "poolingStrategy": "single_score",
+      "latencyTier": "fast",
+      "task": "rerank",
+      "providerPolicy": {
+        "preferredProvider": "coreml",
+        "preferCoreMl": true,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    },
+    "qa-extractive": {
+      "name": "distilbert-base-cased-distilled-squad",
+      "modelId": "distilbert-base-cased-distilled-squad-quantized",
+      "generationId": "v1",
+      "file": "distilbert-base-cased-distilled-squad-quantized.onnx",
+      "vocab": "vocab.txt",
+      "dimensions": 1,
+      "maxSeqLength": 512,
+      "tokenizer": "wordpiece",
+      "inputs": ["input_ids", "attention_mask"],
+      "outputs": ["start_logits", "end_logits"],
+      "extractionStrategy": "span_logits",
+      "poolingStrategy": "span_logits",
+      "latencyTier": "fast",
+      "task": "qa",
+      "providerPolicy": {
+        "preferredProvider": "coreml",
+        "preferCoreMl": true,
+        "allowCpuFallback": true,
+        "disableCoreMlEnvVar": "BETTERSPOTLIGHT_DISABLE_COREML"
+      }
+    }
+  }
+}

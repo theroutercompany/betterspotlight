@@ -60,7 +60,12 @@ Tests/Fixtures/sample_documents/*.log
 *.sqlite-shm
 
 # Downloaded embedding assets
-data/models/
+data/models/*
+!data/models/manifest.json
+!data/models/online-ranker-v1/
+data/models/online-ranker-v1/*
+!data/models/online-ranker-v1/bootstrap/
+!data/models/online-ranker-v1/bootstrap/**
 
 # Local debug logs
 firebase-debug.log

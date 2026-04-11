@@ -1,0 +1,14 @@
+{
+  "backend": "coreml",
+  "classLabels": [
+    "0",
+    "1"
+  ],
+  "featureDim": 13,
+  "generatedAt": "2026-04-11T23:37:37.772667+00:00",
+  "inputFeatureName": "features",
+  "labelFeatureName": "classLabel",
+  "predictedLabelName": "classLabel",
+  "probabilityOutputName": "probabilities",
+  "version": "bootstrap_20260411233737"
+}
