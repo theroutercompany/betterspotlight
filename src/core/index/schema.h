@@ -327,14 +327,14 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionPredic
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionSaturationRateMax', '0.995');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('behaviorRawRetentionDays', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningIdleCpuPctMax', '35');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '256');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('learningMemMbMax', '768');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningThermalMax', '2');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('learningPauseOnUserInput', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerBlendAlpha', '0.15');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerNegativeSampleRatio', '3.0');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMaxTrainingBatchSize', '1200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplayCapacity', '4000');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMinExamples', '120');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerMinExamples', '60');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerFreshTrainingLimit', '1200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerReplaySampleLimit', '1200');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerEpochs', '3');

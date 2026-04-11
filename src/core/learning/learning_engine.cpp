@@ -45,12 +45,15 @@ constexpr double kDefaultPromotionLatencyUsMax = 2500.0;
 constexpr double kDefaultPromotionLatencyRegressionPctMax = 35.0;
 constexpr double kDefaultPromotionPredictionFailureRateMax = 0.05;
 constexpr double kDefaultPromotionSaturationRateMax = 0.995;
+constexpr int kDefaultOnlineRankerMinExamples = 60;
+constexpr int kDefaultLearningMemMbMax = 768;
 constexpr int kIdleGapMs = 10000;
 constexpr int kMinCycleIntervalMs = 60000;
 constexpr int kPruneIntervalMs = 60 * 60 * 1000;
 constexpr const char* kRolloutInstrumentationOnly = "instrumentation_only";
 constexpr const char* kRolloutShadowTraining = "shadow_training";
 constexpr const char* kRolloutBlendedRanking = "blended_ranking";
+constexpr const char* kRolloutDisabledLegacy = "disabled";
 constexpr double kAttributionContextThreshold = 0.95;
 constexpr double kAttributionDigestThreshold = 0.8;
 
@@ -260,6 +263,9 @@ QString canonicalRolloutMode(const QString& rawMode, bool* validOut = nullptr)
     }
     const QString normalized = rawMode.trimmed().toLower();
     if (normalized.isEmpty() || normalized == QLatin1String(kRolloutInstrumentationOnly)) {
+        return QString::fromLatin1(kRolloutInstrumentationOnly);
+    }
+    if (normalized == QLatin1String(kRolloutDisabledLegacy)) {
         return QString::fromLatin1(kRolloutInstrumentationOnly);
     }
     if (normalized == QLatin1String(kRolloutShadowTraining)) {
@@ -823,7 +829,8 @@ bool LearningEngine::passesResourceBudgetsUnlocked(QString* reasonOut) const
     }
 
     const int cpuMaxPct = std::max(1, getSettingInt(QStringLiteral("learningIdleCpuPctMax"), 35));
-    const int memMaxMb = std::max(64, getSettingInt(QStringLiteral("learningMemMbMax"), 256));
+    const int memMaxMb = std::max(
+        64, getSettingInt(QStringLiteral("learningMemMbMax"), kDefaultLearningMemMbMax));
     const int thermalMax = std::max(0, getSettingInt(QStringLiteral("learningThermalMax"), 2));
 
     const double cpuPct = currentProcessCpuPct();
@@ -2103,7 +2110,8 @@ bool LearningEngine::triggerLearningCycle(bool manual, QString* reasonOut)
     cfg.epochs = std::max(1, getSettingInt(QStringLiteral("onlineRankerEpochs"), 3));
     cfg.learningRate = std::clamp(getSettingDouble(QStringLiteral("onlineRankerLearningRate"), 0.05), 1e-4, 0.5);
     cfg.l2 = std::clamp(getSettingDouble(QStringLiteral("onlineRankerL2"), 1e-6), 0.0, 0.1);
-    cfg.minExamples = std::max(40, getSettingInt(QStringLiteral("onlineRankerMinExamples"), 120));
+    cfg.minExamples = std::max(
+        40, getSettingInt(QStringLiteral("onlineRankerMinExamples"), kDefaultOnlineRankerMinExamples));
     cfg.promotionLatencyUsMax = std::clamp(
         getSettingDouble(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
                          kDefaultPromotionLatencyUsMax),
@@ -2271,6 +2279,16 @@ bool LearningEngine::maybeRunIdleCycle(QString* reasonOut)
         if (m_cycleRunning) {
             if (reasonOut) {
                 *reasonOut = QStringLiteral("cycle_in_progress");
+            }
+            return false;
+        }
+
+        const int minExamples = std::max(
+            40, getSettingInt(QStringLiteral("onlineRankerMinExamples"),
+                              kDefaultOnlineRankerMinExamples));
+        if (pendingExamples() < minExamples) {
+            if (reasonOut) {
+                *reasonOut = QStringLiteral("not_enough_training_examples");
             }
             return false;
         }

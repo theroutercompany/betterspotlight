@@ -571,6 +571,11 @@ QJsonObject QueryService::handleTriggerLearningCycle(uint64_t id, const QJsonObj
     const bool manual = params.value(QStringLiteral("manual")).toBool(true);
     QString reason;
     const bool promoted = m_learningEngine->triggerLearningCycle(manual, &reason);
+    LOG_INFO(bsIpc,
+             "Learning cycle request finished (manual=%s, promoted=%s, reason=%s)",
+             manual ? "true" : "false",
+             promoted ? "true" : "false",
+             qUtf8Printable(reason));
 
     QJsonObject result;
     result[QStringLiteral("promoted")] = promoted;

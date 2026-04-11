@@ -13,7 +13,7 @@ public:
         int epochs = 3;
         double learningRate = 0.05;
         double l2 = 1e-4;
-        int minExamples = 120;
+        int minExamples = 60;
         double promotionLatencyUsMax = 2500.0;
         double promotionLatencyRegressionPctMax = 35.0;
         double promotionPredictionFailureRateMax = 0.05;

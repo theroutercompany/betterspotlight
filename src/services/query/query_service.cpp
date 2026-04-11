@@ -239,6 +239,58 @@ bool shouldApplyConsumerPrefilter(const QString& queryLower,
     return querySignalTokens.size() >= 2 || queryTokensRaw.size() >= 3;
 }
 
+bool storeHasIndexedItemsUnderPrefix(SQLiteStore* store, const QString& prefix)
+{
+    if (!store) {
+        return false;
+    }
+
+    sqlite3* db = store->rawDb();
+    if (!db) {
+        return false;
+    }
+
+    const QString normalizedPrefix = QDir::cleanPath(prefix).trimmed();
+    if (normalizedPrefix.isEmpty()) {
+        return false;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = R"(
+        SELECT 1
+        FROM items
+        WHERE path = ?1
+           OR path LIKE ?2
+        LIMIT 1
+    )";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    const QByteArray prefixUtf8 = normalizedPrefix.toUtf8();
+    const QByteArray likeUtf8 = (normalizedPrefix + QStringLiteral("/%")).toUtf8();
+    sqlite3_bind_text(stmt, 1, prefixUtf8.constData(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, likeUtf8.constData(), -1, SQLITE_STATIC);
+
+    const bool hasMatch = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return hasMatch;
+}
+
+QStringList curatedPrefilterRoots(SQLiteStore* store,
+                                  const QString& documentsPath,
+                                  const QString& desktopPath,
+                                  const QString& downloadsPath)
+{
+    QStringList roots;
+    for (const QString& candidate : {documentsPath, desktopPath, downloadsPath}) {
+        if (storeHasIndexedItemsUnderPrefix(store, candidate)) {
+            roots.append(candidate);
+        }
+    }
+    return roots;
+}
+
 bool envFlagEnabled(const QString& raw)
 {
     const QString normalized = raw.trimmed().toLower();
@@ -1506,6 +1558,45 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     const auto contextFieldMissing = [](const std::optional<QString>& value) {
         return !value.has_value() || value->trimmed().isEmpty();
     };
+
+    if (contextFieldMissing(context.frontmostAppBundleId)) {
+        const QString frontmostAppBundleId = params.value(QStringLiteral("frontmostAppBundleId"))
+            .toString()
+            .trimmed();
+        if (!frontmostAppBundleId.isEmpty()) {
+            context.frontmostAppBundleId = frontmostAppBundleId;
+        }
+    }
+    if (contextFieldMissing(context.frontmostAppBundleId)) {
+        const QString appBundleId = params.value(QStringLiteral("appBundleId"))
+            .toString()
+            .trimmed();
+        if (!appBundleId.isEmpty()) {
+            context.frontmostAppBundleId = appBundleId;
+        }
+    }
+    if (contextFieldMissing(context.contextEventId)) {
+        const QString contextEventId = params.value(QStringLiteral("contextEventId"))
+            .toString()
+            .trimmed();
+        if (!contextEventId.isEmpty()) {
+            context.contextEventId = contextEventId;
+        }
+    }
+    if (!context.contextFeatureVersion.has_value()) {
+        const int version = params.value(QStringLiteral("contextFeatureVersion")).toInt(0);
+        if (version > 0) {
+            context.contextFeatureVersion = version;
+        }
+    }
+    if (contextFieldMissing(context.activityDigest)) {
+        const QString activityDigest = params.value(QStringLiteral("activityDigest"))
+            .toString()
+            .trimmed();
+        if (!activityDigest.isEmpty()) {
+            context.activityDigest = activityDigest;
+        }
+    }
     bool contextFallbackApplied = false;
     if (contextFieldMissing(context.frontmostAppBundleId)
         || contextFieldMissing(context.activityDigest)
@@ -1814,11 +1905,18 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         } else if (shouldApplyConsumerPrefilter(queryLower, queryTokensRaw, querySignalTokens)) {
             // Consumer-first default: constrain natural-language lookups to
             // high-signal user roots unless callers opt into explicit filters.
-            plannerReason = QStringLiteral("consumer_curated_prefilter");
-            addPathFilterUnique(searchOptions.includePaths, documentsPath);
-            addPathFilterUnique(searchOptions.includePaths, desktopPath);
-            addPathFilterUnique(searchOptions.includePaths, downloadsPath);
-            plannerApplied = true;
+            const QStringList curatedRoots = curatedPrefilterRoots(
+                m_store.has_value() ? &m_store.value() : nullptr,
+                documentsPath,
+                desktopPath,
+                downloadsPath);
+            if (!curatedRoots.isEmpty()) {
+                plannerReason = QStringLiteral("consumer_curated_prefilter");
+                for (const QString& root : curatedRoots) {
+                    addPathFilterUnique(searchOptions.includePaths, root);
+                }
+                plannerApplied = !searchOptions.includePaths.empty();
+            }
         }
     }
 
@@ -1845,8 +1943,16 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         cacheKey += QStringLiteral("|ip:") + sortedPaths.join(QStringLiteral(","));
     }
 
-    // Check cache (skip for debug requests — callers expect fresh data)
-    if (!debugRequested) {
+    const bool learningContextProvided =
+        context.contextEventId.has_value()
+        || context.activityDigest.has_value()
+        || context.frontmostAppBundleId.has_value();
+    const bool skipCache =
+        debugRequested || (learningEnabled && learningContextProvided);
+
+    // Skip cache for contextual learning traffic so repeated searches still
+    // produce fresh exposure examples instead of silently reusing a prior payload.
+    if (!skipCache) {
         auto cached = m_queryCache.get(cacheKey);
         if (cached.has_value()) {
             QJsonObject cachedResult = cached.value();
@@ -3586,7 +3692,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     }
 
     // Store in cache (skip debug requests)
-    if (!debugRequested) {
+    if (!skipCache) {
         m_queryCache.put(cacheKey, result);
     }
 
@@ -4421,7 +4527,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     runtimeSettings[QStringLiteral("learningIdleCpuPctMax")] = std::max(
         1, readIntRuntimeSetting(QStringLiteral("learningIdleCpuPctMax"), 35));
     runtimeSettings[QStringLiteral("learningMemMbMax")] = std::max(
-        64, readIntRuntimeSetting(QStringLiteral("learningMemMbMax"), 256));
+        64, readIntRuntimeSetting(QStringLiteral("learningMemMbMax"), 768));
     runtimeSettings[QStringLiteral("learningThermalMax")] = std::max(
         0, readIntRuntimeSetting(QStringLiteral("learningThermalMax"), 2));
     runtimeSettings[QStringLiteral("learningPauseOnUserInput")] =
@@ -4430,6 +4536,8 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         readDoubleRuntimeSetting(QStringLiteral("onlineRankerBlendAlpha"), 0.15), 0.0, 1.0);
     runtimeSettings[QStringLiteral("onlineRankerNegativeSampleRatio")] = std::clamp(
         readDoubleRuntimeSetting(QStringLiteral("onlineRankerNegativeSampleRatio"), 3.0), 0.0, 10.0);
+    runtimeSettings[QStringLiteral("onlineRankerMinExamples")] = std::max(
+        40, readIntRuntimeSetting(QStringLiteral("onlineRankerMinExamples"), 60));
     runtimeSettings[QStringLiteral("onlineRankerMaxTrainingBatchSize")] = std::max(
         60, readIntRuntimeSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"), 1200));
     runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
