@@ -33,6 +33,8 @@ public:
 
 protected:
     QJsonObject handleRequest(const QJsonObject& request) override;
+    void handleRequestWithResponder(const QJsonObject& request,
+                                    RequestResponder responder) override;
 
 private:
     enum class Role {
@@ -58,6 +60,13 @@ private:
         RequestEnvelope envelope;
         QJsonObject params;
         std::promise<QJsonObject> promise;
+        std::function<void(QJsonObject)> complete;
+    };
+
+    struct DispatchResult {
+        bool workerFound = false;
+        bool enqueued = false;
+        QJsonObject immediatePayload;
     };
 
     struct Worker {
@@ -114,6 +123,16 @@ private:
                                         const RequestEnvelope& envelope,
                                         const QJsonObject& params,
                                         int waitTimeoutMs);
+    DispatchResult dispatchAsync(Role role,
+                                 const QString& method,
+                                 const RequestEnvelope& envelope,
+                                 const QJsonObject& params,
+                                 std::function<void(QJsonObject)> complete);
+    DispatchResult enqueueTask(Role role,
+                               const QString& method,
+                               const RequestEnvelope& envelope,
+                               const QJsonObject& params,
+                               const std::shared_ptr<Task>& task);
 
     static RequestEnvelope parseEnvelope(const QJsonObject& params);
     static QJsonObject makeStatusPayload(const QString& status,

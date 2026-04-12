@@ -46,6 +46,7 @@
 #include <QVector>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <sys/types.h>
 #include <unistd.h>
@@ -225,6 +226,16 @@ bool looksLikePathOrCodeQuery(const QString& query)
     static const QRegularExpression codePunctuation(
         QStringLiteral(R"([<>{}\[\]();=#])"));
     return codePunctuation.match(query).hasMatch();
+}
+
+int testSearchDelayMs()
+{
+    bool ok = false;
+    const int parsed = qEnvironmentVariableIntValue("BS_TEST_QUERY_SEARCH_DELAY_MS", &ok);
+    if (!ok) {
+        return 0;
+    }
+    return std::clamp(parsed, 0, 30000);
 }
 
 bool shouldApplyConsumerPrefilter(const QString& queryLower,
@@ -524,10 +535,12 @@ QueryService::QueryService(QObject* parent)
         }
     });
     initBsignoreWatch();
+    startRequestExecutionLanes();
 }
 
 QueryService::~QueryService()
 {
+    stopRequestExecutionLanes();
     m_learningSchedulerTimer.stop();
     m_stopRebuildRequested.store(true);
     joinVectorRebuildThread();
@@ -693,6 +706,144 @@ QJsonObject QueryService::handleRequest(const QJsonObject& request)
     }
 
     return ServiceBase::handleRequest(request);
+}
+
+void QueryService::handleRequestWithResponder(const QJsonObject& request,
+                                             RequestResponder responder)
+{
+    const QString method = request.value(QStringLiteral("method")).toString();
+    if (method == QLatin1String("ping") || method == QLatin1String("shutdown")) {
+        responder.send(handleRequest(request));
+        return;
+    }
+
+    if (!ensureStoreOpen()) {
+        responder.send(IpcMessage::makeError(
+            static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger()),
+            IpcErrorCode::ServiceUnavailable,
+            QStringLiteral("Database is not available")));
+        return;
+    }
+    if (requiresM2InitializationMethod(method) && !ensureM2ModulesInitialized()) {
+        responder.send(IpcMessage::makeError(
+            static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger()),
+            IpcErrorCode::ServiceUnavailable,
+            QStringLiteral("M2 modules are not available")));
+        return;
+    }
+
+    const RequestExecutionLane lane = isHealthRequestMethod(method)
+        ? RequestExecutionLane::Health
+        : RequestExecutionLane::Default;
+    enqueueRequestTask(lane, request, std::move(responder));
+}
+
+void QueryService::startRequestExecutionLanes()
+{
+    std::lock_guard<std::mutex> lock(m_requestLaneMutex);
+    if (m_defaultRequestThread.joinable() || m_healthRequestThread.joinable()) {
+        return;
+    }
+    m_stopRequestLanes = false;
+    m_defaultRequestThread = std::thread([this]() {
+        requestLaneLoop(RequestExecutionLane::Default);
+    });
+    m_healthRequestThread = std::thread([this]() {
+        requestLaneLoop(RequestExecutionLane::Health);
+    });
+}
+
+void QueryService::stopRequestExecutionLanes()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_requestLaneMutex);
+        if (m_stopRequestLanes && !m_defaultRequestThread.joinable()
+            && !m_healthRequestThread.joinable()) {
+            return;
+        }
+        m_stopRequestLanes = true;
+    }
+    m_requestLaneCv.notify_all();
+    if (m_defaultRequestThread.joinable()) {
+        m_defaultRequestThread.join();
+    }
+    if (m_healthRequestThread.joinable()) {
+        m_healthRequestThread.join();
+    }
+}
+
+void QueryService::enqueueRequestTask(RequestExecutionLane lane,
+                                      const QJsonObject& request,
+                                      RequestResponder responder)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_requestLaneMutex);
+        auto& queue = (lane == RequestExecutionLane::Health)
+            ? m_healthRequestQueue
+            : m_defaultRequestQueue;
+        queue.push_back(LaneTask{request, std::move(responder)});
+    }
+    m_requestLaneCv.notify_all();
+}
+
+void QueryService::requestLaneLoop(RequestExecutionLane lane)
+{
+    for (;;) {
+        LaneTask task;
+        {
+            std::unique_lock<std::mutex> lock(m_requestLaneMutex);
+            auto& queue = (lane == RequestExecutionLane::Health)
+                ? m_healthRequestQueue
+                : m_defaultRequestQueue;
+            m_requestLaneCv.wait(lock, [&]() {
+                return m_stopRequestLanes || !queue.empty();
+            });
+            if (m_stopRequestLanes && queue.empty()) {
+                return;
+            }
+            task = std::move(queue.front());
+            queue.pop_front();
+        }
+
+        const QString method = task.request.value(QStringLiteral("method")).toString();
+        if (lane == RequestExecutionLane::Default) {
+            const int artificialDelayMs = testSearchDelayMs();
+            if (artificialDelayMs > 0 && method == QLatin1String("search")) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(artificialDelayMs));
+            }
+        }
+
+        if (!task.responder.isValid()) {
+            continue;
+        }
+        task.responder.send(handleRequest(task.request));
+    }
+}
+
+bool QueryService::isHealthRequestMethod(const QString& method)
+{
+    return method == QLatin1String("getHealth")
+        || method == QLatin1String("getHealthV2")
+        || method == QLatin1String("getQueryHealthV3")
+        || method == QLatin1String("getHealthDetails");
+}
+
+bool QueryService::requiresM2InitializationMethod(const QString& method)
+{
+    return method == QLatin1String("search")
+        || method == QLatin1String("getAnswerSnippet")
+        || method == QLatin1String("get_answer_snippet")
+        || method == QLatin1String("record_interaction")
+        || method == QLatin1String("get_path_preferences")
+        || method == QLatin1String("get_file_type_affinity")
+        || method == QLatin1String("run_aggregation")
+        || method == QLatin1String("export_interaction_data")
+        || method == QLatin1String("rebuildVectorIndex")
+        || method == QLatin1String("rebuild_vector_index")
+        || method == QLatin1String("record_behavior_event")
+        || method == QLatin1String("get_learning_health")
+        || method == QLatin1String("set_learning_consent")
+        || method == QLatin1String("trigger_learning_cycle");
 }
 
 bool QueryService::ensureStoreOpen()
@@ -4468,6 +4619,11 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         inferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
     indexHealth[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
         inferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
+    indexHealth[QStringLiteral("queryDeferredResponsesEnabled")] = true;
+    QJsonObject queryExecutionLanes;
+    queryExecutionLanes[QStringLiteral("default")] = QStringLiteral("serial_worker");
+    queryExecutionLanes[QStringLiteral("health")] = QStringLiteral("serial_worker");
+    indexHealth[QStringLiteral("queryExecutionLanes")] = queryExecutionLanes;
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
@@ -4934,6 +5090,8 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         inferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
     runtimeComponents[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
         inferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
+    runtimeComponents[QStringLiteral("queryDeferredResponsesEnabled")] = true;
+    runtimeComponents[QStringLiteral("queryExecutionLanes")] = queryExecutionLanes;
     runtimeComponents[QStringLiteral("embeddingStrongAvailable")] =
         (m_embeddingManager && m_embeddingManager->isAvailable());
     runtimeComponents[QStringLiteral("embeddingStrongModelId")] =

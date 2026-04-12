@@ -24,8 +24,12 @@ public:
     static QString pidPath(const QString& serviceName);
 
 protected:
+    using RequestResponder = SocketServer::RequestResponder;
+
     // Override to handle specific methods
     virtual QJsonObject handleRequest(const QJsonObject& request);
+    virtual void handleRequestWithResponder(const QJsonObject& request,
+                                            RequestResponder responder);
 
     // Built-in handlers
     QJsonObject handlePing(const QJsonObject& request);

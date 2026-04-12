@@ -37,8 +37,9 @@ ServiceBase::ServiceBase(const QString& serviceName, QObject* parent)
     , m_serviceName(serviceName)
     , m_server(std::make_unique<SocketServer>(this))
 {
-    m_server->setRequestHandler([this](const QJsonObject& request) {
-        return handleRequest(request);
+    m_server->setRequestHandler([this](const QJsonObject& request,
+                                       SocketServer::RequestResponder responder) {
+        handleRequestWithResponder(request, std::move(responder));
     });
 }
 
@@ -127,6 +128,14 @@ QJsonObject ServiceBase::handleRequest(const QJsonObject& request)
               qPrintable(method), qPrintable(m_serviceName));
     return IpcMessage::makeError(id, IpcErrorCode::NotFound,
                                   QStringLiteral("Unknown method: %1").arg(method));
+}
+
+void ServiceBase::handleRequestWithResponder(const QJsonObject& request,
+                                             SocketServer::RequestResponder responder)
+{
+    if (responder.isValid()) {
+        responder.send(handleRequest(request));
+    }
 }
 
 QJsonObject ServiceBase::handlePing(const QJsonObject& request)

@@ -65,6 +65,7 @@ class TestQueryServiceIpcExtensions : public QObject {
 
 private slots:
     void testExtendedIpcBranches();
+    void testHealthRequestNotBlockedByDelayedSearch();
 };
 
 void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
@@ -499,6 +500,106 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
 
     fakeInference.close();
     fakeIndexer.close();
+}
+
+void TestQueryServiceIpcExtensions::testHealthRequestNotBlockedByDelayedSearch()
+{
+    QTemporaryDir tempHome;
+    QTemporaryDir docsRoot;
+    QVERIFY(tempHome.isValid());
+    QVERIFY(docsRoot.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    const QString docsDir = QDir(docsRoot.path()).filePath(QStringLiteral("Docs"));
+    QVERIFY(QDir().mkpath(docsDir));
+
+    const QString seededPath = QDir(docsDir).filePath(QStringLiteral("health-lane-report.md"));
+    const auto seededId = seedItem(
+        store,
+        seededPath,
+        QStringLiteral(
+            "Health lane coverage report for delayed search execution with lexical retrieval only."),
+        /*size=*/256,
+        /*modifiedAtSecs=*/300.0);
+    QVERIFY(seededId.has_value());
+
+    QVERIFY(store.setSetting(QStringLiteral("embeddingEnabled"), QStringLiteral("0")));
+    QVERIFY(store.setSetting(QStringLiteral("inferenceServiceEnabled"), QStringLiteral("0")));
+    QVERIFY(store.setSetting(QStringLiteral("qaSnippetEnabled"), QStringLiteral("0")));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_SEARCH_DELAY_MS"), QStringLiteral("1200"));
+    QVERIFY2(harness.start(launch), "Failed to start delayed query service");
+
+    bs::SocketClient searchClient;
+    QVERIFY2(bs::test::waitForSocketConnection(searchClient, harness.socketPath(), 5000),
+             "Failed to connect search client");
+    bs::SocketClient healthClient;
+    QVERIFY2(bs::test::waitForSocketConnection(healthClient, harness.socketPath(), 5000),
+             "Failed to connect health client");
+
+    {
+        QJsonObject warmupParams;
+        warmupParams[QStringLiteral("query")] = QStringLiteral("health lane coverage report");
+        warmupParams[QStringLiteral("limit")] = 5;
+        const QJsonObject warmupResponse =
+            bs::test::requestOrFailWithDiagnostics(searchClient,
+                                                   QStringLiteral("search"),
+                                                   warmupParams,
+                                                   5000,
+                                                   harness.socketPath());
+        QVERIFY2(bs::test::isResponse(warmupResponse),
+                 "Warmup search should complete before the blocking regression check");
+    }
+
+    bool searchCompleted = false;
+    std::optional<QJsonObject> searchResponse;
+    QJsonObject searchParams;
+    searchParams[QStringLiteral("query")] = QStringLiteral("health lane coverage report");
+    searchParams[QStringLiteral("limit")] = 5;
+    searchClient.sendRequestAsync(
+        QStringLiteral("search"),
+        searchParams,
+        5000,
+        [&](const std::optional<QJsonObject>& response) {
+            searchResponse = response;
+            searchCompleted = true;
+        });
+
+    QTest::qWait(100);
+
+    QElapsedTimer timer;
+    timer.start();
+    const QJsonObject healthResponse =
+        bs::test::requestOrFailWithDiagnostics(healthClient,
+                                               QStringLiteral("getQueryHealthV3"),
+                                               {},
+                                               800,
+                                               harness.socketPath());
+    const qint64 elapsedMs = timer.elapsed();
+
+    QVERIFY2(bs::test::isResponse(healthResponse),
+             "Query health should remain available while delayed search work is running");
+    QVERIFY2(elapsedMs < 1100,
+             qPrintable(QStringLiteral("Query health request took too long: %1ms").arg(elapsedMs)));
+
+    QTRY_VERIFY_WITH_TIMEOUT(searchCompleted, 6000);
+    QVERIFY(searchResponse.has_value());
+    QVERIFY(bs::test::isResponse(searchResponse.value()));
 }
 
 QTEST_MAIN(TestQueryServiceIpcExtensions)

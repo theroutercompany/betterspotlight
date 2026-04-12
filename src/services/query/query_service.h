@@ -8,6 +8,8 @@
 #include "core/query/query_cache.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -44,12 +46,24 @@ public:
 
 protected:
     QJsonObject handleRequest(const QJsonObject& request) override;
+    void handleRequestWithResponder(const QJsonObject& request,
+                                    RequestResponder responder) override;
 
 private:
     enum class InferenceLane {
         Live,
         Health,
         Rebuild,
+    };
+
+    enum class RequestExecutionLane {
+        Default,
+        Health,
+    };
+
+    struct LaneTask {
+        QJsonObject request;
+        RequestResponder responder;
     };
 
     // ── M1 handlers ──
@@ -160,6 +174,14 @@ private:
     bool ensureStoreOpen();
     bool ensureM2ModulesInitialized();
     bool ensureTypoLexiconReady();
+    void startRequestExecutionLanes();
+    void stopRequestExecutionLanes();
+    void enqueueRequestTask(RequestExecutionLane lane,
+                            const QJsonObject& request,
+                            RequestResponder responder);
+    void requestLaneLoop(RequestExecutionLane lane);
+    static bool isHealthRequestMethod(const QString& method);
+    static bool requiresM2InitializationMethod(const QString& method);
     bool ensureInferenceClientConnected(InferenceLane lane);
     std::optional<QJsonObject> sendInferenceRequest(InferenceLane lane,
                                                     const QString& method,
@@ -218,6 +240,13 @@ private:
     qint64 m_learningSchedulerPromoted = 0;
     QString m_learningSchedulerLastReason;
     QHash<QString, qint64> m_learningSchedulerReasonCounts;
+    std::mutex m_requestLaneMutex;
+    std::condition_variable m_requestLaneCv;
+    std::deque<LaneTask> m_defaultRequestQueue;
+    std::deque<LaneTask> m_healthRequestQueue;
+    std::thread m_defaultRequestThread;
+    std::thread m_healthRequestThread;
+    bool m_stopRequestLanes = false;
     bool m_inferenceServiceConnected = false;
     bool m_inferenceLiveLaneConnected = false;
     bool m_inferenceHealthLaneConnected = false;

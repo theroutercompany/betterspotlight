@@ -9,6 +9,7 @@
 #include <QRandomGenerator>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QTimer>
 #include "core/ipc/message.h"
 #include "core/ipc/socket_client.h"
 #include "core/ipc/socket_server.h"
@@ -28,6 +29,8 @@ private slots:
     void testSocketServerCloseWithActiveClients_NoUAF();
     void testSocketServerDisconnectRace_IdempotentCleanup();
     void testSocketClientRepeatedConnectAttempts_RecoversFromErrorState();
+    void testDeferredResponsesCanArriveOutOfOrder();
+    void testDeferredResponsesAreDroppedAfterDisconnect();
     void testSupervisorCrashWindowReset();
 };
 
@@ -261,6 +264,112 @@ void TestIpcReliability::testSocketClientRepeatedConnectAttempts_RecoversFromErr
     QVERIFY(client.isConnected());
 
     client.disconnect();
+    server.close();
+    QFile::remove(socketPath);
+}
+
+void TestIpcReliability::testDeferredResponsesCanArriveOutOfOrder()
+{
+    const QString socketPath = makeShortSocketPath(QStringLiteral("defer"));
+    QFile::remove(socketPath);
+
+    bs::SocketServer server;
+    server.setRequestHandler([&server](const QJsonObject& request,
+                                       bs::SocketServer::RequestResponder responder) {
+        const QString method = request.value(QStringLiteral("method")).toString();
+        const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
+        const int delayMs = (method == QLatin1String("slow")) ? 150 : 10;
+        QTimer::singleShot(delayMs, &server, [responder, id, method]() mutable {
+            QJsonObject result;
+            result[QStringLiteral("label")] = method;
+            responder.send(bs::IpcMessage::makeResponse(id, result));
+        });
+    });
+    QVERIFY(server.listen(socketPath));
+
+    bs::SocketClient client;
+    QVERIFY(client.connectToServer(socketPath, 3000));
+
+    QStringList completionOrder;
+    QJsonObject slowResponse;
+    QJsonObject fastResponse;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(3000);
+
+    client.sendRequestAsync(QStringLiteral("slow"), {}, 2000,
+                            [&](const std::optional<QJsonObject>& response) {
+        QVERIFY(response.has_value());
+        slowResponse = response.value();
+        completionOrder.append(QStringLiteral("slow"));
+        if (completionOrder.size() == 2) {
+            loop.quit();
+        }
+    });
+    client.sendRequestAsync(QStringLiteral("fast"), {}, 2000,
+                            [&](const std::optional<QJsonObject>& response) {
+        QVERIFY(response.has_value());
+        fastResponse = response.value();
+        completionOrder.append(QStringLiteral("fast"));
+        if (completionOrder.size() == 2) {
+            loop.quit();
+        }
+    });
+
+    loop.exec();
+    QCOMPARE(completionOrder, QStringList({QStringLiteral("fast"), QStringLiteral("slow")}));
+    QCOMPARE(fastResponse.value(QStringLiteral("result")).toObject()
+                 .value(QStringLiteral("label")).toString(),
+             QStringLiteral("fast"));
+    QCOMPARE(slowResponse.value(QStringLiteral("result")).toObject()
+                 .value(QStringLiteral("label")).toString(),
+             QStringLiteral("slow"));
+
+    client.disconnect();
+    server.close();
+    QFile::remove(socketPath);
+}
+
+void TestIpcReliability::testDeferredResponsesAreDroppedAfterDisconnect()
+{
+    const QString socketPath = makeShortSocketPath(QStringLiteral("late"));
+    QFile::remove(socketPath);
+
+    bool lateSendAccepted = true;
+
+    bs::SocketServer server;
+    server.setRequestHandler([&server, &lateSendAccepted](const QJsonObject& request,
+                                                          bs::SocketServer::RequestResponder responder) {
+        const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
+        QTimer::singleShot(150, &server, [responder, id, &lateSendAccepted]() mutable {
+            lateSendAccepted = responder.send(
+                bs::IpcMessage::makeResponse(id, QJsonObject{{QStringLiteral("ok"), true}}));
+        });
+    });
+    QVERIFY(server.listen(socketPath));
+
+    bs::SocketClient client;
+    QVERIFY(client.connectToServer(socketPath, 3000));
+
+    bool callbackInvoked = false;
+    bool callbackWasDisconnectError = false;
+    client.sendRequestAsync(QStringLiteral("slow"), {}, 2000,
+                            [&](const std::optional<QJsonObject>& response) {
+        callbackInvoked = true;
+        callbackWasDisconnectError =
+            response.has_value()
+            && response->value(QStringLiteral("type")).toString() == QLatin1String("error");
+    });
+
+    client.disconnect();
+    QTRY_VERIFY_WITH_TIMEOUT(callbackInvoked, 1000);
+    QVERIFY(callbackWasDisconnectError);
+
+    QTest::qWait(250);
+    QVERIFY(!lateSendAccepted);
+
     server.close();
     QFile::remove(socketPath);
 }

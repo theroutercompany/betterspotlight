@@ -15,6 +15,7 @@ class TestInferenceServiceIpc : public QObject {
 
 private slots:
     void testInferenceIpcContract();
+    void testHealthRequestNotBlockedByDeferredInferenceWork();
 };
 
 void TestInferenceServiceIpc::testInferenceIpcContract()
@@ -184,6 +185,70 @@ void TestInferenceServiceIpc::testInferenceIpcContract()
         const QJsonObject restartCountByRole = result.value(QStringLiteral("restartCountByRole")).toObject();
         QVERIFY(restartCountByRole.contains(QStringLiteral("bi-encoder")));
     }
+}
+
+void TestInferenceServiceIpc::testHealthRequestNotBlockedByDeferredInferenceWork()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_REQUEST_DELAY_MS"), QStringLiteral("1200"));
+    launch.startTimeoutMs = 20000;
+    launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    QVERIFY2(harness.start(launch), "Failed to start inference service");
+
+    bs::SocketClient liveClient;
+    QVERIFY2(bs::test::waitForSocketConnection(liveClient, harness.socketPath(), 5000),
+             "Failed to connect live inference client");
+    bs::SocketClient healthClient;
+    QVERIFY2(bs::test::waitForSocketConnection(healthClient, harness.socketPath(), 5000),
+             "Failed to connect health inference client");
+
+    bool embedCompleted = false;
+    std::optional<QJsonObject> embedResponse;
+    QJsonObject params;
+    params[QStringLiteral("query")] = QStringLiteral("long-running placeholder embed");
+    liveClient.sendRequestAsync(
+        QStringLiteral("embed_query"),
+        params,
+        4000,
+        [&](const std::optional<QJsonObject>& response) {
+            embedResponse = response;
+            embedCompleted = true;
+        });
+
+    QTest::qWait(100);
+
+    QElapsedTimer timer;
+    timer.start();
+    const QJsonObject healthResponse =
+        bs::test::requestOrFailWithDiagnostics(healthClient,
+                                               QStringLiteral("get_inference_health"),
+                                               {},
+                                               600,
+                                               harness.socketPath());
+    const qint64 elapsedMs = timer.elapsed();
+
+    QVERIFY2(bs::test::isResponse(healthResponse),
+             "Inference health request should succeed while embed request is still running");
+    QVERIFY2(elapsedMs < 900,
+             qPrintable(QStringLiteral("Health request took too long: %1ms").arg(elapsedMs)));
+
+    QTRY_VERIFY_WITH_TIMEOUT(embedCompleted, 5000);
+    QVERIFY(embedResponse.has_value());
+    QVERIFY(bs::test::isResponse(embedResponse.value()));
 }
 
 QTEST_MAIN(TestInferenceServiceIpc)

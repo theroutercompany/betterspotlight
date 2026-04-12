@@ -49,6 +49,16 @@ bool deterministicPlaceholderWorkersEnabled()
         || envFlagEnabled(qEnvironmentVariable("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"));
 }
 
+int testRequestDelayMs()
+{
+    bool ok = false;
+    const int parsed = qEnvironmentVariableIntValue("BS_TEST_INFERENCE_REQUEST_DELAY_MS", &ok);
+    if (!ok) {
+        return 0;
+    }
+    return std::clamp(parsed, 0, 30000);
+}
+
 std::vector<QString> parseTextArray(const QJsonArray& array)
 {
     std::vector<QString> out;
@@ -140,6 +150,113 @@ QJsonObject InferenceService::handleRequest(const QJsonObject& request)
     return ServiceBase::handleRequest(request);
 }
 
+void InferenceService::handleRequestWithResponder(const QJsonObject& request,
+                                                 RequestResponder responder)
+{
+    const QString method = request.value(QStringLiteral("method")).toString();
+    const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
+    const QJsonObject params = request.value(QStringLiteral("params")).toObject();
+
+    const RequestResponder deferredResponder = responder;
+    const auto completePayload =
+        [deferredResponder, id](const QJsonObject& payload) {
+            deferredResponder.send(IpcMessage::makeResponse(id, payload));
+        };
+
+    if (method == QLatin1String("embed_query")) {
+        const QString role = params.value(QStringLiteral("role")).toString(
+            QStringLiteral("bi-encoder"));
+        Role workerRole = Role::EmbedStrong;
+        if (role == QLatin1String("bi-encoder-fast")) {
+            workerRole = Role::EmbedFast;
+        }
+
+        const DispatchResult result =
+            dispatchAsync(workerRole,
+                          QStringLiteral("embed_query"),
+                          parseEnvelope(params),
+                          params,
+                          completePayload);
+        if (!result.workerFound) {
+            responder.send(IpcMessage::makeError(id,
+                                                 IpcErrorCode::ServiceUnavailable,
+                                                 QStringLiteral("Inference worker unavailable")));
+        } else if (!result.enqueued) {
+            completePayload(result.immediatePayload);
+        }
+        return;
+    }
+
+    if (method == QLatin1String("embed_passages")) {
+        const QString role = params.value(QStringLiteral("role")).toString(
+            QStringLiteral("bi-encoder"));
+        const QString priority = params.value(QStringLiteral("priority")).toString(
+            QStringLiteral("live"));
+
+        Role workerRole = Role::EmbedStrong;
+        if (role == QLatin1String("bi-encoder-fast")) {
+            workerRole = (priority.compare(QStringLiteral("rebuild"), Qt::CaseInsensitive) == 0)
+                ? Role::RebuildEmbedFast
+                : Role::EmbedFast;
+        } else {
+            workerRole = (priority.compare(QStringLiteral("rebuild"), Qt::CaseInsensitive) == 0)
+                ? Role::RebuildEmbedStrong
+                : Role::EmbedStrong;
+        }
+
+        const DispatchResult result =
+            dispatchAsync(workerRole,
+                          QStringLiteral("embed_passages"),
+                          parseEnvelope(params),
+                          params,
+                          completePayload);
+        if (!result.workerFound) {
+            responder.send(IpcMessage::makeError(id,
+                                                 IpcErrorCode::ServiceUnavailable,
+                                                 QStringLiteral("Inference worker unavailable")));
+        } else if (!result.enqueued) {
+            completePayload(result.immediatePayload);
+        }
+        return;
+    }
+
+    if (method == QLatin1String("rerank_fast")
+        || method == QLatin1String("rerank_strong")) {
+        const Role role = method == QLatin1String("rerank_fast")
+            ? Role::RerankFast
+            : Role::RerankStrong;
+        const DispatchResult result =
+            dispatchAsync(role, method, parseEnvelope(params), params, completePayload);
+        if (!result.workerFound) {
+            responder.send(IpcMessage::makeError(id,
+                                                 IpcErrorCode::ServiceUnavailable,
+                                                 QStringLiteral("Inference worker unavailable")));
+        } else if (!result.enqueued) {
+            completePayload(result.immediatePayload);
+        }
+        return;
+    }
+
+    if (method == QLatin1String("qa_extract")) {
+        const DispatchResult result =
+            dispatchAsync(Role::QaExtractive,
+                          QStringLiteral("qa_extract"),
+                          parseEnvelope(params),
+                          params,
+                          completePayload);
+        if (!result.workerFound) {
+            responder.send(IpcMessage::makeError(id,
+                                                 IpcErrorCode::ServiceUnavailable,
+                                                 QStringLiteral("Inference worker unavailable")));
+        } else if (!result.enqueued) {
+            completePayload(result.immediatePayload);
+        }
+        return;
+    }
+
+    responder.send(handleRequest(request));
+}
+
 void InferenceService::initWorkers()
 {
     std::lock_guard<std::mutex> lock(m_workersMutex);
@@ -229,26 +346,73 @@ void InferenceService::workerLoop(Worker& worker)
         const QString cancelToken = task->envelope.cancelToken;
         if (isCancelled(cancelToken)) {
             worker.cancelled.fetch_add(1);
-            task->promise.set_value(makeStatusPayload(
+            const QJsonObject response = makeStatusPayload(
                 QStringLiteral("cancelled"),
                 worker.roleName,
                 QString(),
                 timer.elapsed(),
                 {},
-                QStringLiteral("cancel_token")));
+                QStringLiteral("cancel_token"));
+            if (task->complete) {
+                task->complete(response);
+            } else {
+                task->promise.set_value(response);
+            }
             continue;
         }
 
         if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
             worker.timedOut.fetch_add(1);
-            task->promise.set_value(makeStatusPayload(
+            const QJsonObject response = makeStatusPayload(
                 QStringLiteral("timeout"),
                 worker.roleName,
                 QString(),
                 timer.elapsed(),
                 {},
-                QStringLiteral("deadline_exceeded")));
+                QStringLiteral("deadline_exceeded"));
+            if (task->complete) {
+                task->complete(response);
+            } else {
+                task->promise.set_value(response);
+            }
             continue;
+        }
+
+        const int artificialDelayMs = testRequestDelayMs();
+        if (artificialDelayMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(artificialDelayMs));
+            if (isCancelled(cancelToken)) {
+                worker.cancelled.fetch_add(1);
+                const QJsonObject response = makeStatusPayload(
+                    QStringLiteral("cancelled"),
+                    worker.roleName,
+                    QString(),
+                    timer.elapsed(),
+                    {},
+                    QStringLiteral("cancel_token"));
+                if (task->complete) {
+                    task->complete(response);
+                } else {
+                    task->promise.set_value(response);
+                }
+                continue;
+            }
+            if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
+                worker.timedOut.fetch_add(1);
+                const QJsonObject response = makeStatusPayload(
+                    QStringLiteral("timeout"),
+                    worker.roleName,
+                    QString(),
+                    timer.elapsed(),
+                    {},
+                    QStringLiteral("deadline_exceeded"));
+                if (task->complete) {
+                    task->complete(response);
+                } else {
+                    task->promise.set_value(response);
+                }
+                continue;
+            }
         }
 
         QJsonObject payload;
@@ -500,13 +664,23 @@ void InferenceService::workerLoop(Worker& worker)
             maybeRecoverWorker(worker);
         }
 
-        task->promise.set_value(makeStatusPayload(
+        const QJsonObject response = makeStatusPayload(
             status,
             worker.roleName,
             statusOr(modelId, lookupModelId()),
             timer.elapsed(),
             payload,
-            fallbackReason));
+            fallbackReason);
+        LOG_DEBUG(bsIpc,
+                  "InferenceService completing %s request for role=%s deferred=%d",
+                  qUtf8Printable(task->method),
+                  qUtf8Printable(worker.roleName),
+                  task->complete ? 1 : 0);
+        if (task->complete) {
+            task->complete(response);
+        } else {
+            task->promise.set_value(response);
+        }
     }
 }
 
@@ -842,6 +1016,8 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     result[QStringLiteral("effectiveSupervisorMode")] = m_supervisorMode;
     result[QStringLiteral("supervisorModeCoerced")] = m_supervisorModeCoerced;
     result[QStringLiteral("placeholderWorkersEnabled")] = m_placeholderWorkersEnabled;
+    result[QStringLiteral("deferredResponsesEnabled")] = true;
+    result[QStringLiteral("requestExecutionMode")] = QStringLiteral("deferred_async");
     result[QStringLiteral("globalQueueLimitLive")] = kGlobalQueueLimitLive;
     result[QStringLiteral("globalQueueLimitRebuild")] = kGlobalQueueLimitRebuild;
 
@@ -910,11 +1086,74 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                                                       const QJsonObject& params,
                                                       int waitTimeoutMs)
 {
-    Worker* worker = workerForRole(role);
-    if (!worker) {
+    auto task = std::make_shared<Task>();
+    task->method = method;
+    task->envelope = envelope;
+    task->params = params;
+
+    std::future<QJsonObject> future = task->promise.get_future();
+    const DispatchResult result = enqueueTask(role, method, envelope, params, task);
+    if (!result.workerFound) {
         return std::nullopt;
     }
+    if (!result.enqueued) {
+        return result.immediatePayload;
+    }
 
+    if (waitTimeoutMs <= 0) {
+        waitTimeoutMs = 1;
+    }
+
+    const auto status = future.wait_for(std::chrono::milliseconds(waitTimeoutMs));
+    if (status == std::future_status::ready) {
+        return future.get();
+    }
+
+    if (!envelope.cancelToken.isEmpty()) {
+        markCancelled(envelope.cancelToken);
+    }
+    if (Worker* timeoutWorker = workerForRole(role)) {
+        timeoutWorker->timedOut.fetch_add(1);
+    }
+
+    return makeStatusPayload(
+        QStringLiteral("timeout"),
+        roleToString(role),
+        QString(),
+        waitTimeoutMs,
+        {},
+        QStringLiteral("rpc_timeout"));
+}
+
+InferenceService::DispatchResult InferenceService::dispatchAsync(
+    Role role,
+    const QString& method,
+    const RequestEnvelope& envelope,
+    const QJsonObject& params,
+    std::function<void(QJsonObject)> complete)
+{
+    auto task = std::make_shared<Task>();
+    task->method = method;
+    task->envelope = envelope;
+    task->params = params;
+    task->complete = std::move(complete);
+    return enqueueTask(role, method, envelope, params, task);
+}
+
+InferenceService::DispatchResult InferenceService::enqueueTask(
+    Role role,
+    const QString& method,
+    const RequestEnvelope& /*envelope*/,
+    const QJsonObject& /*params*/,
+    const std::shared_ptr<Task>& task)
+{
+    DispatchResult result;
+    Worker* worker = workerForRole(role);
+    if (!worker) {
+        return result;
+    }
+
+    result.workerFound = true;
     const bool rebuildRole = isRebuildRole(role);
     const int globalLiveDepth = [&]() -> int {
         std::lock_guard<std::mutex> lock(m_workersMutex);
@@ -934,13 +1173,6 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
         }
         return depth;
     }();
-
-    auto task = std::make_shared<Task>();
-    task->method = method;
-    task->envelope = envelope;
-    task->params = params;
-
-    std::future<QJsonObject> future = task->promise.get_future();
 
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
@@ -978,8 +1210,6 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                      legacyAccepted ? 1 : 0,
                      actorDecision.accepted ? 1 : 0,
                      qUtf8Printable(actorDecision.reason));
-        } else if (m_supervisorMode == QLatin1String("actor_primary")) {
-            accepted = actorDecision.accepted;
         }
 
         worker->lastAdmission = InferenceWorkerActor::toJson(actorDecision);
@@ -988,6 +1218,7 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
             rebuildRole ? QStringLiteral("rebuild") : QStringLiteral("live");
         worker->lastAdmission[QStringLiteral("mode")] = m_supervisorMode;
         worker->lastAdmission[QStringLiteral("legacyAccepted")] = legacyAccepted;
+        worker->lastAdmission[QStringLiteral("deferredResponse")] = static_cast<bool>(task->complete);
 
         if (!accepted) {
             QJsonObject overload = makeStatusPayload(
@@ -1005,35 +1236,22 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                 rebuildRole ? globalRebuildDepth : globalLiveDepth;
             overload[QStringLiteral("globalQueueLimit")] =
                 rebuildRole ? kGlobalQueueLimitRebuild : kGlobalQueueLimitLive;
-            return overload;
+            result.immediatePayload = overload;
+            return result;
         }
 
         queue.push_back(task);
         worker->submitted.fetch_add(1);
     }
+
     worker->cv.notify_one();
-
-    if (waitTimeoutMs <= 0) {
-        waitTimeoutMs = 1;
-    }
-
-    const auto status = future.wait_for(std::chrono::milliseconds(waitTimeoutMs));
-    if (status == std::future_status::ready) {
-        return future.get();
-    }
-
-    if (!envelope.cancelToken.isEmpty()) {
-        markCancelled(envelope.cancelToken);
-    }
-    worker->timedOut.fetch_add(1);
-
-    return makeStatusPayload(
-        QStringLiteral("timeout"),
-        worker->roleName,
-        QString(),
-        waitTimeoutMs,
-        {},
-        QStringLiteral("rpc_timeout"));
+    LOG_DEBUG(bsIpc,
+              "InferenceService enqueued %s request for role=%s deferred=%d",
+              qUtf8Printable(method),
+              qUtf8Printable(worker->roleName),
+              task->complete ? 1 : 0);
+    result.enqueued = true;
+    return result;
 }
 
 InferenceService::RequestEnvelope InferenceService::parseEnvelope(const QJsonObject& params)

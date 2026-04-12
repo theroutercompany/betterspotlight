@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaObject>
 
 namespace bs {
 
@@ -21,6 +22,50 @@ bool socketHasActivePeer(const QString& socketPath)
 }
 
 } // namespace
+
+SocketServer::RequestResponder::RequestResponder(std::shared_ptr<State> state)
+    : m_state(std::move(state))
+{
+}
+
+bool SocketServer::RequestResponder::isValid() const
+{
+    return m_state
+        && m_state->connection
+        && m_state->connection->connected.load(std::memory_order_acquire)
+        && !m_state->completed.load(std::memory_order_acquire)
+        && !m_state->server.isNull()
+        && !m_state->client.isNull();
+}
+
+bool SocketServer::RequestResponder::send(const QJsonObject& response) const
+{
+    if (!m_state) {
+        return false;
+    }
+    if (!m_state->connection
+        || !m_state->connection->connected.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (m_state->completed.exchange(true, std::memory_order_acq_rel)) {
+        return false;
+    }
+    SocketServer* server = m_state->server.data();
+    if (!server) {
+        return false;
+    }
+
+    const std::shared_ptr<State> state = m_state;
+    QMetaObject::invokeMethod(
+        server,
+        [state, response]() {
+            if (SocketServer* liveServer = state->server.data()) {
+                liveServer->sendDeferredResponse(state, response);
+            }
+        },
+        Qt::QueuedConnection);
+    return true;
+}
 
 SocketServer::SocketServer(QObject* parent)
     : QObject(parent)
@@ -85,8 +130,14 @@ void SocketServer::close()
 
     // Two-phase shutdown: detach client bookkeeping first, then disconnect sockets.
     const QList<QLocalSocket*> clients = m_clients;
+    for (auto it = m_connectionStates.begin(); it != m_connectionStates.end(); ++it) {
+        if (it.value()) {
+            it.value()->connected.store(false, std::memory_order_release);
+        }
+    }
     m_clients.clear();
     m_readBuffers.clear();
+    m_connectionStates.clear();
 
     for (QLocalSocket* client : clients) {
         if (!client) {
@@ -111,6 +162,18 @@ void SocketServer::close()
 bool SocketServer::isListening() const
 {
     return m_server->isListening();
+}
+
+void SocketServer::setRequestHandler(LegacyRequestHandler handler)
+{
+    if (!handler) {
+        m_handler = RequestHandler{};
+        return;
+    }
+    m_handler = [handler = std::move(handler)](const QJsonObject& request,
+                                               RequestResponder responder) mutable {
+        responder.send(handler(request));
+    };
 }
 
 void SocketServer::setRequestHandler(RequestHandler handler)
@@ -142,6 +205,7 @@ void SocketServer::onNewConnection()
 
         m_clients.append(client);
         m_readBuffers[client] = QByteArray();
+        m_connectionStates[client] = std::make_shared<RequestResponder::ConnectionState>();
 
         connect(client, &QLocalSocket::readyRead,
                 this, &SocketServer::onClientReadyRead);
@@ -194,9 +258,43 @@ bool SocketServer::detachClient(QLocalSocket* client)
         return false;
     }
 
+    auto connectionStateIt = m_connectionStates.find(client);
+    if (connectionStateIt != m_connectionStates.end() && connectionStateIt.value()) {
+        connectionStateIt.value()->connected.store(false, std::memory_order_release);
+    }
+    m_connectionStates.remove(client);
+
     const bool removedClient = m_clients.removeOne(client);
     const bool removedBuffer = m_readBuffers.remove(client) > 0;
     return removedClient || removedBuffer;
+}
+
+void SocketServer::sendResponse(QLocalSocket* client, const QJsonObject& response)
+{
+    if (!client || !m_clients.contains(client)) {
+        return;
+    }
+
+    QByteArray encoded = IpcMessage::encode(response);
+    if (!encoded.isEmpty()) {
+        client->write(encoded);
+        client->flush();
+    }
+}
+
+void SocketServer::sendDeferredResponse(
+    const std::shared_ptr<RequestResponder::State>& state,
+    const QJsonObject& response)
+{
+    if (!state || !state->connection
+        || !state->connection->connected.load(std::memory_order_acquire)) {
+        return;
+    }
+    QLocalSocket* client = state->client.data();
+    if (!client) {
+        return;
+    }
+    sendResponse(client, response);
 }
 
 void SocketServer::processBuffer(QLocalSocket* client)
@@ -221,19 +319,19 @@ void SocketServer::processBuffer(QLocalSocket* client)
                     qPrintable(incoming.value(QStringLiteral("method")).toString()),
                     incoming.value(QStringLiteral("id")).toInteger());
 
-            QJsonObject response;
+            auto responderState = std::make_shared<RequestResponder::State>();
+            responderState->server = this;
+            responderState->client = client;
+            responderState->connection = m_connectionStates.value(client);
+            RequestResponder responder(std::move(responderState));
             if (m_handler) {
-                response = m_handler(incoming);
+                m_handler(incoming, responder);
             } else {
                 uint64_t id = static_cast<uint64_t>(incoming.value(QStringLiteral("id")).toInteger());
-                response = IpcMessage::makeError(id, IpcErrorCode::InternalError,
-                                                  QStringLiteral("No request handler registered"));
-            }
-
-            QByteArray encoded = IpcMessage::encode(response);
-            if (!encoded.isEmpty()) {
-                client->write(encoded);
-                client->flush();
+                responder.send(IpcMessage::makeError(
+                    id,
+                    IpcErrorCode::InternalError,
+                    QStringLiteral("No request handler registered")));
             }
         } else if (type == QLatin1String("notification")) {
             qCDebug(bsIpc, "Received notification: method=%s",
@@ -241,7 +339,7 @@ void SocketServer::processBuffer(QLocalSocket* client)
 
             // Notifications are fire-and-forget; pass to handler but discard result
             if (m_handler) {
-                m_handler(incoming);
+                m_handler(incoming, RequestResponder{});
             }
         } else {
             qCWarning(bsIpc, "Received unknown message type: %s", qPrintable(type));
