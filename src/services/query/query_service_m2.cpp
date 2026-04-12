@@ -147,6 +147,7 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
                                                     interaction.timestamp);
         QString idleReason;
         m_learningEngine->maybeRunIdleCycle(&idleReason);
+        refreshLearningHealthCache();
     }
 
     if (m_pathPreferences) {
@@ -367,6 +368,7 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
     m_learningEngine->noteUserActivity();
     QString idleReason;
     const bool idleCycleTriggered = m_learningEngine->maybeRunIdleCycle(&idleReason);
+    refreshLearningHealthCache();
 
     QJsonObject result;
     result[QStringLiteral("recorded")] = eventPersisted;
@@ -390,6 +392,7 @@ QJsonObject QueryService::handleGetLearningHealth(uint64_t id)
     }
 
     QJsonObject result;
+    refreshLearningHealthCache();
     result[QStringLiteral("learning")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
 }
@@ -552,6 +555,7 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
     }
 
     QJsonObject result;
+    refreshLearningHealthCache();
     result[QStringLiteral("updated")] = true;
     result[QStringLiteral("learning")] = learningHealthSnapshot();
     return IpcMessage::makeResponse(id, result);
@@ -578,6 +582,7 @@ QJsonObject QueryService::handleTriggerLearningCycle(uint64_t id, const QJsonObj
              qUtf8Printable(reason));
 
     QJsonObject result;
+    refreshLearningHealthCache();
     result[QStringLiteral("promoted")] = promoted;
     result[QStringLiteral("reason")] = reason;
     result[QStringLiteral("learning")] = learningHealthSnapshot();
@@ -1152,6 +1157,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             workerVectorStore.upsertGenerationState(buildingState);
             lastPersistedProgressProcessed = processed;
             lastPersistedProgressMs = nowMs;
+            requestDiagnosticsSummaryRefresh(true);
         }
     };
 

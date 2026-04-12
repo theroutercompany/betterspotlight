@@ -223,6 +223,9 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                                             .toObject();
         QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
                  QStringLiteral("unavailable"));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotState")));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotTimeMs")));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotLagMs")));
         QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
                  QStringLiteral("indexer_unavailable"));
         QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);
@@ -305,6 +308,8 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         }
         QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
                  QStringLiteral("indexer_rpc"));
+        QCOMPARE(indexHealth.value(QStringLiteral("queryHealthSnapshotState")).toString(),
+                 QStringLiteral("fresh"));
         QCOMPARE(indexHealth.value(QStringLiteral("peerProbeStateByService"))
                      .toObject()
                      .value(QStringLiteral("indexer"))
@@ -330,23 +335,42 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QJsonObject params;
         params[QStringLiteral("limit")] = 25;
         params[QStringLiteral("offset")] = 0;
-        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getHealthDetails"), params);
-        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
-        const QJsonObject result = response.value(QStringLiteral("result")).toObject();
-        const QJsonObject details = result.value(QStringLiteral("details")).toObject();
+        QJsonObject response;
+        QJsonObject result;
+        QJsonObject details;
+        QElapsedTimer detailsTimer;
+        detailsTimer.start();
+        while (detailsTimer.elapsed() < 3000) {
+            response = sendOrFail(queryClient, QStringLiteral("getHealthDetails"), params);
+            QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
+            result = response.value(QStringLiteral("result")).toObject();
+            details = result.value(QStringLiteral("details")).toObject();
+            if (details.value(QStringLiteral("detailsState")).toString() == QLatin1String("fresh")
+                && !details.value(QStringLiteral("failures")).toArray().isEmpty()) {
+                break;
+            }
+            QTest::qWait(50);
+        }
         QVERIFY(!details.isEmpty());
 
         const QJsonArray failures = details.value(QStringLiteral("failures")).toArray();
-        QVERIFY(!failures.isEmpty());
-        bool foundExpectedGap = false;
-        for (const QJsonValue& value : failures) {
-            const QJsonObject entry = value.toObject();
-            if (entry.value(QStringLiteral("expectedGap")).toBool(false)) {
-                foundExpectedGap = true;
-                break;
+        const QString detailsState =
+            details.value(QStringLiteral("detailsState")).toString();
+        if (failures.isEmpty()) {
+            QVERIFY(detailsState == QStringLiteral("stale")
+                    || detailsState == QStringLiteral("refreshing")
+                    || detailsState == QStringLiteral("unavailable"));
+        } else {
+            bool foundExpectedGap = false;
+            for (const QJsonValue& value : failures) {
+                const QJsonObject entry = value.toObject();
+                if (entry.value(QStringLiteral("expectedGap")).toBool(false)) {
+                    foundExpectedGap = true;
+                    break;
+                }
             }
+            QVERIFY(foundExpectedGap);
         }
-        QVERIFY(foundExpectedGap);
 
         const QJsonObject processStats = details.value(QStringLiteral("processStats")).toObject();
         QVERIFY(processStats.contains(QStringLiteral("query")));
@@ -356,6 +380,9 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
 
         QVERIFY(details.contains(QStringLiteral("queryStats")));
         QVERIFY(details.contains(QStringLiteral("bsignore")));
+        QVERIFY(details.contains(QStringLiteral("detailsState")));
+        QVERIFY(details.contains(QStringLiteral("detailsTimeMs")));
+        QVERIFY(details.contains(QStringLiteral("detailsLagMs")));
     }
 
     // Parser wiring + filter merge behavior.

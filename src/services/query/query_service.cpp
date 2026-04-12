@@ -441,8 +441,72 @@ bool isExpectedGapFailureMessage(const QString& errorMessage)
 }
 
 constexpr qint64 kLocalHealthSnapshotTtlMs = 250;
+constexpr qint64 kHealthDetailsSnapshotTtlMs = 750;
 constexpr qint64 kPeerProbeStaleMs = 1500;
 constexpr int kPeerProbeRefreshIntervalMs = 250;
+constexpr int kDiagnosticsRefreshIntervalMs = 250;
+constexpr qint64 kInitialDiagnosticsWaitMs = 150;
+constexpr qint64 kHealthDetailsRequestBudgetMs = 150;
+
+int testQueryDiagnosticsDelayMs()
+{
+    bool ok = false;
+    const int parsed = qEnvironmentVariableIntValue("BS_TEST_QUERY_DIAGNOSTICS_DELAY_MS", &ok);
+    if (!ok) {
+        return 0;
+    }
+    return std::clamp(parsed, 0, 5000);
+}
+
+sqlite3* openReadOnlyDiagnosticsDb(const QString& dbPath)
+{
+    if (dbPath.trimmed().isEmpty()) {
+        return nullptr;
+    }
+
+    sqlite3* db = nullptr;
+    const int rc = sqlite3_open_v2(dbPath.toUtf8().constData(),
+                                   &db,
+                                   SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                                   nullptr);
+    if (rc != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return nullptr;
+    }
+
+    sqlite3_busy_timeout(db, 1000);
+    return db;
+}
+
+QString snapshotStateForCache(qint64 snapshotTimeMs,
+                              const QString& cachedState,
+                              bool refreshInFlight,
+                              qint64 ttlMs)
+{
+    if (refreshInFlight) {
+        return QStringLiteral("refreshing");
+    }
+    if (snapshotTimeMs <= 0) {
+        return QStringLiteral("unavailable");
+    }
+
+    if (cachedState == QLatin1String("unavailable")) {
+        return QStringLiteral("unavailable");
+    }
+
+    const qint64 lagMs = QDateTime::currentMSecsSinceEpoch() - snapshotTimeMs;
+    if (cachedState == QLatin1String("stale") || lagMs > ttlMs) {
+        return QStringLiteral("stale");
+    }
+    return QStringLiteral("fresh");
+}
+
+QString healthDetailsCacheKey(int limit, int offset)
+{
+    return QStringLiteral("%1:%2").arg(limit).arg(offset);
+}
 
 std::optional<QString> readSettingFromSqlite(sqlite3* db, const QString& key)
 {
@@ -797,12 +861,22 @@ QueryService::QueryService(QObject* parent)
     QObject::connect(&m_peerProbeRefreshTimer, &QTimer::timeout, this, [this]() {
         refreshPeerProbesIfNeeded(false);
     });
+    m_diagnosticsRefreshTimer.setInterval(kDiagnosticsRefreshIntervalMs);
+    m_diagnosticsRefreshTimer.setSingleShot(false);
+    QObject::connect(&m_diagnosticsRefreshTimer, &QTimer::timeout, this, [this]() {
+        requestDiagnosticsSummaryRefresh(false);
+    });
     initBsignoreWatch();
     refreshRuntimeMirror();
     startRequestExecutionLanes();
+    startDiagnosticsWorker();
     m_peerProbeRefreshTimer.start();
+    m_diagnosticsRefreshTimer.start();
     QMetaObject::invokeMethod(this, [this]() {
         refreshPeerProbesIfNeeded(true);
+    }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(this, [this]() {
+        requestDiagnosticsSummaryRefresh(true);
     }, Qt::QueuedConnection);
 }
 
@@ -812,14 +886,15 @@ QueryService::~QueryService()
     m_stopRebuildRequested.store(true);
     joinVectorRebuildThread();
     m_peerProbeRefreshTimer.stop();
+    m_diagnosticsRefreshTimer.stop();
     if (m_indexerHealthClient) {
         m_indexerHealthClient->disconnect();
     }
     if (m_inferenceHealthClient) {
         m_inferenceHealthClient->disconnect();
     }
+    stopDiagnosticsWorker();
     stopRequestExecutionLanes();
-    closeHealthDiagnostics();
     m_learningSchedulerTimer.stop();
 }
 
@@ -854,41 +929,40 @@ void QueryService::resolveDataPathsIfNeeded()
     }
 }
 
-bool QueryService::ensureHealthDiagnosticsOpen()
+void QueryService::startDiagnosticsWorker()
 {
-    if (m_healthDiagnosticsDb) {
-        return true;
-    }
-
-    resolveDataPathsIfNeeded();
-    if (m_dbPath.trimmed().isEmpty()) {
-        return false;
-    }
-
-    sqlite3* db = nullptr;
-    const int rc = sqlite3_open_v2(m_dbPath.toUtf8().constData(),
-                                   &db,
-                                   SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
-                                   nullptr);
-    if (rc != SQLITE_OK || !db) {
-        if (db) {
-            sqlite3_close(db);
-        }
-        return false;
-    }
-
-    sqlite3_busy_timeout(db, 1000);
-    m_healthDiagnosticsDb = db;
-    return true;
-}
-
-void QueryService::closeHealthDiagnostics()
-{
-    if (!m_healthDiagnosticsDb) {
+    std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+    if (m_diagnosticsThread.joinable()) {
         return;
     }
-    sqlite3_close(m_healthDiagnosticsDb);
-    m_healthDiagnosticsDb = nullptr;
+    m_stopDiagnosticsWorker = false;
+    m_diagnosticsThread = std::thread(&QueryService::diagnosticsWorkerLoop, this);
+}
+
+void QueryService::stopDiagnosticsWorker()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+        if (!m_diagnosticsThread.joinable()) {
+            return;
+        }
+        m_stopDiagnosticsWorker = true;
+        m_diagnosticsQueue.clear();
+        m_diagnosticsQueue.push_back(
+            DiagnosticsTask{DiagnosticsTask::Kind::Stop, 0, 0, m_diagnosticsGeneration});
+    }
+    m_diagnosticsCv.notify_all();
+    m_diagnosticsStateCv.notify_all();
+    if (m_diagnosticsThread.joinable()) {
+        m_diagnosticsThread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+        m_localHealthSnapshotCache.refreshInFlight = false;
+        for (auto it = m_healthDetailsCache.begin(); it != m_healthDetailsCache.end(); ++it) {
+            it->refreshInFlight = false;
+        }
+    }
 }
 
 QueryService::RuntimeMirror QueryService::runtimeMirrorSnapshot() const
@@ -935,6 +1009,7 @@ void QueryService::refreshRuntimeMirror()
 
     std::lock_guard<std::mutex> lock(m_runtimeMirrorMutex);
     m_runtimeMirror = std::move(mirror);
+    invalidateDiagnosticsCaches(true);
 }
 
 QString QueryService::vectorRebuildStatusToString(VectorRebuildState::Status status)
@@ -1171,6 +1246,233 @@ void QueryService::stopRequestExecutionLanes()
     if (m_healthRequestThread.joinable()) {
         m_healthRequestThread.join();
     }
+}
+
+void QueryService::requestDiagnosticsSummaryRefresh(bool force)
+{
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+    const bool stale =
+        m_localHealthSnapshotCache.snapshotTimeMs <= 0
+        || (nowMs - m_localHealthSnapshotCache.snapshotTimeMs) > kLocalHealthSnapshotTtlMs
+        || m_localHealthSnapshotCache.state == QLatin1String("stale")
+        || m_localHealthSnapshotCache.state == QLatin1String("unavailable");
+    if (!force && !stale) {
+        return;
+    }
+
+    if (force) {
+        ++m_diagnosticsGeneration;
+        m_localHealthSnapshotCache.state = m_localHealthSnapshotCache.indexHealth.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        for (auto it = m_healthDetailsCache.begin(); it != m_healthDetailsCache.end(); ++it) {
+            it->state = it->details.isEmpty()
+                ? QStringLiteral("unavailable")
+                : QStringLiteral("stale");
+        }
+    }
+
+    const uint64_t generation = m_diagnosticsGeneration;
+    if (m_localHealthSnapshotCache.refreshInFlight
+        && m_localHealthSnapshotCache.refreshGeneration == generation) {
+        return;
+    }
+
+    m_localHealthSnapshotCache.refreshInFlight = true;
+    m_localHealthSnapshotCache.refreshGeneration = generation;
+    m_diagnosticsQueue.push_back(
+        DiagnosticsTask{DiagnosticsTask::Kind::RefreshSummary, 0, 0, generation});
+    m_diagnosticsCv.notify_all();
+}
+
+void QueryService::requestDiagnosticsDetailsRefresh(int limit, int offset, bool force)
+{
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+    const QString cacheKey = healthDetailsCacheKey(limit, offset);
+    HealthDetailsCache& cache = m_healthDetailsCache[cacheKey];
+    cache.limit = limit;
+    cache.offset = offset;
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool stale =
+        cache.snapshotTimeMs <= 0
+        || (nowMs - cache.snapshotTimeMs) > kHealthDetailsSnapshotTtlMs
+        || cache.state == QLatin1String("stale")
+        || cache.state == QLatin1String("unavailable");
+    if (!force && !stale) {
+        return;
+    }
+
+    const uint64_t generation = m_diagnosticsGeneration;
+    if (cache.refreshInFlight && cache.refreshGeneration == generation) {
+        return;
+    }
+
+    cache.refreshInFlight = true;
+    cache.refreshGeneration = generation;
+    if (force) {
+        cache.state = cache.details.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+    }
+    m_diagnosticsQueue.push_back(
+        DiagnosticsTask{DiagnosticsTask::Kind::RefreshDetails, limit, offset, generation});
+    m_diagnosticsCv.notify_all();
+}
+
+void QueryService::invalidateDiagnosticsCaches(bool scheduleRefresh)
+{
+    if (m_shuttingDown.load()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+        ++m_diagnosticsGeneration;
+        m_localHealthSnapshotCache.state = m_localHealthSnapshotCache.indexHealth.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        for (auto it = m_healthDetailsCache.begin(); it != m_healthDetailsCache.end(); ++it) {
+            it->state = it->details.isEmpty()
+                ? QStringLiteral("unavailable")
+                : QStringLiteral("stale");
+        }
+    }
+
+    if (scheduleRefresh) {
+        requestDiagnosticsSummaryRefresh(true);
+    } else {
+        m_diagnosticsStateCv.notify_all();
+    }
+}
+
+void QueryService::diagnosticsWorkerLoop()
+{
+    resolveDataPathsIfNeeded();
+
+    sqlite3* diagnosticsDb = nullptr;
+    auto closeDiagnosticsDb = [&]() {
+        if (diagnosticsDb) {
+            sqlite3_close(diagnosticsDb);
+            diagnosticsDb = nullptr;
+        }
+    };
+    auto ensureDiagnosticsDb = [&]() -> bool {
+        if (diagnosticsDb) {
+            return true;
+        }
+        diagnosticsDb = openReadOnlyDiagnosticsDb(m_dbPath);
+        return diagnosticsDb != nullptr;
+    };
+    const int diagnosticsDelayMs = testQueryDiagnosticsDelayMs();
+
+    for (;;) {
+        DiagnosticsTask task;
+        {
+            std::unique_lock<std::mutex> lock(m_diagnosticsMutex);
+            m_diagnosticsCv.wait(lock, [&]() {
+                return m_stopDiagnosticsWorker || !m_diagnosticsQueue.empty();
+            });
+            if (m_stopDiagnosticsWorker && m_diagnosticsQueue.empty()) {
+                break;
+            }
+            task = m_diagnosticsQueue.front();
+            m_diagnosticsQueue.pop_front();
+        }
+
+        if (task.kind == DiagnosticsTask::Kind::Stop) {
+            break;
+        }
+
+        if (diagnosticsDelayMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(diagnosticsDelayMs));
+        }
+
+        if (!ensureDiagnosticsDb()) {
+            std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+            if (task.kind == DiagnosticsTask::Kind::RefreshSummary
+                && m_localHealthSnapshotCache.refreshGeneration == task.generation) {
+                m_localHealthSnapshotCache.refreshInFlight = false;
+                if (m_localHealthSnapshotCache.indexHealth.isEmpty()) {
+                    m_localHealthSnapshotCache.state = QStringLiteral("unavailable");
+                } else {
+                    m_localHealthSnapshotCache.state = QStringLiteral("stale");
+                }
+            } else if (task.kind == DiagnosticsTask::Kind::RefreshDetails) {
+                const QString cacheKey = healthDetailsCacheKey(task.limit, task.offset);
+                auto it = m_healthDetailsCache.find(cacheKey);
+                if (it != m_healthDetailsCache.end()
+                    && it->refreshGeneration == task.generation) {
+                    it->refreshInFlight = false;
+                    it->state = it->details.isEmpty()
+                        ? QStringLiteral("unavailable")
+                        : QStringLiteral("stale");
+                }
+            }
+            m_diagnosticsStateCv.notify_all();
+            continue;
+        }
+
+        const qint64 snapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
+        if (task.kind == DiagnosticsTask::Kind::RefreshSummary) {
+            const QJsonObject snapshot = buildLocalHealthSnapshotFromDiagnostics(diagnosticsDb);
+            std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+            if (m_shuttingDown.load()) {
+                break;
+            }
+            if (m_localHealthSnapshotCache.refreshGeneration != task.generation) {
+                continue;
+            }
+            m_localHealthSnapshotCache.refreshInFlight = false;
+            if (!snapshot.isEmpty()) {
+                m_localHealthSnapshotCache.indexHealth = snapshot;
+                m_localHealthSnapshotCache.snapshotTimeMs = snapshotTimeMs;
+                m_localHealthSnapshotCache.state = QStringLiteral("fresh");
+            } else if (!m_localHealthSnapshotCache.indexHealth.isEmpty()) {
+                m_localHealthSnapshotCache.state = QStringLiteral("stale");
+            } else {
+                m_localHealthSnapshotCache.state = QStringLiteral("unavailable");
+            }
+            m_diagnosticsStateCv.notify_all();
+            continue;
+        }
+
+        const QString cacheKey = healthDetailsCacheKey(task.limit, task.offset);
+        const QJsonObject details = buildHealthDetailsPayloadFromDiagnostics(
+            diagnosticsDb, task.limit, task.offset);
+        std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+        if (m_shuttingDown.load()) {
+            break;
+        }
+        HealthDetailsCache& cache = m_healthDetailsCache[cacheKey];
+        if (cache.refreshGeneration != task.generation) {
+            continue;
+        }
+        cache.refreshInFlight = false;
+        cache.limit = task.limit;
+        cache.offset = task.offset;
+        if (!details.isEmpty()) {
+            cache.details = details;
+            cache.snapshotTimeMs = snapshotTimeMs;
+            cache.state = QStringLiteral("fresh");
+        } else if (!cache.details.isEmpty()) {
+            cache.state = QStringLiteral("stale");
+        } else {
+            cache.state = QStringLiteral("unavailable");
+        }
+        m_diagnosticsStateCv.notify_all();
+    }
+
+    closeDiagnosticsDb();
 }
 
 void QueryService::enqueueDefaultControlTask(std::function<void()> task)
@@ -1753,16 +2055,19 @@ void QueryService::noteLearningSchedulerOutcome(bool promoted, const QString& re
         ? QStringLiteral("promoted")
         : (reason.trimmed().isEmpty() ? QStringLiteral("unknown") : reason.trimmed());
 
-    std::lock_guard<std::mutex> lock(m_learningSchedulerMutex);
-    ++m_learningSchedulerTicks;
-    m_learningSchedulerLastTickAtMs = nowMs;
-    m_learningSchedulerLastReason = normalizedReason;
-    m_learningSchedulerReasonCounts[normalizedReason] =
-        m_learningSchedulerReasonCounts.value(normalizedReason) + 1;
-    if (promoted) {
-        ++m_learningSchedulerPromoted;
-        m_learningSchedulerLastPromotedAtMs = nowMs;
+    {
+        std::lock_guard<std::mutex> lock(m_learningSchedulerMutex);
+        ++m_learningSchedulerTicks;
+        m_learningSchedulerLastTickAtMs = nowMs;
+        m_learningSchedulerLastReason = normalizedReason;
+        m_learningSchedulerReasonCounts[normalizedReason] =
+            m_learningSchedulerReasonCounts.value(normalizedReason) + 1;
+        if (promoted) {
+            ++m_learningSchedulerPromoted;
+            m_learningSchedulerLastPromotedAtMs = nowMs;
+        }
     }
+    refreshLearningHealthCache();
 }
 
 QJsonObject QueryService::learningSchedulerSnapshot() const
@@ -1798,24 +2103,21 @@ QJsonObject QueryService::learningHealthSnapshot() const
     return learning;
 }
 
-void QueryService::maybeRefreshLocalHealthSnapshot()
+void QueryService::refreshLearningHealthCache()
 {
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    const bool needsRefresh =
-        m_localHealthSnapshotCache.snapshotTimeMs <= 0
-        || (nowMs - m_localHealthSnapshotCache.snapshotTimeMs) > kLocalHealthSnapshotTtlMs;
-    if (!needsRefresh) {
-        return;
+    QJsonObject snapshot;
+    if (m_learningEngine) {
+        snapshot = m_learningEngine->healthSnapshot();
+        snapshot[QStringLiteral("scheduler")] = learningSchedulerSnapshot();
     }
+    std::lock_guard<std::mutex> lock(m_learningHealthCacheMutex);
+    m_learningHealthCache = snapshot;
+}
 
-    const QJsonObject snapshot = buildLocalHealthSnapshotFromDiagnostics();
-    if (!snapshot.isEmpty()) {
-        m_localHealthSnapshotCache.indexHealth = snapshot;
-        m_localHealthSnapshotCache.snapshotTimeMs = nowMs;
-        m_localHealthSnapshotCache.state = QStringLiteral("fresh");
-    } else if (!m_localHealthSnapshotCache.indexHealth.isEmpty()) {
-        m_localHealthSnapshotCache.state = QStringLiteral("stale");
-    }
+QJsonObject QueryService::cachedLearningHealthSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_learningHealthCacheMutex);
+    return m_learningHealthCache;
 }
 
 QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
@@ -2136,16 +2438,16 @@ QJsonArray QueryService::buildModelManifestSnapshot(const QString& modelsDirReso
     return modelManifest;
 }
 
-QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics()
+QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagnosticsDb)
 {
-    if (!ensureHealthDiagnosticsOpen()) {
+    if (!diagnosticsDb) {
         return QJsonObject();
     }
 
     const RuntimeMirror runtimeMirror = runtimeMirrorSnapshot();
-    IndexHealth health = readIndexHealthFromSqlite(m_healthDiagnosticsDb);
+    IndexHealth health = readIndexHealthFromSqlite(diagnosticsDb);
     const int totalEmbeddedVectors = countMappingsForGenerationFromSqlite(
-        m_healthDiagnosticsDb, runtimeMirror.activeVectorGeneration);
+        diagnosticsDb, runtimeMirror.activeVectorGeneration);
     const qint64 vectorIndexSize =
         QFileInfo(vectorIndexPathForGeneration(runtimeMirror.activeVectorGeneration)).size();
     const double contentCoveragePct = health.totalIndexedItems > 0
@@ -2269,7 +2571,7 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics()
     indexHealth[QStringLiteral("requiredModelInventoryReason")] = requiredModelInventoryReason;
     indexHealth[QStringLiteral("requiredModelInventoryMissingRoles")] =
         QJsonArray::fromStringList(missingRoles);
-    indexHealth[QStringLiteral("recentErrors")] = loadRecentErrorsFromSqlite(m_healthDiagnosticsDb);
+    indexHealth[QStringLiteral("recentErrors")] = loadRecentErrorsFromSqlite(diagnosticsDb);
     indexHealth[QStringLiteral("vectorRebuildStatus")] =
         vectorRebuildStatusToString(rebuildStateCopy.status);
     indexHealth[QStringLiteral("vectorRebuildRunId")] =
@@ -2311,7 +2613,7 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics()
         queryStats.value(QStringLiteral("semanticOnlySuppressedCount")).toInteger();
 
     indexHealth[QStringLiteral("runtimeSettings")] =
-        buildRuntimeSettingsSnapshot(m_healthDiagnosticsDb);
+        buildRuntimeSettingsSnapshot(diagnosticsDb);
     indexHealth[QStringLiteral("modelManifest")] = buildModelManifestSnapshot(
         runtimeMirror.modelsDirResolved,
         runtimeMirror,
@@ -2390,11 +2692,40 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics()
     indexHealth[QStringLiteral("bsignoreLastLoadedAt")] =
         runtimeMirror.bsignoreStatus.value(QStringLiteral("lastLoadedAt")).toString();
 
-    if (m_learningEngine) {
-        indexHealth[QStringLiteral("learningHealth")] = learningHealthSnapshot();
+    const QJsonObject cachedLearningHealth = cachedLearningHealthSnapshot();
+    if (!cachedLearningHealth.isEmpty()) {
+        indexHealth[QStringLiteral("learningHealth")] = cachedLearningHealth;
     }
 
     return indexHealth;
+}
+
+QJsonObject QueryService::buildHealthDetailsPayloadFromDiagnostics(sqlite3* diagnosticsDb,
+                                                                  int limit,
+                                                                  int offset)
+{
+    if (!diagnosticsDb) {
+        return QJsonObject();
+    }
+
+    const FailureDetailsPage failurePage =
+        loadFailureDetailsPageFromSqlite(diagnosticsDb, limit, offset);
+
+    QJsonObject processStats;
+    processStats[QStringLiteral("query")] = processStatsForService(QStringLiteral("query"));
+    processStats[QStringLiteral("indexer")] = processStatsForService(QStringLiteral("indexer"));
+    processStats[QStringLiteral("extractor")] = processStatsForService(QStringLiteral("extractor"));
+
+    QJsonObject details;
+    details[QStringLiteral("failures")] = failurePage.failures;
+    details[QStringLiteral("failuresLimit")] = limit;
+    details[QStringLiteral("failuresOffset")] = offset;
+    details[QStringLiteral("criticalFailureRows")] = failurePage.criticalRows;
+    details[QStringLiteral("expectedGapFailureRows")] = failurePage.expectedGapRows;
+    details[QStringLiteral("processStats")] = processStats;
+    details[QStringLiteral("queryStats")] = queryStatsSnapshot();
+    details[QStringLiteral("bsignore")] = runtimeMirrorSnapshot().bsignoreStatus;
+    return details;
 }
 
 void QueryService::applyVectorRebuildCutover(const VectorRebuildCutoverPayload& payload)
@@ -2768,6 +3099,7 @@ void QueryService::initM2Modules()
     } else {
         LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
     }
+    refreshLearningHealthCache();
     refreshRuntimeMirror();
 }
 
@@ -5612,8 +5944,271 @@ QJsonObject QueryService::handleGetQueryHealthV3(uint64_t id)
     return handleGetHealthInternal(id, /*includeIndexerQueueProbe=*/false);
 }
 
+QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
+{
+    LocalHealthSnapshotCache localCache;
+    {
+        std::unique_lock<std::mutex> lock(m_diagnosticsMutex);
+        if (m_localHealthSnapshotCache.indexHealth.isEmpty()
+            && m_localHealthSnapshotCache.refreshInFlight) {
+            m_diagnosticsStateCv.wait_for(
+                lock,
+                std::chrono::milliseconds(kInitialDiagnosticsWaitMs),
+                [&]() {
+                    return m_shuttingDown.load()
+                        || !m_localHealthSnapshotCache.indexHealth.isEmpty()
+                        || !m_localHealthSnapshotCache.refreshInFlight;
+                });
+        }
+        localCache = m_localHealthSnapshotCache;
+    }
+
+    if (localCache.indexHealth.isEmpty()) {
+        return QJsonObject();
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QJsonObject cachedIndexHealth = localCache.indexHealth;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotState")] =
+        snapshotStateForCache(localCache.snapshotTimeMs,
+                              localCache.state,
+                              localCache.refreshInFlight,
+                              kLocalHealthSnapshotTtlMs);
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] =
+        localCache.snapshotTimeMs;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
+        localCache.snapshotTimeMs > 0 ? (nowMs - localCache.snapshotTimeMs) : -1;
+
+    PeerProbeCache indexerCache;
+    PeerProbeCache inferenceCache;
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        indexerCache = m_indexerPeerCache;
+        inferenceCache = m_inferencePeerCache;
+    }
+
+    QJsonObject peerProbeStateByService;
+    peerProbeStateByService[QStringLiteral("indexer")] = indexerCache.state;
+    peerProbeStateByService[QStringLiteral("inference")] = inferenceCache.state;
+    QJsonObject peerProbeTimeMsByService;
+    peerProbeTimeMsByService[QStringLiteral("indexer")] = indexerCache.snapshotTimeMs;
+    peerProbeTimeMsByService[QStringLiteral("inference")] = inferenceCache.snapshotTimeMs;
+    cachedIndexHealth[QStringLiteral("peerProbeStateByService")] = peerProbeStateByService;
+    cachedIndexHealth[QStringLiteral("peerProbeTimeMsByService")] = peerProbeTimeMsByService;
+
+    int queuePending = 0;
+    int queueInProgress = 0;
+    int queueFailed = 0;
+    int queueDropped = 0;
+    int queueScanned = 0;
+    int queueTotal = 0;
+    double queueProgressPct = 0.0;
+    bool queuePaused = false;
+    int queuePreparing = 0;
+    int queueWriting = 0;
+    bool queueRebuildRunning = false;
+    QString queueRebuildStatus = QStringLiteral("unknown");
+    QString queueRebuildReason;
+    int queueCoalesced = 0;
+    int queueStaleDropped = 0;
+    int queuePrepWorkers = 0;
+    int queueWriterBatchDepth = 0;
+    QString queueActorMode = QStringLiteral("actor_primary");
+    QJsonObject queueBulkhead;
+    QJsonArray queueRoots;
+    QString queueSource = indexerCache.payload.isEmpty()
+        ? QStringLiteral("unavailable")
+        : QStringLiteral("indexer_rpc");
+    if (!indexerCache.payload.isEmpty()) {
+        queuePending = indexerCache.payload.value(QStringLiteral("pending")).toInt();
+        queueInProgress = indexerCache.payload.value(QStringLiteral("processing")).toInt();
+        queueFailed = indexerCache.payload.value(QStringLiteral("failed")).toInt();
+        queueDropped = indexerCache.payload.value(QStringLiteral("dropped")).toInt();
+        queuePaused = indexerCache.payload.value(QStringLiteral("paused")).toBool(false);
+        queuePreparing = indexerCache.payload.value(QStringLiteral("preparing")).toInt();
+        queueWriting = indexerCache.payload.value(QStringLiteral("writing")).toInt();
+        queueRebuildRunning =
+            indexerCache.payload.value(QStringLiteral("rebuildRunning")).toBool(false);
+        queueRebuildStatus =
+            indexerCache.payload.value(QStringLiteral("rebuildStatus")).toString(queueRebuildStatus);
+        queueRebuildReason =
+            indexerCache.payload.value(QStringLiteral("rebuildReason")).toString();
+        const QJsonObject lastProgress =
+            indexerCache.payload.value(QStringLiteral("lastProgressReport")).toObject();
+        queueScanned = lastProgress.value(QStringLiteral("scanned")).toInt();
+        queueTotal = lastProgress.value(QStringLiteral("total")).toInt();
+        queueProgressPct = queueTotal > 0
+            ? (100.0 * static_cast<double>(queueScanned) / static_cast<double>(queueTotal))
+            : 0.0;
+        queueCoalesced = indexerCache.payload.value(QStringLiteral("coalesced")).toInt();
+        queueStaleDropped = indexerCache.payload.value(QStringLiteral("staleDropped")).toInt();
+        queuePrepWorkers = indexerCache.payload.value(QStringLiteral("prepWorkers")).toInt();
+        queueWriterBatchDepth =
+            indexerCache.payload.value(QStringLiteral("writerBatchDepth")).toInt();
+        queueActorMode =
+            indexerCache.payload.value(QStringLiteral("actorMode")).toString(queueActorMode);
+        queueBulkhead = indexerCache.payload.value(QStringLiteral("bulkhead")).toObject();
+        queueRoots = indexerCache.payload.value(QStringLiteral("roots")).toArray();
+    }
+
+    cachedIndexHealth[QStringLiteral("queuePending")] = queuePending;
+    cachedIndexHealth[QStringLiteral("queueInProgress")] = queueInProgress;
+    cachedIndexHealth[QStringLiteral("queueFailed")] = queueFailed;
+    cachedIndexHealth[QStringLiteral("queueDropped")] = queueDropped;
+    cachedIndexHealth[QStringLiteral("queueScanned")] = queueScanned;
+    cachedIndexHealth[QStringLiteral("queueTotal")] = queueTotal;
+    cachedIndexHealth[QStringLiteral("queueProgressPct")] = queueProgressPct;
+    cachedIndexHealth[QStringLiteral("queuePaused")] = queuePaused;
+    cachedIndexHealth[QStringLiteral("queuePreparing")] = queuePreparing;
+    cachedIndexHealth[QStringLiteral("queueWriting")] = queueWriting;
+    cachedIndexHealth[QStringLiteral("queueRebuildRunning")] = queueRebuildRunning;
+    cachedIndexHealth[QStringLiteral("queueRebuildStatus")] = queueRebuildStatus;
+    cachedIndexHealth[QStringLiteral("queueRebuildReason")] = queueRebuildReason;
+    cachedIndexHealth[QStringLiteral("queueCoalesced")] = queueCoalesced;
+    cachedIndexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
+    cachedIndexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
+    cachedIndexHealth[QStringLiteral("queueWriterBatchDepth")] = queueWriterBatchDepth;
+    cachedIndexHealth[QStringLiteral("pipelineActorMode")] = queueActorMode;
+    cachedIndexHealth[QStringLiteral("pipelineBulkhead")] = queueBulkhead;
+    cachedIndexHealth[QStringLiteral("indexRoots")] = queueRoots;
+    cachedIndexHealth[QStringLiteral("queueSource")] = queueSource;
+    cachedIndexHealth[QStringLiteral("peerDataState")] = indexerCache.state;
+
+    const QJsonObject cachedInferenceHealth = inferenceHealthSnapshot();
+    cachedIndexHealth[QStringLiteral("inferenceServiceConnected")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRoleAdmissionByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleAdmissionByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceQueueDepthByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTimeoutCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTimeoutCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceFallbackCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceFallbackCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceTimeoutCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceTimeoutCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceFailureCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceFailureCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceRestartCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceRestartCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorStateByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorStateByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceBackoffMsByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceBackoffMsByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRestartBudgetExhaustedByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTransportConnectedByLane")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTransportLaneIsolationEnabled")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeRequested")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeEffective")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeCoerced")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
+        cachedInferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
+
+    QString overallStatus = cachedIndexHealth.value(QStringLiteral("overallStatus")).toString();
+    QString healthStatusReason =
+        cachedIndexHealth.value(QStringLiteral("healthStatusReason")).toString();
+    if (queueRebuildStatus == QLatin1String("aborted")
+        || queueRebuildStatus == QLatin1String("failed")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_rebuild_failed");
+    } else if (includeIndexerQueueProbe && indexerCache.state == QLatin1String("unavailable")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_unavailable");
+    } else if (includeIndexerQueueProbe && indexerCache.state == QLatin1String("stale")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_peer_stale");
+    }
+    cachedIndexHealth[QStringLiteral("overallStatus")] = overallStatus;
+    cachedIndexHealth[QStringLiteral("healthStatusReason")] = healthStatusReason;
+
+    const double contentCoveragePct =
+        cachedIndexHealth.value(QStringLiteral("contentCoveragePct")).toDouble(100.0);
+    const bool lowCoverage = contentCoveragePct < 50.0;
+    const bool highBacklog = queuePending > 2000;
+    bool includesHomeRoot = false;
+    const QString homePath = QDir::homePath();
+    for (const QJsonValue& rootValue : queueRoots) {
+        if (rootValue.toString() == homePath) {
+            includesHomeRoot = true;
+            break;
+        }
+    }
+    const bool highRootFanout = queueRoots.size() > 32;
+    if (includesHomeRoot && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("curated_roots_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots include the full home directory while coverage is low or backlog is high.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Prefer curated roots (Documents/Projects/Downloads) to reduce lexical noise and improve extraction coverage.");
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        cachedIndexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    } else if (highRootFanout && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("root_fanout_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots fan out across many directories while backlog is high or coverage is low.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Reduce roots to high-signal folders (for example Documents/Desktop/Downloads) to improve quality and indexing throughput.");
+        advisory[QStringLiteral("rootCount")] = queueRoots.size();
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        cachedIndexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    }
+
+    cachedIndexHealth[QStringLiteral("snapshotId")] = QStringLiteral("%1:%2")
+        .arg(qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID"),
+             QString::number(nowMs));
+    cachedIndexHealth[QStringLiteral("snapshotTimeMs")] = nowMs;
+    cachedIndexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    cachedIndexHealth[QStringLiteral("instanceId")] =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+    cachedIndexHealth[QStringLiteral("snapshotVersion")] = 2;
+
+    QJsonObject serviceHealth;
+    serviceHealth[QStringLiteral("indexerRunning")] = !indexerCache.payload.isEmpty();
+    serviceHealth[QStringLiteral("extractorRunning")] = true;
+    serviceHealth[QStringLiteral("queryServiceRunning")] = true;
+    serviceHealth[QStringLiteral("inferenceServiceRunning")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    serviceHealth[QStringLiteral("uptime")] = 0;
+
+    QJsonObject result;
+    result[QStringLiteral("indexHealth")] = cachedIndexHealth;
+    result[QStringLiteral("serviceHealth")] = serviceHealth;
+    result[QStringLiteral("issues")] = QJsonArray();
+    result[QStringLiteral("snapshotVersion")] = 2;
+    return result;
+}
+
 QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndexerQueueProbe)
 {
+    requestDiagnosticsSummaryRefresh(false);
+    schedulePeerProbeRefresh(includeIndexerQueueProbe);
+
+    const QJsonObject mergedResult = buildMergedHealthResult(includeIndexerQueueProbe);
+    if (!mergedResult.isEmpty()) {
+        return IpcMessage::makeResponse(id, mergedResult);
+    }
+
+    return IpcMessage::makeError(id,
+                                 IpcErrorCode::ServiceUnavailable,
+                                 QStringLiteral("Health snapshot is unavailable"));
+
+#if 0
     {
     if (!ensureHealthDiagnosticsOpen()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
@@ -7073,6 +7668,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     result[QStringLiteral("issues")] = QJsonArray();
     result[QStringLiteral("snapshotVersion")] = 2;
     return IpcMessage::makeResponse(id, result);
+#endif
 }
 
 QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject& params)
@@ -7088,45 +7684,80 @@ QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject&
         offset = 0;
     }
 
+    requestDiagnosticsSummaryRefresh(false);
+    requestDiagnosticsDetailsRefresh(limit, offset, false);
+    schedulePeerProbeRefresh(true);
+
+    QJsonObject result = buildMergedHealthResult(/*includeIndexerQueueProbe=*/true);
+    if (result.isEmpty()) {
+        return IpcMessage::makeError(id,
+                                     IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Health snapshot is unavailable"));
+    }
+
+    const QString cacheKey = healthDetailsCacheKey(limit, offset);
+    HealthDetailsCache detailsCache;
     {
-    if (!ensureHealthDiagnosticsOpen()) {
-        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
-                                     QStringLiteral("Database is not available"));
+        std::unique_lock<std::mutex> lock(m_diagnosticsMutex);
+        auto captureDetails = [&]() {
+            const auto it = m_healthDetailsCache.constFind(cacheKey);
+            if (it == m_healthDetailsCache.constEnd()) {
+                detailsCache = HealthDetailsCache{};
+                detailsCache.limit = limit;
+                detailsCache.offset = offset;
+                return;
+            }
+            detailsCache = it.value();
+        };
+
+        captureDetails();
+        if ((detailsCache.details.isEmpty()
+             || snapshotStateForCache(detailsCache.snapshotTimeMs,
+                                      detailsCache.state,
+                                      detailsCache.refreshInFlight,
+                                      kHealthDetailsSnapshotTtlMs)
+                    != QLatin1String("fresh"))
+            && detailsCache.refreshInFlight) {
+            m_diagnosticsStateCv.wait_for(
+                lock,
+                std::chrono::milliseconds(kHealthDetailsRequestBudgetMs),
+                [&]() {
+                    const auto it = m_healthDetailsCache.constFind(cacheKey);
+                    return m_shuttingDown.load()
+                        || it == m_healthDetailsCache.constEnd()
+                        || !it->refreshInFlight
+                        || !it->details.isEmpty();
+                });
+            captureDetails();
+        }
     }
 
-    const QJsonObject summaryResponse = handleGetHealth(id);
-    if (summaryResponse.value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        return summaryResponse;
+    QJsonObject details = detailsCache.details;
+    if (details.isEmpty()) {
+        details[QStringLiteral("failures")] = QJsonArray();
+        details[QStringLiteral("failuresLimit")] = limit;
+        details[QStringLiteral("failuresOffset")] = offset;
+        details[QStringLiteral("criticalFailureRows")] = 0;
+        details[QStringLiteral("expectedGapFailureRows")] = 0;
+        details[QStringLiteral("processStats")] = QJsonObject();
+        details[QStringLiteral("queryStats")] = QJsonObject();
+        details[QStringLiteral("bsignore")] = runtimeMirrorSnapshot().bsignoreStatus;
     }
-    const QJsonObject summaryResult = summaryResponse.value(QStringLiteral("result")).toObject();
-    const FailureDetailsPage failurePage =
-        loadFailureDetailsPageFromSqlite(m_healthDiagnosticsDb, limit, offset);
+    details[QStringLiteral("detailsState")] =
+        snapshotStateForCache(detailsCache.snapshotTimeMs,
+                              detailsCache.state,
+                              detailsCache.refreshInFlight,
+                              kHealthDetailsSnapshotTtlMs);
+    details[QStringLiteral("detailsTimeMs")] = detailsCache.snapshotTimeMs;
+    details[QStringLiteral("detailsLagMs")] =
+        detailsCache.snapshotTimeMs > 0
+            ? (QDateTime::currentMSecsSinceEpoch() - detailsCache.snapshotTimeMs)
+            : -1;
 
-    QJsonObject processStats;
-    processStats[QStringLiteral("query")] = processStatsForService(QStringLiteral("query"));
-    processStats[QStringLiteral("indexer")] = processStatsForService(QStringLiteral("indexer"));
-    processStats[QStringLiteral("extractor")] = processStatsForService(QStringLiteral("extractor"));
+    result[QStringLiteral("details")] = details;
+    return IpcMessage::makeResponse(id, result);
 
-    QJsonObject details;
-    details[QStringLiteral("failures")] = failurePage.failures;
-    details[QStringLiteral("failuresLimit")] = limit;
-    details[QStringLiteral("failuresOffset")] = offset;
-    details[QStringLiteral("criticalFailureRows")] = failurePage.criticalRows;
-    details[QStringLiteral("expectedGapFailureRows")] = failurePage.expectedGapRows;
-    details[QStringLiteral("processStats")] = processStats;
-    details[QStringLiteral("queryStats")] = queryStatsSnapshot();
-    details[QStringLiteral("bsignore")] = runtimeMirrorSnapshot().bsignoreStatus;
-
-    QJsonObject fastResult;
-    fastResult[QStringLiteral("indexHealth")] =
-        summaryResult.value(QStringLiteral("indexHealth")).toObject();
-    fastResult[QStringLiteral("serviceHealth")] =
-        summaryResult.value(QStringLiteral("serviceHealth")).toObject();
-    fastResult[QStringLiteral("issues")] =
-        summaryResult.value(QStringLiteral("issues")).toArray();
-    fastResult[QStringLiteral("details")] = details;
-    return IpcMessage::makeResponse(id, fastResult);
-    }
+#if 0
 
     const QJsonObject summaryResponse = handleGetHealth(id);
     if (summaryResponse.value(QStringLiteral("type")).toString() == QLatin1String("error")) {
@@ -7204,6 +7835,7 @@ QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject&
     result[QStringLiteral("issues")] = summaryResult.value(QStringLiteral("issues")).toArray();
     result[QStringLiteral("details")] = details;
     return IpcMessage::makeResponse(id, result);
+#endif
 }
 
 QJsonObject QueryService::handleRecordFeedback(uint64_t id, const QJsonObject& params)

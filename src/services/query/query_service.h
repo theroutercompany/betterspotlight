@@ -97,6 +97,8 @@ private:
         QJsonObject indexHealth;
         qint64 snapshotTimeMs = 0;
         QString state = QStringLiteral("unavailable");
+        bool refreshInFlight = false;
+        uint64_t refreshGeneration = 0;
     };
 
     struct PeerProbeCache {
@@ -104,6 +106,29 @@ private:
         qint64 snapshotTimeMs = 0;
         QString state = QStringLiteral("unavailable");
         bool refreshInFlight = false;
+    };
+
+    struct HealthDetailsCache {
+        QJsonObject details;
+        qint64 snapshotTimeMs = 0;
+        QString state = QStringLiteral("unavailable");
+        bool refreshInFlight = false;
+        uint64_t refreshGeneration = 0;
+        int limit = 0;
+        int offset = 0;
+    };
+
+    struct DiagnosticsTask {
+        enum class Kind {
+            RefreshSummary,
+            RefreshDetails,
+            Stop,
+        };
+
+        Kind kind = Kind::RefreshSummary;
+        int limit = 0;
+        int offset = 0;
+        uint64_t generation = 0;
     };
 
     struct VectorRebuildCutoverPayload {
@@ -243,10 +268,14 @@ private:
     void resolveDataPathsIfNeeded();
     bool ensureM2ModulesInitialized();
     bool ensureTypoLexiconReady();
-    bool ensureHealthDiagnosticsOpen();
-    void closeHealthDiagnostics();
     void startRequestExecutionLanes();
     void stopRequestExecutionLanes();
+    void startDiagnosticsWorker();
+    void stopDiagnosticsWorker();
+    void diagnosticsWorkerLoop();
+    void requestDiagnosticsSummaryRefresh(bool force = false);
+    void requestDiagnosticsDetailsRefresh(int limit, int offset, bool force = false);
+    void invalidateDiagnosticsCaches(bool scheduleRefresh = true);
     void enqueueDefaultControlTask(std::function<void()> task);
     void enqueueRequestTask(RequestExecutionLane lane,
                             const QJsonObject& request,
@@ -274,8 +303,13 @@ private:
     void refreshInferencePeerProbe(bool force = false);
     RuntimeMirror runtimeMirrorSnapshot() const;
     void refreshRuntimeMirror();
-    void maybeRefreshLocalHealthSnapshot();
-    QJsonObject buildLocalHealthSnapshotFromDiagnostics();
+    void refreshLearningHealthCache();
+    QJsonObject cachedLearningHealthSnapshot() const;
+    QJsonObject buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagnosticsDb);
+    QJsonObject buildHealthDetailsPayloadFromDiagnostics(sqlite3* diagnosticsDb,
+                                                        int limit,
+                                                        int offset);
+    QJsonObject buildMergedHealthResult(bool includeIndexerQueueProbe);
     QJsonObject buildRuntimeSettingsSnapshot(sqlite3* db) const;
     QJsonArray buildModelManifestSnapshot(const QString& modelsDirResolved,
                                           const RuntimeMirror& runtimeMirror,
@@ -321,6 +355,7 @@ private:
     mutable std::mutex m_learningSchedulerMutex;
     QTimer m_learningSchedulerTimer;
     QTimer m_peerProbeRefreshTimer;
+    QTimer m_diagnosticsRefreshTimer;
     qint64 m_learningSchedulerLastTickAtMs = 0;
     qint64 m_learningSchedulerLastPromotedAtMs = 0;
     qint64 m_learningSchedulerTicks = 0;
@@ -336,13 +371,22 @@ private:
     std::thread m_healthRequestThread;
     bool m_stopRequestLanes = false;
     std::atomic<bool> m_shuttingDown{false};
-    sqlite3* m_healthDiagnosticsDb = nullptr;
     mutable std::mutex m_runtimeMirrorMutex;
     RuntimeMirror m_runtimeMirror;
     mutable std::mutex m_peerProbeMutex;
     PeerProbeCache m_indexerPeerCache;
     PeerProbeCache m_inferencePeerCache;
+    mutable std::mutex m_diagnosticsMutex;
+    std::condition_variable m_diagnosticsCv;
+    std::condition_variable m_diagnosticsStateCv;
+    std::deque<DiagnosticsTask> m_diagnosticsQueue;
+    std::thread m_diagnosticsThread;
+    bool m_stopDiagnosticsWorker = false;
+    uint64_t m_diagnosticsGeneration = 1;
     LocalHealthSnapshotCache m_localHealthSnapshotCache;
+    QHash<QString, HealthDetailsCache> m_healthDetailsCache;
+    mutable std::mutex m_learningHealthCacheMutex;
+    QJsonObject m_learningHealthCache;
     std::unique_ptr<SocketClient> m_indexerHealthClient;
     bool m_inferenceServiceConnected = false;
     bool m_inferenceLiveLaneConnected = false;
