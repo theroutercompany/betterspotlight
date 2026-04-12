@@ -4,24 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
 BUILD_LAUNCH_SCRIPT="${ROOT_DIR}/scripts/dev/build_launch.sh"
+PREFLIGHT_SCRIPT="${ROOT_DIR}/scripts/dev/verify_preflight.py"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
 BUILD_DIR_DEFAULT="${ROOT_DIR}/build-stabilize"
 
 BUILD_DIR="${BS_DEV_VERIFY_BUILD_DIR:-${BUILD_DIR_DEFAULT}}"
 BUILD_TYPE="${BS_DEV_VERIFY_BUILD_TYPE:-Release}"
+PROFILE="${BS_DEV_VERIFY_PROFILE:-core-hermetic}"
 CLEAN_BUILD=1
 SKIP_LAUNCH=0
+ALLOW_DEGRADED=0
 
 usage() {
     cat <<'EOF'
-Usage: scripts/dev/verify_pipeline.sh [--build-dir PATH] [--build-type TYPE] [--no-clean] [--skip-launch]
+Usage: scripts/dev/verify_pipeline.sh [--build-dir PATH] [--build-type TYPE] [--profile PROFILE] [--allow-degraded] [--no-clean] [--skip-launch]
 
 Runs the full default verification flow for BetterSpotlight:
 1. validates the dev environment,
-2. configures/builds the runtime plus the full declared verification test inventory,
-3. checks that every declared CTest executable was actually materialized,
-4. runs the default pass/fail verification labels (unit, integration, service_ipc, docs_lint, relevance),
-4. performs a startup smoke check by launching the app and helpers unless --skip-launch is used.
+2. checks docs parity plus an explicit capability/runtime-mode matrix preflight,
+3. configures/builds the runtime plus the full declared verification test inventory,
+4. checks that every declared CTest executable was materialized and dylib links resolve,
+5. runs verification labels based on PROFILE:
+   - core-hermetic: unit|integration|service_ipc|docs_lint|relevance
+   - extended-capabilities: same labels, stricter capability requirements
+   - stress: core-hermetic plus relevance_stress
+6. performs a startup smoke check by launching the app and helpers unless --skip-launch is used.
 EOF
 }
 
@@ -46,6 +53,15 @@ while [[ $# -gt 0 ]]; do
             BUILD_TYPE="$2"
             shift 2
             ;;
+        --profile)
+            [[ $# -ge 2 ]] || fail "--profile requires a value"
+            PROFILE="$2"
+            shift 2
+            ;;
+        --allow-degraded)
+            ALLOW_DEGRADED=1
+            shift
+            ;;
         --no-clean)
             CLEAN_BUILD=0
             shift
@@ -65,11 +81,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -x "${SETUP_SCRIPT}" ]] || fail "setup script is missing or not executable: ${SETUP_SCRIPT}"
-[[ -x "${BUILD_LAUNCH_SCRIPT}" ]] || fail "build launch script is missing or not executable: ${BUILD_LAUNCH_SCRIPT}"
+[[ -x "${PREFLIGHT_SCRIPT}" ]] || fail "preflight helper is missing or not executable: ${PREFLIGHT_SCRIPT}"
 
-"${SETUP_SCRIPT}" --write-env-file "${ENV_FILE}"
+case "${PROFILE}" in
+    core-hermetic|extended-capabilities|stress)
+        ;;
+    *)
+        fail "unsupported profile '${PROFILE}' (expected core-hermetic|extended-capabilities|stress)"
+        ;;
+esac
+
+SETUP_ARGS=(--write-env-file "${ENV_FILE}")
+if [[ "${ALLOW_DEGRADED}" -eq 1 ]]; then
+    SETUP_ARGS+=(--allow-degraded-pdf)
+fi
+"${SETUP_SCRIPT}" "${SETUP_ARGS[@]}"
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
+
+log "Checking docs parity..."
+"${PREFLIGHT_SCRIPT}" docs-parity --root-dir "${ROOT_DIR}"
+
+log "Running capability/runtime-mode preflight..."
+CAPABILITY_ARGS=(capabilities --root-dir "${ROOT_DIR}" --profile "${PROFILE}")
+if [[ "${ALLOW_DEGRADED}" -eq 1 ]]; then
+    CAPABILITY_ARGS+=(--allow-degraded)
+fi
+"${PREFLIGHT_SCRIPT}" "${CAPABILITY_ARGS[@]}"
 
 if [[ "${CLEAN_BUILD}" -eq 1 ]]; then
     rm -rf "${BUILD_DIR}"
@@ -97,6 +135,13 @@ log "Configuring ${BUILD_DIR} (${BUILD_TYPE})..."
 
 log "Building full default verification target..."
 "${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target betterspotlight-default-verification
+
+log "Checking configured build contract for profile '${PROFILE}'..."
+BUILD_CONTRACT_ARGS=(build-contract --build-dir "${BUILD_DIR}" --profile "${PROFILE}")
+if [[ "${ALLOW_DEGRADED}" -eq 1 ]]; then
+    BUILD_CONTRACT_ARGS+=(--allow-degraded)
+fi
+"${PREFLIGHT_SCRIPT}" "${BUILD_CONTRACT_ARGS[@]}"
 
 log "Checking CTest inventory for missing executables..."
 python3 - "${BUILD_DIR}" <<'PY'
@@ -128,9 +173,12 @@ if missing:
     sys.exit(1)
 PY
 
+log "Checking binary link-health..."
+"${PREFLIGHT_SCRIPT}" link-health --build-dir "${BUILD_DIR}"
+
 DEFAULT_LABEL_REGEX='^(unit|integration|service_ipc|docs_lint|relevance)$'
 EXCLUDE_LABEL_REGEX='^relevance_stress$'
-log "Running default verification labels..."
+log "Running verification labels for profile '${PROFILE}'..."
 ctest \
     --test-dir "${BUILD_DIR}" \
     --output-on-failure \
@@ -138,7 +186,17 @@ ctest \
     -L "${DEFAULT_LABEL_REGEX}" \
     -LE "${EXCLUDE_LABEL_REGEX}"
 
+if [[ "${PROFILE}" == "stress" ]]; then
+    ctest \
+        --test-dir "${BUILD_DIR}" \
+        --output-on-failure \
+        --timeout 300 \
+        -L "^relevance_stress$"
+fi
+
 if [[ "${SKIP_LAUNCH}" -eq 0 ]]; then
+    [[ -x "${BUILD_LAUNCH_SCRIPT}" ]] \
+        || fail "startup smoke requested but build launch script is missing: ${BUILD_LAUNCH_SCRIPT} (use --skip-launch)"
     log "Running startup smoke check..."
     "${BUILD_LAUNCH_SCRIPT}" \
         --build-dir "${BUILD_DIR}" \

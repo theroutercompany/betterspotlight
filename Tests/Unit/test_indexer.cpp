@@ -198,6 +198,8 @@ void TestIndexer::testNonExtractableAndExtractionFailurePaths()
     const auto unknownAvailability = store.getItemAvailability(unknownRow->id);
     QVERIFY(unknownAvailability.has_value());
     QVERIFY(!unknownAvailability->contentAvailable);
+    QVERIFY(unknownAvailability->lastExtractionError.isEmpty());
+    QVERIFY(unknownAvailability->availabilityStatus != QStringLiteral("extract_failed"));
 
     extractor.setMaxFileSizeBytes(1);
     const QString oversizedPath = QDir(tempDir.path()).filePath(QStringLiteral("oversized.txt"));

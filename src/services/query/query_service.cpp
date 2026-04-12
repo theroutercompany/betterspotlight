@@ -540,6 +540,103 @@ std::optional<QString> readSettingFromSqlite(sqlite3* db, const QString& key)
     return value;
 }
 
+struct PersistedVectorGenerationSnapshot {
+    QString activeGeneration;
+    QString targetGeneration;
+    QString source = QStringLiteral("runtime_fallback");
+    QString consistency = QStringLiteral("consistent");
+    QString consistencyReason;
+    bool hasSettingsActive = false;
+    bool hasSettingsTarget = false;
+    bool hasStateActive = false;
+    QString stateActiveGeneration;
+    QString stateActiveState;
+    double stateActiveProgressPct = 0.0;
+};
+
+PersistedVectorGenerationSnapshot resolvePersistedVectorGenerationSnapshot(
+    sqlite3* db,
+    const QString& runtimeActiveGeneration,
+    const QString& runtimeTargetGeneration,
+    const std::function<QString(const QString&)>& indexPathForGeneration,
+    const std::function<QString(const QString&)>& metaPathForGeneration)
+{
+    PersistedVectorGenerationSnapshot snapshot;
+
+    const auto settingsActive =
+        readSettingFromSqlite(db, QStringLiteral("activeVectorGeneration"));
+    const auto settingsTarget =
+        readSettingFromSqlite(db, QStringLiteral("targetVectorGeneration"));
+
+    if (settingsActive.has_value() && !settingsActive->trimmed().isEmpty()) {
+        snapshot.activeGeneration = settingsActive->trimmed();
+        snapshot.hasSettingsActive = true;
+        snapshot.source = QStringLiteral("settings");
+    }
+    if (settingsTarget.has_value() && !settingsTarget->trimmed().isEmpty()) {
+        snapshot.targetGeneration = settingsTarget->trimmed();
+        snapshot.hasSettingsTarget = true;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    if (db
+        && sqlite3_prepare_v2(
+               db,
+               "SELECT generation_id, state, progress_pct "
+               "FROM vector_generation_state WHERE is_active = 1 "
+               "ORDER BY updated_at DESC LIMIT 1",
+               -1,
+               &stmt,
+               nullptr)
+               == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* generation =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            const char* state =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            snapshot.stateActiveGeneration = generation
+                ? QString::fromUtf8(generation).trimmed()
+                : QString();
+            snapshot.stateActiveState = state
+                ? QString::fromUtf8(state).trimmed()
+                : QString();
+            snapshot.stateActiveProgressPct = sqlite3_column_double(stmt, 2);
+            snapshot.hasStateActive = !snapshot.stateActiveGeneration.isEmpty();
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (snapshot.activeGeneration.isEmpty() && snapshot.hasStateActive) {
+        snapshot.activeGeneration = snapshot.stateActiveGeneration;
+        snapshot.source = QStringLiteral("vector_generation_state");
+    }
+    if (snapshot.activeGeneration.isEmpty()) {
+        snapshot.activeGeneration = runtimeActiveGeneration;
+    }
+    if (snapshot.targetGeneration.isEmpty()) {
+        snapshot.targetGeneration = runtimeTargetGeneration;
+    }
+
+    if (snapshot.hasSettingsActive && snapshot.hasStateActive
+        && snapshot.activeGeneration != snapshot.stateActiveGeneration) {
+        snapshot.consistency = QStringLiteral("settings_vs_state_mismatch");
+        snapshot.consistencyReason =
+            QStringLiteral("settings_active_generation_disagrees_with_generation_state");
+        return snapshot;
+    }
+
+    const QString indexPath = indexPathForGeneration(snapshot.activeGeneration);
+    const QString metaPath = metaPathForGeneration(snapshot.activeGeneration);
+    if (!snapshot.activeGeneration.trimmed().isEmpty()
+        && (!QFileInfo::exists(indexPath) || !QFileInfo::exists(metaPath))) {
+        snapshot.consistency = QStringLiteral("state_vs_files_mismatch");
+        snapshot.consistencyReason =
+            QStringLiteral("active_generation_files_missing");
+    }
+
+    return snapshot;
+}
+
 IndexHealth readIndexHealthFromSqlite(sqlite3* db)
 {
     IndexHealth health;
@@ -1893,6 +1990,14 @@ std::optional<QJsonObject> QueryService::sendInferenceRequest(InferenceLane lane
         recordInferenceTimeout(roleForMetrics);
         recordInferenceFallback(roleForMetrics);
         clientForLane(lane)->disconnect();
+        const QString effectiveCancelToken = !cancelToken.trimmed().isEmpty()
+            ? cancelToken.trimmed()
+            : requestParams.value(QStringLiteral("requestId")).toString().trimmed();
+        if (!effectiveCancelToken.isEmpty() && lane != InferenceLane::Health) {
+            const QString requestIdHint =
+                requestParams.value(QStringLiteral("requestId")).toString();
+            sendInferenceCancelBestEffort(effectiveCancelToken, requestIdHint);
+        }
         return std::nullopt;
     }
 
@@ -1927,6 +2032,39 @@ std::optional<QJsonObject> QueryService::sendInferenceRequest(InferenceLane lane
     recordInferenceConnected(lane, true);
     payload[QStringLiteral("transportLane")] = inferenceLaneName(lane);
     return payload;
+}
+
+void QueryService::sendInferenceCancelBestEffort(const QString& cancelToken,
+                                                 const QString& requestIdHint)
+{
+    const QString normalizedToken = cancelToken.trimmed();
+    if (normalizedToken.isEmpty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_inferenceRpcMutexHealth);
+    if (!ensureInferenceClientConnected(InferenceLane::Health) || !m_inferenceHealthClient) {
+        return;
+    }
+
+    QJsonObject params;
+    params[QStringLiteral("cancelToken")] = normalizedToken;
+    if (!requestIdHint.trimmed().isEmpty()) {
+        params[QStringLiteral("requestId")] = QStringLiteral("cancel-%1").arg(requestIdHint);
+    } else {
+        params[QStringLiteral("requestId")] = QStringLiteral("cancel-%1").arg(
+            QDateTime::currentMSecsSinceEpoch());
+    }
+
+    auto response = m_inferenceHealthClient->sendRequest(
+        QStringLiteral("cancel_request"),
+        params,
+        200);
+    if (!response.has_value()
+        || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        m_inferenceHealthClient->disconnect();
+        recordInferenceConnected(InferenceLane::Health, false);
+    }
 }
 
 void QueryService::recordInferenceTimeout(const QString& role)
@@ -2445,11 +2583,22 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagn
     }
 
     const RuntimeMirror runtimeMirror = runtimeMirrorSnapshot();
+    const PersistedVectorGenerationSnapshot generationSnapshot =
+        resolvePersistedVectorGenerationSnapshot(
+            diagnosticsDb,
+            runtimeMirror.activeVectorGeneration,
+            runtimeMirror.targetVectorGeneration,
+            [this](const QString& generation) {
+                return vectorIndexPathForGeneration(generation);
+            },
+            [this](const QString& generation) {
+                return vectorMetaPathForGeneration(generation);
+            });
     IndexHealth health = readIndexHealthFromSqlite(diagnosticsDb);
     const int totalEmbeddedVectors = countMappingsForGenerationFromSqlite(
-        diagnosticsDb, runtimeMirror.activeVectorGeneration);
+        diagnosticsDb, generationSnapshot.activeGeneration);
     const qint64 vectorIndexSize =
-        QFileInfo(vectorIndexPathForGeneration(runtimeMirror.activeVectorGeneration)).size();
+        QFileInfo(vectorIndexPathForGeneration(generationSnapshot.activeGeneration)).size();
     const double contentCoveragePct = health.totalIndexedItems > 0
         ? 100.0 * static_cast<double>(health.totalIndexedItems - health.itemsWithoutContent)
               / static_cast<double>(health.totalIndexedItems)
@@ -2503,8 +2652,8 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagn
         : QStringLiteral("required_models_unavailable");
 
     const bool vectorMigrationRequired =
-        !runtimeMirror.targetVectorGeneration.isEmpty()
-        && runtimeMirror.activeVectorGeneration != runtimeMirror.targetVectorGeneration;
+        !generationSnapshot.targetGeneration.isEmpty()
+        && generationSnapshot.activeGeneration != generationSnapshot.targetGeneration;
     const QString vectorGenerationState = vectorMigrationRequired
         ? QStringLiteral("migration_required")
         : QStringLiteral("ready");
@@ -2524,6 +2673,9 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagn
     } else if (health.criticalFailures > 0) {
         overallStatus = QStringLiteral("degraded");
         healthStatusReason = QStringLiteral("degraded_critical_failures");
+    } else if (generationSnapshot.consistency != QLatin1String("consistent")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = generationSnapshot.consistency;
     }
 
     QJsonObject indexHealth;
@@ -2558,12 +2710,17 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagn
     indexHealth[QStringLiteral("vectorMigrationState")] = migrationState;
     indexHealth[QStringLiteral("vectorMigrationProgressPct")] = migrationProgressPct;
     indexHealth[QStringLiteral("vectorGenerationActive")] =
-        runtimeMirror.activeVectorGeneration;
+        generationSnapshot.activeGeneration;
     indexHealth[QStringLiteral("vectorGenerationTarget")] =
-        runtimeMirror.targetVectorGeneration;
+        generationSnapshot.targetGeneration;
     indexHealth[QStringLiteral("vectorGenerationState")] = vectorGenerationState;
     indexHealth[QStringLiteral("vectorMigrationRequired")] = vectorMigrationRequired;
     indexHealth[QStringLiteral("vectorMigrationReason")] = vectorMigrationReason;
+    indexHealth[QStringLiteral("vectorGenerationSource")] = generationSnapshot.source;
+    indexHealth[QStringLiteral("vectorGenerationConsistency")] =
+        generationSnapshot.consistency;
+    indexHealth[QStringLiteral("vectorGenerationConsistencyReason")] =
+        generationSnapshot.consistencyReason;
     indexHealth[QStringLiteral("activeVectorModelId")] = runtimeMirror.activeVectorModelId;
     indexHealth[QStringLiteral("activeVectorProvider")] = runtimeMirror.activeVectorProvider;
     indexHealth[QStringLiteral("activeVectorDimensions")] = runtimeMirror.activeVectorDimensions;
@@ -2790,46 +2947,6 @@ void QueryService::applyVectorRebuildCutover(const VectorRebuildCutoverPayload& 
         }
     }
 
-    if (!m_store->setSetting(QStringLiteral("nextHnswLabel"),
-                             QString::number(primaryIndex->nextLabel()))
-        || !m_store->setSetting(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))
-        || !m_store->setSetting(QStringLiteral("activeVectorGeneration"),
-                                payload.targetGeneration)
-        || !m_store->setSetting(QStringLiteral("vectorMigrationState"),
-                                QStringLiteral("cutover-complete"))
-        || !m_store->setSetting(QStringLiteral("vectorMigrationProgressPct"),
-                                QStringLiteral("100"))) {
-        failCutover(QStringLiteral("Failed to persist vector cutover settings"));
-        return;
-    }
-
-    VectorStore::GenerationState activeState;
-    activeState.generationId = payload.targetGeneration.toStdString();
-    activeState.modelId = payload.modelId.toStdString();
-    activeState.dimensions = payload.dimensions;
-    activeState.provider = payload.provider.toStdString();
-    activeState.state = "active";
-    activeState.progressPct = 100.0;
-    activeState.active = true;
-    if (!m_vectorStore->upsertGenerationState(activeState)) {
-        failCutover(QStringLiteral("Failed to persist active vector generation"));
-        return;
-    }
-    if (payload.hasFastIndex) {
-        VectorStore::GenerationState fastState;
-        fastState.generationId = payload.fastGeneration.toStdString();
-        fastState.modelId = payload.fastModelId.toStdString();
-        fastState.dimensions = payload.fastDimensions;
-        fastState.provider = payload.fastProvider.toStdString();
-        fastState.state = "active";
-        fastState.progressPct = 100.0;
-        fastState.active = false;
-        if (!m_vectorStore->upsertGenerationState(fastState)) {
-            failCutover(QStringLiteral("Failed to persist fast vector generation"));
-            return;
-        }
-    }
-
     QString persistError;
     auto persistFile = [&](const QString& tmpPath, const QString& finalPath) {
         if (!persistError.isEmpty()) {
@@ -2851,6 +2968,64 @@ void QueryService::applyVectorRebuildCutover(const VectorRebuildCutoverPayload& 
     }
     if (!persistError.isEmpty()) {
         failCutover(persistError);
+        return;
+    }
+
+    if (!m_store->beginTransaction()) {
+        failCutover(QStringLiteral("Failed to start vector cutover transaction"));
+        return;
+    }
+
+    const auto rollbackCutover = [&]() {
+        m_store->rollbackTransaction();
+    };
+
+    if (!m_store->setSetting(QStringLiteral("nextHnswLabel"),
+                             QString::number(primaryIndex->nextLabel()))
+        || !m_store->setSetting(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))
+        || !m_store->setSetting(QStringLiteral("activeVectorGeneration"),
+                                payload.targetGeneration)
+        || !m_store->setSetting(QStringLiteral("vectorMigrationState"),
+                                QStringLiteral("cutover-complete"))
+        || !m_store->setSetting(QStringLiteral("vectorMigrationProgressPct"),
+                                QStringLiteral("100"))) {
+        rollbackCutover();
+        failCutover(QStringLiteral("Failed to persist vector cutover settings"));
+        return;
+    }
+
+    VectorStore::GenerationState activeState;
+    activeState.generationId = payload.targetGeneration.toStdString();
+    activeState.modelId = payload.modelId.toStdString();
+    activeState.dimensions = payload.dimensions;
+    activeState.provider = payload.provider.toStdString();
+    activeState.state = "active";
+    activeState.progressPct = 100.0;
+    activeState.active = true;
+    if (!m_vectorStore->upsertGenerationState(activeState)) {
+        rollbackCutover();
+        failCutover(QStringLiteral("Failed to persist active vector generation"));
+        return;
+    }
+    if (payload.hasFastIndex) {
+        VectorStore::GenerationState fastState;
+        fastState.generationId = payload.fastGeneration.toStdString();
+        fastState.modelId = payload.fastModelId.toStdString();
+        fastState.dimensions = payload.fastDimensions;
+        fastState.provider = payload.fastProvider.toStdString();
+        fastState.state = "active";
+        fastState.progressPct = 100.0;
+        fastState.active = false;
+        if (!m_vectorStore->upsertGenerationState(fastState)) {
+            rollbackCutover();
+            failCutover(QStringLiteral("Failed to persist fast vector generation"));
+            return;
+        }
+    }
+
+    if (!m_store->commitTransaction()) {
+        rollbackCutover();
+        failCutover(QStringLiteral("Failed to commit vector cutover transaction"));
         return;
     }
 
@@ -5963,22 +6138,6 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
         localCache = m_localHealthSnapshotCache;
     }
 
-    if (localCache.indexHealth.isEmpty()) {
-        return QJsonObject();
-    }
-
-    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    QJsonObject cachedIndexHealth = localCache.indexHealth;
-    cachedIndexHealth[QStringLiteral("queryHealthSnapshotState")] =
-        snapshotStateForCache(localCache.snapshotTimeMs,
-                              localCache.state,
-                              localCache.refreshInFlight,
-                              kLocalHealthSnapshotTtlMs);
-    cachedIndexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] =
-        localCache.snapshotTimeMs;
-    cachedIndexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
-        localCache.snapshotTimeMs > 0 ? (nowMs - localCache.snapshotTimeMs) : -1;
-
     PeerProbeCache indexerCache;
     PeerProbeCache inferenceCache;
     {
@@ -5986,6 +6145,78 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
         indexerCache = m_indexerPeerCache;
         inferenceCache = m_inferencePeerCache;
     }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const QString localSnapshotState = snapshotStateForCache(localCache.snapshotTimeMs,
+                                                             localCache.state,
+                                                             localCache.refreshInFlight,
+                                                             kLocalHealthSnapshotTtlMs);
+    const QJsonObject cachedInferenceHealth = inferenceHealthSnapshot();
+
+    if (localCache.indexHealth.isEmpty()) {
+        resolveDataPathsIfNeeded();
+        if (!m_dbPath.isEmpty() && QFileInfo::exists(m_dbPath)) {
+            return QJsonObject();
+        }
+
+        QJsonObject peerProbeStateByService;
+        peerProbeStateByService[QStringLiteral("indexer")] = indexerCache.state;
+        peerProbeStateByService[QStringLiteral("inference")] = inferenceCache.state;
+        QJsonObject peerProbeTimeMsByService;
+        peerProbeTimeMsByService[QStringLiteral("indexer")] = indexerCache.snapshotTimeMs;
+        peerProbeTimeMsByService[QStringLiteral("inference")] = inferenceCache.snapshotTimeMs;
+
+        QJsonObject indexHealth;
+        indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("degraded");
+        indexHealth[QStringLiteral("healthStatusReason")] =
+            QStringLiteral("health_snapshot_unavailable");
+        indexHealth[QStringLiteral("queryHealthSnapshotState")] = localSnapshotState;
+        indexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] = localCache.snapshotTimeMs;
+        indexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
+            localCache.snapshotTimeMs > 0 ? (nowMs - localCache.snapshotTimeMs) : -1;
+        indexHealth[QStringLiteral("peerProbeStateByService")] = peerProbeStateByService;
+        indexHealth[QStringLiteral("peerProbeTimeMsByService")] = peerProbeTimeMsByService;
+        indexHealth[QStringLiteral("queueSource")] = QStringLiteral("unavailable");
+        indexHealth[QStringLiteral("peerDataState")] = indexerCache.state;
+        indexHealth[QStringLiteral("inferenceServiceConnected")] =
+            cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+        indexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+            cachedInferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+        indexHealth[QStringLiteral("inferenceRoleStateReasonByModel")] =
+            cachedInferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+        indexHealth[QStringLiteral("inferenceTransportConnectedByLane")] =
+            cachedInferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+        indexHealth[QStringLiteral("snapshotId")] = QStringLiteral("%1:%2")
+            .arg(qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID"),
+                 QString::number(nowMs));
+        indexHealth[QStringLiteral("snapshotTimeMs")] = nowMs;
+        indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+        indexHealth[QStringLiteral("instanceId")] =
+            qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+        indexHealth[QStringLiteral("snapshotVersion")] = 2;
+
+        QJsonObject serviceHealth;
+        serviceHealth[QStringLiteral("indexerRunning")] = !indexerCache.payload.isEmpty();
+        serviceHealth[QStringLiteral("extractorRunning")] = true;
+        serviceHealth[QStringLiteral("queryServiceRunning")] = true;
+        serviceHealth[QStringLiteral("inferenceServiceRunning")] =
+            cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+        serviceHealth[QStringLiteral("uptime")] = 0;
+
+        QJsonObject result;
+        result[QStringLiteral("indexHealth")] = indexHealth;
+        result[QStringLiteral("serviceHealth")] = serviceHealth;
+        result[QStringLiteral("issues")] = QJsonArray();
+        result[QStringLiteral("snapshotVersion")] = 2;
+        return result;
+    }
+
+    QJsonObject cachedIndexHealth = localCache.indexHealth;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotState")] = localSnapshotState;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] =
+        localCache.snapshotTimeMs;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
+        localCache.snapshotTimeMs > 0 ? (nowMs - localCache.snapshotTimeMs) : -1;
 
     QJsonObject peerProbeStateByService;
     peerProbeStateByService[QStringLiteral("indexer")] = indexerCache.state;
@@ -6074,7 +6305,6 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
     cachedIndexHealth[QStringLiteral("queueSource")] = queueSource;
     cachedIndexHealth[QStringLiteral("peerDataState")] = indexerCache.state;
 
-    const QJsonObject cachedInferenceHealth = inferenceHealthSnapshot();
     cachedIndexHealth[QStringLiteral("inferenceServiceConnected")] =
         cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     cachedIndexHealth[QStringLiteral("inferenceRoleStatusByModel")] =

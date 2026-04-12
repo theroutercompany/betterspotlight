@@ -5,9 +5,12 @@
 
 #include <QDateTime>
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QTimer>
 #include <QStandardPaths>
 #include <QMetaObject>
 #include <cinttypes>
@@ -20,6 +23,8 @@
 namespace bs {
 
 namespace {
+
+constexpr int kBsignoreReloadDebounceMs = 250;
 
 QString effectivePipelineActorModeString()
 {
@@ -202,6 +207,7 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
     m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
     m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
     m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
+    m_bsignoreLastSignature = bsignoreSignature();
     configureBsignoreWatcher();
     m_pathRules.setExplicitIncludeRoots(roots);
 
@@ -549,6 +555,12 @@ void IndexerService::configureBsignoreWatcher()
         connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::directoryChanged,
                 this, &IndexerService::onBsignoreDirectoryChanged);
     }
+    if (!m_bsignoreReloadTimer) {
+        m_bsignoreReloadTimer = std::make_unique<QTimer>(this);
+        m_bsignoreReloadTimer->setSingleShot(true);
+        connect(m_bsignoreReloadTimer.get(), &QTimer::timeout,
+                this, &IndexerService::reloadBsignore);
+    }
 
     if (!m_bsignoreWatcher->files().isEmpty()) {
         m_bsignoreWatcher->removePaths(m_bsignoreWatcher->files());
@@ -567,16 +579,59 @@ void IndexerService::configureBsignoreWatcher()
     }
 }
 
+void IndexerService::scheduleBsignoreReload()
+{
+    if (m_bsignorePath.isEmpty()) {
+        return;
+    }
+    if (!m_bsignoreReloadTimer) {
+        configureBsignoreWatcher();
+    }
+    if (m_bsignoreReloadTimer) {
+        m_bsignoreReloadTimer->start(kBsignoreReloadDebounceMs);
+    }
+}
+
+QByteArray IndexerService::bsignoreSignature() const
+{
+    if (m_bsignorePath.isEmpty()) {
+        return QByteArrayLiteral("path:empty");
+    }
+
+    QFileInfo info(m_bsignorePath);
+    if (!info.exists() || !info.isFile()) {
+        return QByteArrayLiteral("file:missing");
+    }
+
+    QFile file(m_bsignorePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QByteArrayLiteral("file:unreadable:size:")
+               + QByteArray::number(info.size());
+    }
+
+    const QByteArray data = file.readAll();
+    const QByteArray digest = QCryptographicHash::hash(
+        data, QCryptographicHash::Sha256);
+    return QByteArrayLiteral("file:sha256:")
+           + digest.toHex();
+}
+
 void IndexerService::reloadBsignore()
 {
     if (m_bsignorePath.isEmpty()) {
         return;
     }
 
+    configureBsignoreWatcher();
+    const QByteArray currentSignature = bsignoreSignature();
+    if (currentSignature == m_bsignoreLastSignature) {
+        return;
+    }
+
     m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
     m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
     m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
-    configureBsignoreWatcher();
+    m_bsignoreLastSignature = currentSignature;
 
     QJsonObject params = bsignoreStatusJson();
     params[QStringLiteral("timestamp")] = static_cast<qint64>(QDateTime::currentMSecsSinceEpoch());
@@ -599,12 +654,12 @@ QJsonObject IndexerService::bsignoreStatusJson() const
 
 void IndexerService::onBsignorePathChanged(const QString& /*path*/)
 {
-    reloadBsignore();
+    scheduleBsignoreReload();
 }
 
 void IndexerService::onBsignoreDirectoryChanged(const QString& /*path*/)
 {
-    reloadBsignore();
+    scheduleBsignoreReload();
 }
 
 } // namespace bs

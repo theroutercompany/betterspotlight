@@ -40,6 +40,16 @@ bool isUnsupportedExtensionMessage(const std::optional<QString>& errorMessage)
         QStringLiteral("is not supported by extractor"), Qt::CaseInsensitive);
 }
 
+bool isNonRetryableOptionalExtractionFailure(const ExtractionResult& extraction)
+{
+    if (extraction.status != ExtractionResult::Status::UnsupportedFormat) {
+        return false;
+    }
+
+    return isOptionalExtractorUnavailableMessage(extraction.errorMessage)
+        || isUnsupportedExtensionMessage(extraction.errorMessage);
+}
+
 } // namespace
 
 // ── Construction ────────────────────────────────────────────
@@ -221,6 +231,9 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
             && extraction.content.has_value()) {
             break;
         }
+        if (isNonRetryableOptionalExtractionFailure(extraction)) {
+            break;
+        }
 
         ++attempts;
         if (attempts <= kMaxRetries) {
@@ -231,15 +244,12 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
 
     if (extraction.status != ExtractionResult::Status::Success
         || !extraction.content.has_value()) {
-        if (extraction.status == ExtractionResult::Status::UnsupportedFormat) {
-            if (isOptionalExtractorUnavailableMessage(extraction.errorMessage)
-                || isUnsupportedExtensionMessage(extraction.errorMessage)) {
-                // Optional extractor backend not available (e.g., Poppler/Tesseract):
-                // OR extension unsupported after text probe:
-                // keep metadata indexed without recording a hard failure.
-                prepared.nonExtractable = true;
-                return;
-            }
+        if (isNonRetryableOptionalExtractionFailure(extraction)) {
+            // Optional extractor backend not available (e.g., Poppler/Tesseract):
+            // OR extension unsupported after text probe:
+            // keep metadata indexed without recording a hard failure.
+            prepared.nonExtractable = true;
+            return;
         }
 
         prepared.failure = PreparedFailure{

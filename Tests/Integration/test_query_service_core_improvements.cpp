@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <sqlite3.h>
 
 namespace {
 
@@ -136,7 +137,49 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
 
     const QString docsDir = QDir(tempHome.path()).filePath(QStringLiteral("Documents"));
     QVERIFY(QDir().mkpath(docsDir));
-    QVERIFY(store.setSetting(QStringLiteral("activeVectorGeneration"), QStringLiteral("v1")));
+    QVERIFY(store.setSetting(QStringLiteral("activeVectorGeneration"), QStringLiteral("v2")));
+    QVERIFY(store.setSetting(QStringLiteral("targetVectorGeneration"), QStringLiteral("v2")));
+    {
+        sqlite3* db = nullptr;
+        QVERIFY(sqlite3_open_v2(dbPath.toUtf8().constData(),
+                                &db,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                                nullptr) == SQLITE_OK);
+        const auto closeDb = qScopeGuard([&]() {
+            if (db) {
+                sqlite3_close(db);
+            }
+        });
+        const char* sql = R"(
+            INSERT INTO vector_generation_state (
+                generation_id, model_id, dimensions, provider, state, progress_pct, is_active, updated_at
+            ) VALUES ('v2', 'bge-large-en-v1.5-f32', 1024, 'cpu', 'active', 100.0, 1, strftime('%s','now'))
+            ON CONFLICT(generation_id) DO UPDATE SET
+                model_id = excluded.model_id,
+                dimensions = excluded.dimensions,
+                provider = excluded.provider,
+                state = excluded.state,
+                progress_pct = excluded.progress_pct,
+                is_active = excluded.is_active,
+                updated_at = excluded.updated_at;
+            UPDATE vector_generation_state SET is_active = 0 WHERE generation_id != 'v2';
+        )";
+        char* errMsg = nullptr;
+        const int execRc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+        QVERIFY2(execRc == SQLITE_OK, errMsg ? errMsg : "Failed to seed vector_generation_state");
+        sqlite3_free(errMsg);
+    }
+    {
+        QFile vectorIndex(QDir(dataDir).filePath(QStringLiteral("vectors-v2.hnsw")));
+        QVERIFY(vectorIndex.open(QIODevice::WriteOnly));
+        vectorIndex.write("test");
+        vectorIndex.close();
+
+        QFile vectorMeta(QDir(dataDir).filePath(QStringLiteral("vectors-v2.meta")));
+        QVERIFY(vectorMeta.open(QIODevice::WriteOnly));
+        vectorMeta.write("test");
+        vectorMeta.close();
+    }
 
     // Parser/filter corpus.
     const QString pdfPath = QDir(docsDir).filePath(QStringLiteral("breaking-sound-barrier.pdf"));
@@ -233,11 +276,19 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(indexHealth.value(QStringLiteral("requiredModelInventoryReady")).toBool(false));
         QCOMPARE(indexHealth.value(QStringLiteral("requiredModelInventoryReason")).toString(),
                  QStringLiteral("ready"));
-        QVERIFY(indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(false));
+        QVERIFY(!indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(true));
         QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationState")).toString(),
-                 QStringLiteral("migration_required"));
+                 QStringLiteral("ready"));
         QCOMPARE(indexHealth.value(QStringLiteral("vectorMigrationReason")).toString(),
-                 QStringLiteral("target_generation_not_active"));
+                 QString());
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationActive")).toString(),
+                 QStringLiteral("v2"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationTarget")).toString(),
+                 QStringLiteral("v2"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationSource")).toString(),
+                 QStringLiteral("settings"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationConsistency")).toString(),
+                 QStringLiteral("consistent"));
         const QJsonObject runtimeSettings =
             indexHealth.value(QStringLiteral("runtimeSettings")).toObject();
         QCOMPARE(runtimeSettings.value(QStringLiteral("pipelineActorModeEffective")).toString(),
@@ -251,7 +302,7 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QVERIFY(runtimeSettings.value(QStringLiteral("controlPlaneModeCoerced")).toBool(false));
         QVERIFY(!runtimeSettings.value(QStringLiteral("unsupportedRuntimeModesAllowed")).toBool(true));
         QCOMPARE(store.getSetting(QStringLiteral("activeVectorGeneration")).value_or(QString()),
-                 QStringLiteral("v1"));
+                 QStringLiteral("v2"));
         QVERIFY(!indexHealth.value(QStringLiteral("m2ModulesInitialized")).toBool(true));
     }
 
@@ -323,9 +374,13 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QCOMPARE(indexHealth.value(QStringLiteral("queueInProgress")).toInt(), 2);
         QCOMPARE(indexHealth.value(QStringLiteral("queuePreparing")).toInt(), 2);
         QCOMPARE(indexHealth.value(QStringLiteral("queueCoalesced")).toInt(), 11);
-        QVERIFY(indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(false));
+        QVERIFY(!indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(true));
         QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationState")).toString(),
-                 QStringLiteral("migration_required"));
+                 QStringLiteral("ready"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationActive")).toString(),
+                 QStringLiteral("v2"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationSource")).toString(),
+                 QStringLiteral("settings"));
         QVERIFY(indexHealth.value(QStringLiteral("retrievalAdvisory")).toObject().contains(
             QStringLiteral("code")));
     }

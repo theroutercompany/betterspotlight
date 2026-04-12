@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace bs {
 
@@ -344,6 +345,35 @@ void InferenceService::workerLoop(Worker& worker)
         timer.start();
 
         const QString cancelToken = task->envelope.cancelToken;
+        const bool rebuildPriority =
+            task->envelope.priority.compare(QStringLiteral("rebuild"), Qt::CaseInsensitive) == 0;
+        worker.inFlight.fetch_add(1);
+        if (rebuildPriority) {
+            worker.inFlightRebuild.fetch_add(1);
+        } else {
+            worker.inFlightLive.fetch_add(1);
+        }
+        bool inFlightReleased = false;
+        const auto releaseInFlight = [&]() {
+            if (inFlightReleased) {
+                return;
+            }
+            inFlightReleased = true;
+            worker.inFlight.fetch_sub(1);
+            if (rebuildPriority) {
+                worker.inFlightRebuild.fetch_sub(1);
+            } else {
+                worker.inFlightLive.fetch_sub(1);
+            }
+        };
+        const auto completeTask = [&](const QJsonObject& response) {
+            if (task->complete) {
+                task->complete(response);
+            } else {
+                task->promise.set_value(response);
+            }
+        };
+
         if (isCancelled(cancelToken)) {
             worker.cancelled.fetch_add(1);
             const QJsonObject response = makeStatusPayload(
@@ -353,11 +383,8 @@ void InferenceService::workerLoop(Worker& worker)
                 timer.elapsed(),
                 {},
                 QStringLiteral("cancel_token"));
-            if (task->complete) {
-                task->complete(response);
-            } else {
-                task->promise.set_value(response);
-            }
+            completeTask(response);
+            releaseInFlight();
             continue;
         }
 
@@ -370,11 +397,8 @@ void InferenceService::workerLoop(Worker& worker)
                 timer.elapsed(),
                 {},
                 QStringLiteral("deadline_exceeded"));
-            if (task->complete) {
-                task->complete(response);
-            } else {
-                task->promise.set_value(response);
-            }
+            completeTask(response);
+            releaseInFlight();
             continue;
         }
 
@@ -390,11 +414,8 @@ void InferenceService::workerLoop(Worker& worker)
                     timer.elapsed(),
                     {},
                     QStringLiteral("cancel_token"));
-                if (task->complete) {
-                    task->complete(response);
-                } else {
-                    task->promise.set_value(response);
-                }
+                completeTask(response);
+                releaseInFlight();
                 continue;
             }
             if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
@@ -406,11 +427,8 @@ void InferenceService::workerLoop(Worker& worker)
                     timer.elapsed(),
                     {},
                     QStringLiteral("deadline_exceeded"));
-                if (task->complete) {
-                    task->complete(response);
-                } else {
-                    task->promise.set_value(response);
-                }
+                completeTask(response);
+                releaseInFlight();
                 continue;
             }
         }
@@ -486,6 +504,16 @@ void InferenceService::workerLoop(Worker& worker)
                         if (!texts.empty()) {
                             if (microBatchSize > 0 && static_cast<int>(texts.size()) > microBatchSize) {
                                 for (size_t offset = 0; offset < texts.size(); offset += static_cast<size_t>(microBatchSize)) {
+                                    if (isCancelled(cancelToken)) {
+                                        status = QStringLiteral("cancelled");
+                                        fallbackReason = QStringLiteral("cancel_token");
+                                        break;
+                                    }
+                                    if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
+                                        status = QStringLiteral("timeout");
+                                        fallbackReason = QStringLiteral("deadline_exceeded");
+                                        break;
+                                    }
                                     const size_t end = std::min(texts.size(), offset + static_cast<size_t>(microBatchSize));
                                     std::vector<QString> batch;
                                     batch.reserve(end - offset);
@@ -493,10 +521,34 @@ void InferenceService::workerLoop(Worker& worker)
                                         batch.push_back(texts[i]);
                                     }
                                     auto batchEmbeddings = worker.embedding->embedBatch(batch);
+                                    if (isCancelled(cancelToken)) {
+                                        status = QStringLiteral("cancelled");
+                                        fallbackReason = QStringLiteral("cancel_token");
+                                        break;
+                                    }
+                                    if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
+                                        status = QStringLiteral("timeout");
+                                        fallbackReason = QStringLiteral("deadline_exceeded");
+                                        break;
+                                    }
                                     if (batchEmbeddings.size() != batch.size()) {
                                         batchEmbeddings.clear();
                                         for (const QString& text : batch) {
+                                            if (isCancelled(cancelToken)) {
+                                                status = QStringLiteral("cancelled");
+                                                fallbackReason = QStringLiteral("cancel_token");
+                                                break;
+                                            }
+                                            if (task->envelope.deadlineMs > 0
+                                                && nowMs() > task->envelope.deadlineMs) {
+                                                status = QStringLiteral("timeout");
+                                                fallbackReason = QStringLiteral("deadline_exceeded");
+                                                break;
+                                            }
                                             batchEmbeddings.push_back(worker.embedding->embed(text));
+                                        }
+                                        if (status != QLatin1String("ok")) {
+                                            break;
                                         }
                                     }
                                     embeddings.insert(embeddings.end(),
@@ -505,20 +557,40 @@ void InferenceService::workerLoop(Worker& worker)
                                 }
                             } else {
                                 embeddings = worker.embedding->embedBatch(texts);
-                                if (embeddings.size() != texts.size()) {
+                                if (status == QLatin1String("ok") && isCancelled(cancelToken)) {
+                                    status = QStringLiteral("cancelled");
+                                    fallbackReason = QStringLiteral("cancel_token");
+                                } else if (status == QLatin1String("ok")
+                                           && task->envelope.deadlineMs > 0
+                                           && nowMs() > task->envelope.deadlineMs) {
+                                    status = QStringLiteral("timeout");
+                                    fallbackReason = QStringLiteral("deadline_exceeded");
+                                }
+                                if (status == QLatin1String("ok") && embeddings.size() != texts.size()) {
                                     embeddings.clear();
                                     embeddings.reserve(texts.size());
                                     for (const QString& text : texts) {
+                                        if (isCancelled(cancelToken)) {
+                                            status = QStringLiteral("cancelled");
+                                            fallbackReason = QStringLiteral("cancel_token");
+                                            break;
+                                        }
+                                        if (task->envelope.deadlineMs > 0
+                                            && nowMs() > task->envelope.deadlineMs) {
+                                            status = QStringLiteral("timeout");
+                                            fallbackReason = QStringLiteral("deadline_exceeded");
+                                            break;
+                                        }
                                         embeddings.push_back(worker.embedding->embed(text));
                                     }
                                 }
                             }
                         }
 
-                        if (embeddings.size() != texts.size()) {
+                        if (status == QLatin1String("ok") && embeddings.size() != texts.size()) {
                             status = QStringLiteral("degraded");
                             fallbackReason = QStringLiteral("embedding_size_mismatch");
-                        } else {
+                        } else if (status == QLatin1String("ok")) {
                             if (normalize) {
                                 for (auto& emb : embeddings) {
                                     double normSquared = 0.0;
@@ -549,6 +621,16 @@ void InferenceService::workerLoop(Worker& worker)
                         std::vector<SearchResult> results;
                         results.reserve(static_cast<size_t>(candidates.size()));
                         for (const QJsonValue& candidateValue : candidates) {
+                            if (isCancelled(cancelToken)) {
+                                status = QStringLiteral("cancelled");
+                                fallbackReason = QStringLiteral("cancel_token");
+                                break;
+                            }
+                            if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
+                                status = QStringLiteral("timeout");
+                                fallbackReason = QStringLiteral("deadline_exceeded");
+                                break;
+                            }
                             const QJsonObject candidate = candidateValue.toObject();
                             SearchResult result;
                             result.itemId = candidate.value(QStringLiteral("itemId")).toInteger();
@@ -559,21 +641,33 @@ void InferenceService::workerLoop(Worker& worker)
                             results.push_back(std::move(result));
                         }
 
-                        RerankerConfig config;
-                        config.weight = 0.0f;
-                        config.maxCandidates = static_cast<int>(results.size());
-                        config.minScoreThreshold = 0.0f;
-                        worker.reranker->rerank(query, results, config);
-
-                        QJsonArray scores;
-                        for (const SearchResult& result : results) {
-                            QJsonObject score;
-                            score[QStringLiteral("itemId")] = static_cast<qint64>(result.itemId);
-                            score[QStringLiteral("score")] = static_cast<double>(result.crossEncoderScore);
-                            scores.append(score);
+                        if (status == QLatin1String("ok")) {
+                            RerankerConfig config;
+                            config.weight = 0.0f;
+                            config.maxCandidates = static_cast<int>(results.size());
+                            config.minScoreThreshold = 0.0f;
+                            worker.reranker->rerank(query, results, config);
+                            if (isCancelled(cancelToken)) {
+                                status = QStringLiteral("cancelled");
+                                fallbackReason = QStringLiteral("cancel_token");
+                            } else if (task->envelope.deadlineMs > 0
+                                       && nowMs() > task->envelope.deadlineMs) {
+                                status = QStringLiteral("timeout");
+                                fallbackReason = QStringLiteral("deadline_exceeded");
+                            }
                         }
-                        payload[QStringLiteral("scores")] = scores;
-                        modelId = lookupModelId();
+
+                        if (status == QLatin1String("ok")) {
+                            QJsonArray scores;
+                            for (const SearchResult& result : results) {
+                                QJsonObject score;
+                                score[QStringLiteral("itemId")] = static_cast<qint64>(result.itemId);
+                                score[QStringLiteral("score")] = static_cast<double>(result.crossEncoderScore);
+                                scores.append(score);
+                            }
+                            payload[QStringLiteral("scores")] = scores;
+                            modelId = lookupModelId();
+                        }
                     }
                 } else if (task->method == QLatin1String("qa_extract")) {
                     if (!worker.qa || !worker.qa->isAvailable()) {
@@ -590,6 +684,11 @@ void InferenceService::workerLoop(Worker& worker)
                         QaExtractiveModel::Answer best;
                         int bestContextIndex = -1;
                         for (int i = 0; i < contexts.size(); ++i) {
+                            if (isCancelled(cancelToken)) {
+                                status = QStringLiteral("cancelled");
+                                fallbackReason = QStringLiteral("cancel_token");
+                                break;
+                            }
                             if (task->envelope.deadlineMs > 0 && nowMs() > task->envelope.deadlineMs) {
                                 status = QStringLiteral("timeout");
                                 fallbackReason = QStringLiteral("deadline_exceeded");
@@ -597,6 +696,11 @@ void InferenceService::workerLoop(Worker& worker)
                             }
                             const QString context = contexts.at(i).toString();
                             const auto answer = worker.qa->extract(query, context, maxAnswerChars);
+                            if (isCancelled(cancelToken)) {
+                                status = QStringLiteral("cancelled");
+                                fallbackReason = QStringLiteral("cancel_token");
+                                break;
+                            }
                             if (answer.available && (!best.available || answer.confidence > best.confidence)) {
                                 best = answer;
                                 bestContextIndex = i;
@@ -625,6 +729,11 @@ void InferenceService::workerLoop(Worker& worker)
                 status = QStringLiteral("error");
                 fallbackReason = QStringLiteral("unknown_exception");
             }
+        }
+
+        if (status == QLatin1String("ok") && isCancelled(cancelToken)) {
+            status = QStringLiteral("cancelled");
+            fallbackReason = QStringLiteral("cancel_token");
         }
 
         const bool placeholderResponse =
@@ -676,11 +785,8 @@ void InferenceService::workerLoop(Worker& worker)
                   qUtf8Printable(task->method),
                   qUtf8Printable(worker.roleName),
                   task->complete ? 1 : 0);
-        if (task->complete) {
-            task->complete(response);
-        } else {
-            task->promise.set_value(response);
-        }
+        completeTask(response);
+        releaseInFlight();
     }
 }
 
@@ -999,6 +1105,7 @@ QJsonObject InferenceService::handleCancelRequest(uint64_t id, const QJsonObject
     }
 
     markCancelled(cancelToken);
+    m_cancelSignalCount.fetch_add(1);
     garbageCollectCancelledTokens();
 
     QJsonObject result;
@@ -1025,11 +1132,18 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     QJsonObject roleStateReason;
     QJsonObject roleAdmission;
     QJsonObject queueDepth;
+    QJsonObject inFlightCount;
+    QJsonObject inFlightByLane;
+    QJsonObject activeLaneByRole;
+    QJsonObject cancelledCounts;
+    QJsonObject timeoutCleanupCounts;
     QJsonObject timeoutCounts;
     QJsonObject failureCounts;
     QJsonObject restartCounts;
     int globalLiveDepth = 0;
     int globalRebuildDepth = 0;
+    int globalInFlightLive = 0;
+    int globalInFlightRebuild = 0;
 
     {
         std::lock_guard<std::mutex> lock(m_workersMutex);
@@ -1043,13 +1157,32 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
                 roleAdmission[role] = worker->lastAdmission;
                 const qint64 liveDepth = static_cast<qint64>(worker->liveQueue.size());
                 const qint64 rebuildDepth = static_cast<qint64>(worker->rebuildQueue.size());
+                const qint64 inFlightLive = worker->inFlightLive.load();
+                const qint64 inFlightRebuild = worker->inFlightRebuild.load();
                 depth[QStringLiteral("live")] = liveDepth;
                 depth[QStringLiteral("rebuild")] = rebuildDepth;
                 globalLiveDepth += static_cast<int>(liveDepth);
                 globalRebuildDepth += static_cast<int>(rebuildDepth);
+
+                QJsonObject laneInFlight;
+                laneInFlight[QStringLiteral("live")] = inFlightLive;
+                laneInFlight[QStringLiteral("rebuild")] = inFlightRebuild;
+                inFlightByLane[role] = laneInFlight;
+                inFlightCount[role] = worker->inFlight.load();
+                globalInFlightLive += static_cast<int>(inFlightLive);
+                globalInFlightRebuild += static_cast<int>(inFlightRebuild);
+                if (inFlightLive > 0) {
+                    activeLaneByRole[role] = QStringLiteral("live");
+                } else if (inFlightRebuild > 0) {
+                    activeLaneByRole[role] = QStringLiteral("rebuild");
+                } else {
+                    activeLaneByRole[role] = QStringLiteral("none");
+                }
             }
             queueDepth[role] = depth;
 
+            cancelledCounts[role] = worker->cancelled.load();
+            timeoutCleanupCounts[role] = worker->timeoutCleanup.load();
             timeoutCounts[role] = worker->timedOut.load();
             failureCounts[role] = worker->failed.load();
             restartCounts[role] = worker->restartAttempts;
@@ -1060,8 +1193,17 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     result[QStringLiteral("roleStateReasonByModel")] = roleStateReason;
     result[QStringLiteral("roleAdmissionByModel")] = roleAdmission;
     result[QStringLiteral("queueDepthByRole")] = queueDepth;
+    result[QStringLiteral("inFlightCountByRole")] = inFlightCount;
+    result[QStringLiteral("inFlightByLaneByRole")] = inFlightByLane;
+    result[QStringLiteral("activeLaneByRole")] = activeLaneByRole;
     result[QStringLiteral("globalQueueDepthLive")] = globalLiveDepth;
     result[QStringLiteral("globalQueueDepthRebuild")] = globalRebuildDepth;
+    result[QStringLiteral("globalInFlightLive")] = globalInFlightLive;
+    result[QStringLiteral("globalInFlightRebuild")] = globalInFlightRebuild;
+    result[QStringLiteral("cancelledCountByRole")] = cancelledCounts;
+    result[QStringLiteral("timeoutCleanupCountByRole")] = timeoutCleanupCounts;
+    result[QStringLiteral("cancelSignalCount")] = m_cancelSignalCount.load();
+    result[QStringLiteral("timeoutCleanupCount")] = m_timeoutCleanupCount.load();
     result[QStringLiteral("timeoutCountByRole")] = timeoutCounts;
     result[QStringLiteral("failureCountByRole")] = failureCounts;
     if (m_supervisorMode == QLatin1String("legacy") || !m_supervisorActor) {
@@ -1111,6 +1253,12 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
 
     if (!envelope.cancelToken.isEmpty()) {
         markCancelled(envelope.cancelToken);
+        m_cancelSignalCount.fetch_add(1);
+        m_timeoutCleanupCount.fetch_add(1);
+        garbageCollectCancelledTokens();
+        if (Worker* timeoutWorker = workerForRole(role)) {
+            timeoutWorker->timeoutCleanup.fetch_add(1);
+        }
     }
     if (Worker* timeoutWorker = workerForRole(role)) {
         timeoutWorker->timedOut.fetch_add(1);
@@ -1160,7 +1308,8 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
         int depth = 0;
         for (const auto& candidate : m_workers) {
             std::lock_guard<std::mutex> workerLock(candidate->mutex);
-            depth += static_cast<int>(candidate->liveQueue.size());
+            depth += static_cast<int>(candidate->liveQueue.size())
+                + static_cast<int>(candidate->inFlightLive.load());
         }
         return depth;
     }();
@@ -1169,7 +1318,8 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
         int depth = 0;
         for (const auto& candidate : m_workers) {
             std::lock_guard<std::mutex> workerLock(candidate->mutex);
-            depth += static_cast<int>(candidate->rebuildQueue.size());
+            depth += static_cast<int>(candidate->rebuildQueue.size())
+                + static_cast<int>(candidate->inFlightRebuild.load());
         }
         return depth;
     }();
@@ -1179,8 +1329,10 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
         auto& queue = rebuildRole ? worker->rebuildQueue : worker->liveQueue;
         const int queueLimit = rebuildRole ? kWorkerQueueLimitRebuild : kWorkerQueueLimitLive;
         const int laneDepth = static_cast<int>(queue.size());
-        const int workerLiveDepth = static_cast<int>(worker->liveQueue.size());
-        const int workerRebuildDepth = static_cast<int>(worker->rebuildQueue.size());
+        const int workerLiveDepth = static_cast<int>(worker->liveQueue.size())
+            + static_cast<int>(worker->inFlightLive.load());
+        const int workerRebuildDepth = static_cast<int>(worker->rebuildQueue.size())
+            + static_cast<int>(worker->inFlightRebuild.load());
         const auto actorDecision = rebuildRole
             ? InferenceWorkerActor::admitRebuild(
                 workerRebuildDepth,

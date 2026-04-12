@@ -210,6 +210,47 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
         QTest::qWait(75);
     }
     QVERIFY2(sawReload, "Expected .bsignore watcher reload to update status");
+
+    // Parent-directory churn should not trigger additional reloads when
+    // .bsignore content/signature is unchanged.
+    const QJsonObject afterReload = requestQueueStatus(5000);
+    QVERIFY(bs::test::isResponse(afterReload));
+    const qint64 loadedAtAfterReload = bs::test::resultPayload(afterReload)
+                                           .value(QStringLiteral("bsignoreLastLoadedAtMs"))
+                                           .toInteger();
+    const int patternCountAfterReload = bs::test::resultPayload(afterReload)
+                                            .value(QStringLiteral("bsignorePatternCount"))
+                                            .toInt(0);
+
+    for (int i = 0; i < 5; ++i) {
+        const QString noisePath =
+            QDir(tempHome.path()).filePath(QStringLiteral("noise-%1.tmp").arg(i));
+        QFile noiseFile(noisePath);
+        QVERIFY(noiseFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        noiseFile.write("noise\n");
+        noiseFile.close();
+        QVERIFY(QFile::remove(noisePath));
+    }
+
+    bool sawSpuriousReload = false;
+    timer.restart();
+    while (timer.elapsed() < 3000) {
+        const QJsonObject queue = requestQueueStatus(1500);
+        if (!bs::test::isResponse(queue)) {
+            QTest::qWait(75);
+            continue;
+        }
+        const QJsonObject result = bs::test::resultPayload(queue);
+        const qint64 loadedAt = result.value(QStringLiteral("bsignoreLastLoadedAtMs")).toInteger();
+        const int patternCount = result.value(QStringLiteral("bsignorePatternCount")).toInt(0);
+        if (loadedAt > loadedAtAfterReload || patternCount != patternCountAfterReload) {
+            sawSpuriousReload = true;
+            break;
+        }
+        QTest::qWait(75);
+    }
+    QVERIFY2(!sawSpuriousReload,
+             "Unrelated home-directory churn should not trigger .bsignore reload");
 }
 
 QTEST_MAIN(TestIndexerServiceIpc)

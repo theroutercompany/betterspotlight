@@ -291,6 +291,8 @@ private:
                                                     const QString& roleForMetrics,
                                                     const QString& fallbackReasonKey,
                                                     const QString& cancelToken = QString());
+    void sendInferenceCancelBestEffort(const QString& cancelToken,
+                                       const QString& requestIdHint);
     void recordInferenceTimeout(const QString& role);
     void recordInferenceFallback(const QString& role);
     void recordInferenceConnected(InferenceLane lane, bool connected);

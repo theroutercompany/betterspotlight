@@ -293,7 +293,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('activeVectorGeneration', 'v
 INSERT OR IGNORE INTO settings (key, value) VALUES ('targetVectorGeneration', 'v2');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationState', 'idle');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('vectorMigrationProgressPct', '0');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingEnabled', '0');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('embeddingEnabled', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('queryRouterEnabled', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('queryRouterMinConfidence', '0.45');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('fastEmbeddingEnabled', '1');

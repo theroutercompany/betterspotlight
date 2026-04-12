@@ -8,6 +8,8 @@
 
 #include <QFileSystemWatcher>
 #include <QPair>
+#include <QByteArray>
+#include <QTimer>
 
 #include <optional>
 #include <memory>
@@ -39,7 +41,9 @@ private:
     QJsonObject handleGetQueueStatus(uint64_t id);
     void joinRebuildThreadIfNeeded();
     void configureBsignoreWatcher();
+    void scheduleBsignoreReload();
     void reloadBsignore();
+    QByteArray bsignoreSignature() const;
     QJsonObject bsignoreStatusJson() const;
     void setRebuildState(const QString& status, const QString& reason = QString());
     QPair<QString, QString> rebuildState() const;
@@ -76,6 +80,8 @@ private:
     bool m_bsignoreLoaded = false;
     int m_bsignorePatternCount = 0;
     qint64 m_bsignoreLastLoadedAtMs = 0;
+    std::unique_ptr<QTimer> m_bsignoreReloadTimer;
+    QByteArray m_bsignoreLastSignature;
 };
 
 } // namespace bs

@@ -710,30 +710,6 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         m_vectorMigrationState = QStringLiteral("failed");
     };
 
-    auto updateSucceededState = [&](int totalCandidates, int processed,
-                                    int embedded, int skipped, int failed,
-                                    const QString& lastError = QString()) {
-        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
-        if (m_vectorRebuildState.runId != runId) {
-            return;
-        }
-        m_vectorRebuildState.status = lastError.isEmpty()
-                                          ? VectorRebuildState::Status::Succeeded
-                                          : VectorRebuildState::Status::Failed;
-        m_vectorRebuildState.totalCandidates = totalCandidates;
-        m_vectorRebuildState.processed = processed;
-        m_vectorRebuildState.embedded = embedded;
-        m_vectorRebuildState.skipped = skipped;
-        m_vectorRebuildState.failed = failed;
-        m_vectorRebuildState.scopeCandidates = totalCandidates;
-        m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-        m_vectorRebuildState.lastError = lastError;
-        m_vectorMigrationState = lastError.isEmpty()
-            ? QStringLiteral("cutover-complete")
-            : QStringLiteral("failed");
-        m_vectorMigrationProgressPct = lastError.isEmpty() ? 100.0 : m_vectorMigrationProgressPct;
-    };
-
     auto closeResources = [&]() {
         if (stmt) {
             sqlite3_finalize(stmt);
@@ -932,10 +908,12 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         params[QStringLiteral("normalize")] = true;
         params[QStringLiteral("priority")] = QStringLiteral("rebuild");
         params[QStringLiteral("microBatchSize")] = std::max(1, microBatchSize);
-        params[QStringLiteral("requestId")] = QStringLiteral("rebuild-%1-%2-%3")
+        const QString requestId = QStringLiteral("rebuild-%1-%2-%3")
             .arg(runId)
             .arg(role)
             .arg(QDateTime::currentMSecsSinceEpoch());
+        const QString cancelToken = QStringLiteral("%1-cancel").arg(requestId);
+        params[QStringLiteral("requestId")] = requestId;
         params[QStringLiteral("deadlineMs")] =
             QDateTime::currentMSecsSinceEpoch() + 12000;
 
@@ -945,7 +923,8 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             params,
             12000,
             role,
-            QStringLiteral("embed_passages_failed"));
+            QStringLiteral("embed_passages_failed"),
+            cancelToken);
         if (!payload.has_value()
             || payload->value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
             return {};
@@ -1545,144 +1524,6 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
     });
     closeResources();
     return;
-
-    auto setSettingWorker = [&](const QString& key, const QString& value) -> bool {
-        const char* sql = R"(
-            INSERT INTO settings (key, value) VALUES (?1, ?2)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        )";
-
-        sqlite3_stmt* settingStmt = nullptr;
-        if (sqlite3_prepare_v2(db, sql, -1, &settingStmt, nullptr) != SQLITE_OK) {
-            return false;
-        }
-        const QByteArray keyUtf8 = key.toUtf8();
-        const QByteArray valUtf8 = value.toUtf8();
-        sqlite3_bind_text(settingStmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(settingStmt, 2, valUtf8.constData(), -1, SQLITE_TRANSIENT);
-        const int rc = sqlite3_step(settingStmt);
-        sqlite3_finalize(settingStmt);
-        return rc == SQLITE_DONE;
-    };
-
-    if (!setSettingWorker(QStringLiteral("nextHnswLabel"),
-                          QString::number(rebuiltIndex->nextLabel()))
-        || !setSettingWorker(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))
-        || !setSettingWorker(QStringLiteral("activeVectorGeneration"), targetGeneration)
-        || !setSettingWorker(QStringLiteral("vectorMigrationState"), QStringLiteral("cutover-complete"))
-        || !setSettingWorker(QStringLiteral("vectorMigrationProgressPct"), QStringLiteral("100"))) {
-        rollbackIfNeeded();
-        updateFailedState(QStringLiteral("Failed to persist vector index settings"));
-        closeResources();
-        return;
-    }
-
-    VectorStore::GenerationState activeState;
-    activeState.generationId = targetGeneration.toStdString();
-    activeState.modelId = rebuiltMeta.modelId;
-    activeState.dimensions = embeddingDimensions;
-    activeState.provider = rebuiltMeta.provider;
-    activeState.state = "active";
-    activeState.progressPct = 100.0;
-    activeState.active = true;
-    if (!workerVectorStore.upsertGenerationState(activeState)) {
-        rollbackIfNeeded();
-        updateFailedState(QStringLiteral("Failed to commit generation state"));
-        closeResources();
-        return;
-    }
-    if (fastEmbeddingAvailable && rebuiltFastIndex) {
-        VectorStore::GenerationState fastState;
-        fastState.generationId = fastGeneration.toStdString();
-        fastState.modelId = rebuiltFastMeta.modelId;
-        fastState.dimensions = fastEmbeddingDimensions;
-        fastState.provider = rebuiltFastMeta.provider;
-        fastState.state = "active";
-        fastState.progressPct = 100.0;
-        fastState.active = false;
-        if (!workerVectorStore.upsertGenerationState(fastState)) {
-            rollbackIfNeeded();
-            updateFailedState(QStringLiteral("Failed to commit fast generation state"));
-            closeResources();
-            return;
-        }
-    }
-
-    {
-        std::unique_lock<std::shared_mutex> lock(m_vectorIndexMutex);
-        if (!execSql("COMMIT;")) {
-            rollbackIfNeeded();
-            updateFailedState(QStringLiteral("Failed to commit vector index rebuild"));
-            closeResources();
-            return;
-        }
-        inTransaction = false;
-        m_activeVectorGeneration = targetGeneration;
-        m_activeVectorModelId = QString::fromStdString(rebuiltMeta.modelId);
-        m_activeVectorProvider = QString::fromStdString(rebuiltMeta.provider);
-        m_activeVectorDimensions = embeddingDimensions;
-        {
-            std::lock_guard<std::mutex> stateLock(m_vectorRebuildMutex);
-            m_vectorMigrationState = QStringLiteral("cutover-complete");
-            m_vectorMigrationProgressPct = 100.0;
-        }
-        m_vectorIndexPath = indexPath;
-        m_vectorMetaPath = metaPath;
-        m_vectorIndex = std::move(rebuiltIndex);
-        if (fastEmbeddingAvailable && rebuiltFastIndex) {
-            m_fastVectorGeneration = fastGeneration;
-            m_fastVectorIndexPath = fastIndexPath;
-            m_fastVectorMetaPath = fastMetaPath;
-            m_fastVectorIndex = std::move(rebuiltFastIndex);
-        }
-    }
-
-    QString persistError;
-    if (QFile::exists(indexPath) && !QFile::remove(indexPath)) {
-        persistError = QStringLiteral("Failed to replace %1").arg(indexPath);
-    } else if (!QFile::rename(tmpIndexPath, indexPath)) {
-        persistError = QStringLiteral("Failed to persist %1").arg(indexPath);
-    }
-
-    if (persistError.isEmpty()) {
-        if (QFile::exists(metaPath) && !QFile::remove(metaPath)) {
-            persistError = QStringLiteral("Failed to replace %1").arg(metaPath);
-        } else if (!QFile::rename(tmpMetaPath, metaPath)) {
-            persistError = QStringLiteral("Failed to persist %1").arg(metaPath);
-        }
-    }
-
-    if (persistError.isEmpty() && fastEmbeddingAvailable && QFile::exists(tmpFastIndexPath)
-               && QFile::exists(tmpFastMetaPath)) {
-        if (QFile::exists(fastIndexPath) && !QFile::remove(fastIndexPath)) {
-            persistError = QStringLiteral("Failed to replace %1").arg(fastIndexPath);
-        } else if (!QFile::rename(tmpFastIndexPath, fastIndexPath)) {
-            persistError = QStringLiteral("Failed to persist %1").arg(fastIndexPath);
-        }
-
-        if (persistError.isEmpty()) {
-            if (QFile::exists(fastMetaPath) && !QFile::remove(fastMetaPath)) {
-                persistError = QStringLiteral("Failed to replace %1").arg(fastMetaPath);
-            } else if (!QFile::rename(tmpFastMetaPath, fastMetaPath)) {
-                persistError = QStringLiteral("Failed to persist %1").arg(fastMetaPath);
-            }
-        }
-    }
-
-    if (!persistError.isEmpty()) {
-        LOG_ERROR(bsIpc, "Vector rebuild run %llu completed but failed to persist index files: %s",
-                  static_cast<unsigned long long>(runId), qUtf8Printable(persistError));
-    } else {
-        LOG_INFO(bsIpc,
-                 "Vector index rebuild complete (runId=%llu, total=%d, embedded=%d, skipped=%d, failed=%d, dual=%s)",
-                 static_cast<unsigned long long>(runId),
-                 totalCandidates, embeddedCount, skippedCount, failedCount,
-                 fastEmbeddingAvailable ? "true" : "false");
-    }
-
-    updateSucceededState(totalCandidates, processed, embeddedCount, skippedCount,
-                         failedCount, persistError);
-    closeResources();
 }
 
 } // namespace bs

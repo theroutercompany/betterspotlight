@@ -136,6 +136,14 @@ add_custom_command(TARGET betterspotlight POST_BUILD
         -DBS_MODEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}/data/models
         -DBS_MODEL_DEST_DIR=$<TARGET_FILE_DIR:betterspotlight>/../Resources/models
         -P ${CMAKE_SOURCE_DIR}/cmake/sync_embedding_models.cmake
+    VERBATIM
+)
+
+add_custom_target(betterspotlight-sync-runtime-bundle
+    COMMAND ${CMAKE_COMMAND}
+        -DBS_MODEL_SOURCE_DIR=${CMAKE_SOURCE_DIR}/data/models
+        -DBS_MODEL_DEST_DIR=$<TARGET_FILE_DIR:betterspotlight>/../Resources/models
+        -P ${CMAKE_SOURCE_DIR}/cmake/sync_embedding_models.cmake
     COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:betterspotlight>/../Helpers
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -150,5 +158,11 @@ add_custom_command(TARGET betterspotlight POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:betterspotlight-inference>
         $<TARGET_FILE_DIR:betterspotlight>/../Helpers/
+    DEPENDS
+        betterspotlight
+        betterspotlight-indexer
+        betterspotlight-extractor
+        betterspotlight-query
+        betterspotlight-inference
     VERBATIM
 )

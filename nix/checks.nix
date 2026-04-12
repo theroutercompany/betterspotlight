@@ -1,17 +1,20 @@
 { pkgs }:
 
 let
-  repoRoot = ../.;
+  configureScript = ../scripts/ci/configure.sh;
+  buildScript = ../scripts/ci/build.sh;
+  testScript = ../scripts/ci/test.sh;
+  coverageScript = ../scripts/ci/coverage.sh;
 in
 {
   ci-script-contract = pkgs.runCommand "betterspotlight-ci-script-contract" {
     nativeBuildInputs = [ pkgs.bash ];
   } ''
     set -euo pipefail
-    test -x ${repoRoot}/scripts/ci/configure.sh
-    test -x ${repoRoot}/scripts/ci/build.sh
-    test -x ${repoRoot}/scripts/ci/test.sh
-    test -x ${repoRoot}/scripts/ci/coverage.sh
+    test -x ${configureScript}
+    test -x ${buildScript}
+    test -x ${testScript}
+    test -x ${coverageScript}
     mkdir -p "$out"
     echo "ok" > "$out/result"
   '';

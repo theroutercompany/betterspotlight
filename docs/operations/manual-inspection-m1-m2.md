@@ -10,7 +10,7 @@ This guide is based on:
 
 - M1/M2 requirements in `docs/milestones/`
 - The current implementation under `src/`
-- Actual runtime behavior observed from the built binaries in `build/`
+- Actual runtime behavior observed from the built binaries in `build-stabilize/`
 
 It is intentionally practical: each step has concrete commands, expected outcomes, and troubleshooting.
 
@@ -42,49 +42,43 @@ From repo root:
 cd /Users/rexliu/betterspotlight
 ```
 
-Check toolchain:
+Validate the supported dev environment:
 
 ```bash
-xcode-select -p
-cmake --version
-ctest --version
-python3 --version
-sqlite3 --version
+./scripts/dev/setup_env.sh --check-only
 ```
 
-Optional dependency checks (affect PDF/OCR/semantic behavior):
+Run the canonical verification preflight/build gate (this prints capability matrix and enforces required capabilities):
 
 ```bash
-pkg-config --modversion poppler-qt6 || echo "poppler-qt6 not detected"
-tesseract --version || echo "tesseract not detected"
+./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch
 ```
 
 Expected:
 
-- CMake/CTest/Python/SQLite available.
-- If Poppler is missing, PDF extraction will log as unavailable.
+- Environment validation succeeds.
+- Capability matrix reports required supported capabilities as `ready` for `core-hermetic`.
+- Default verification labels pass before manual UI checks.
 
 ---
 
 ## 3. Build and Automated Baseline
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j"$(sysctl -n hw.ncpu)"
-ctest --test-dir build --output-on-failure
+./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch
 ```
 
 Expected:
 
 - Build succeeds.
-- All tests pass (currently 26/26 in this repo state).
+- Default verification gate passes (unit, integration, service IPC, docs lint, relevance).
 
 If tests fail, stop and fix build/test issues before manual UI verification.
 
-Optional focused M2 subset:
+Optional stress lane:
 
 ```bash
-ctest --test-dir build -R "semantic|embedding|boost|context|interaction|feedback|path-preferences|type-affinity" --output-on-failure
+ctest --test-dir build-stabilize --output-on-failure --timeout 300 -L '^relevance_stress$'
 ```
 
 ---
@@ -94,7 +88,7 @@ ctest --test-dir build -R "semantic|embedding|boost|context|interaction|feedback
 ### Gate A: App QML startup
 
 ```bash
-build/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
+build-stabilize/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
 ```
 
 Expected:
@@ -134,26 +128,25 @@ If `interactions` is missing or schema version is `< 3`, run Troubleshooting T2.
 
 Query service expects model assets near its executable:
 
-- `build/src/services/Resources/models/bge-large-en-v1.5-f32.onnx` (primary generation `v2`)
-- `build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx`
-- `build/src/services/Resources/models/vocab.txt`
+- `build-stabilize/src/services/Resources/models/bge-large-en-v1.5-f32.onnx` (primary generation `v2`)
+- `build-stabilize/src/services/Resources/models/bge-small-en-v1.5-int8.onnx`
+- `build-stabilize/src/services/Resources/models/vocab.txt`
 
 If missing, semantic search falls back to lexical only (expected fallback, see T3).
 
 Bootstrap/fix command:
 
 ```bash
-./tools/fetch_embedding_models.sh
-cmake -S . -B build
-cmake --build build -j8
+./tools/fetch_embedding_models.sh --max-quality
+./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch --no-clean
 ```
 
 Re-check assets:
 
 ```bash
-ls -l build/src/services/Resources/models/bge-large-en-v1.5-f32.onnx
-ls -l build/src/services/Resources/models/bge-small-en-v1.5-int8.onnx
-ls -l build/src/services/Resources/models/vocab.txt
+ls -l build-stabilize/src/services/Resources/models/bge-large-en-v1.5-f32.onnx
+ls -l build-stabilize/src/services/Resources/models/bge-small-en-v1.5-int8.onnx
+ls -l build-stabilize/src/services/Resources/models/vocab.txt
 ```
 
 ---
@@ -167,7 +160,7 @@ Run this section only after Gate A is fixed.
 1. Start app:
 
 ```bash
-build/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
+build-stabilize/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
 ```
 
 2. Verify:
@@ -298,8 +291,10 @@ chmod +x /tmp/bs_ipc.py
 
 ```bash
 rm -f /tmp/betterspotlight-$(id -u)/indexer.sock /tmp/betterspotlight-$(id -u)/query.sock
-build/src/services/indexer/betterspotlight-indexer > /tmp/bs-indexer.log 2>&1 &
-build/src/services/query/betterspotlight-query > /tmp/bs-query.log 2>&1 &
+BUILD_DIR="/Users/rexliu/betterspotlight/build-stabilize"
+HELPERS_DIR="$BUILD_DIR/src/app/betterspotlight.app/Contents/Helpers"
+"$HELPERS_DIR/betterspotlight-indexer" > /tmp/bs-indexer.log 2>&1 &
+"$HELPERS_DIR/betterspotlight-query" > /tmp/bs-query.log 2>&1 &
 ```
 
 Verify sockets:
@@ -615,8 +610,8 @@ Cause:
 Fix:
 
 - Fetch model assets and rebuild so post-build sync copies them into runtime resources:
-  - `./tools/fetch_embedding_models.sh`
-  - `cmake -S . -B build && cmake --build build -j8`
+  - `./tools/fetch_embedding_models.sh --max-quality`
+  - `./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch --no-clean`
 - Reconfigure/rebuild with ONNX Runtime detected.
 
 ### T4. `tests/relevance/run_relevance_test.sh` hangs or is unusable

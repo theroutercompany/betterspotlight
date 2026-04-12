@@ -16,6 +16,8 @@ class TestInferenceServiceIpc : public QObject {
 private slots:
     void testInferenceIpcContract();
     void testHealthRequestNotBlockedByDeferredInferenceWork();
+    void testDeferredRequestCancellationSignalsHealth();
+    void testRebuildAdmissionRespectsLiveInFlightPressure();
 };
 
 void TestInferenceServiceIpc::testInferenceIpcContract()
@@ -163,6 +165,13 @@ void TestInferenceServiceIpc::testInferenceIpcContract()
         QVERIFY(result.contains(QStringLiteral("connected")));
         QVERIFY(result.contains(QStringLiteral("roleStatusByModel")));
         QVERIFY(result.contains(QStringLiteral("queueDepthByRole")));
+        QVERIFY(result.contains(QStringLiteral("inFlightCountByRole")));
+        QVERIFY(result.contains(QStringLiteral("inFlightByLaneByRole")));
+        QVERIFY(result.contains(QStringLiteral("activeLaneByRole")));
+        QVERIFY(result.contains(QStringLiteral("cancelledCountByRole")));
+        QVERIFY(result.contains(QStringLiteral("timeoutCleanupCountByRole")));
+        QVERIFY(result.contains(QStringLiteral("cancelSignalCount")));
+        QVERIFY(result.contains(QStringLiteral("timeoutCleanupCount")));
         QVERIFY(result.contains(QStringLiteral("timeoutCountByRole")));
         QVERIFY(result.contains(QStringLiteral("failureCountByRole")));
         QVERIFY(result.contains(QStringLiteral("restartCountByRole")));
@@ -249,6 +258,160 @@ void TestInferenceServiceIpc::testHealthRequestNotBlockedByDeferredInferenceWork
     QTRY_VERIFY_WITH_TIMEOUT(embedCompleted, 5000);
     QVERIFY(embedResponse.has_value());
     QVERIFY(bs::test::isResponse(embedResponse.value()));
+}
+
+void TestInferenceServiceIpc::testDeferredRequestCancellationSignalsHealth()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_REQUEST_DELAY_MS"), QStringLiteral("1200"));
+    launch.startTimeoutMs = 20000;
+    launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    QVERIFY2(harness.start(launch), "Failed to start inference service");
+
+    bs::SocketClient liveClient;
+    QVERIFY2(bs::test::waitForSocketConnection(liveClient, harness.socketPath(), 5000),
+             "Failed to connect live inference client");
+    bs::SocketClient healthClient;
+    QVERIFY2(bs::test::waitForSocketConnection(healthClient, harness.socketPath(), 5000),
+             "Failed to connect health inference client");
+
+    bool embedCompleted = false;
+    std::optional<QJsonObject> embedResponse;
+    const QString cancelToken = QStringLiteral("cancel-mid-flight");
+    QJsonObject params;
+    params[QStringLiteral("query")] = QStringLiteral("cancelled placeholder embed");
+    params[QStringLiteral("requestId")] = QStringLiteral("cancelled-placeholder-1");
+    params[QStringLiteral("cancelToken")] = cancelToken;
+    liveClient.sendRequestAsync(
+        QStringLiteral("embed_query"),
+        params,
+        5000,
+        [&](const std::optional<QJsonObject>& response) {
+            embedResponse = response;
+            embedCompleted = true;
+        });
+
+    QTest::qWait(100);
+
+    QJsonObject cancelParams;
+    cancelParams[QStringLiteral("cancelToken")] = cancelToken;
+    const QJsonObject cancelResponse =
+        bs::test::requestOrFailWithDiagnostics(healthClient,
+                                               QStringLiteral("cancel_request"),
+                                               cancelParams,
+                                               1000,
+                                               harness.socketPath());
+    QVERIFY(bs::test::isResponse(cancelResponse));
+    QVERIFY(bs::test::resultPayload(cancelResponse).value(QStringLiteral("cancelled")).toBool(false));
+
+    QTRY_VERIFY_WITH_TIMEOUT(embedCompleted, 5000);
+    QVERIFY(embedResponse.has_value());
+    QVERIFY(bs::test::isResponse(embedResponse.value()));
+    const QJsonObject embedPayload = bs::test::resultPayload(embedResponse.value());
+    QCOMPARE(embedPayload.value(QStringLiteral("status")).toString(), QStringLiteral("cancelled"));
+
+    const QJsonObject healthResponse =
+        bs::test::requestOrFailWithDiagnostics(healthClient,
+                                               QStringLiteral("get_inference_health"),
+                                               {},
+                                               1000,
+                                               harness.socketPath());
+    QVERIFY(bs::test::isResponse(healthResponse));
+    const QJsonObject health = bs::test::resultPayload(healthResponse);
+    QVERIFY(health.value(QStringLiteral("cancelSignalCount")).toInteger(0) >= 1);
+    const QJsonObject cancelledCountByRole =
+        health.value(QStringLiteral("cancelledCountByRole")).toObject();
+    QVERIFY(cancelledCountByRole.value(QStringLiteral("bi-encoder")).toInteger(0) >= 1);
+    const QJsonObject inFlightCountByRole =
+        health.value(QStringLiteral("inFlightCountByRole")).toObject();
+    QCOMPARE(inFlightCountByRole.value(QStringLiteral("bi-encoder")).toInteger(1), 0);
+}
+
+void TestInferenceServiceIpc::testRebuildAdmissionRespectsLiveInFlightPressure()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_REQUEST_DELAY_MS"), QStringLiteral("1200"));
+    launch.startTimeoutMs = 20000;
+    launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    QVERIFY2(harness.start(launch), "Failed to start inference service");
+
+    bs::SocketClient liveClient;
+    QVERIFY2(bs::test::waitForSocketConnection(liveClient, harness.socketPath(), 5000),
+             "Failed to connect live inference client");
+    bs::SocketClient rebuildClient;
+    QVERIFY2(bs::test::waitForSocketConnection(rebuildClient, harness.socketPath(), 5000),
+             "Failed to connect rebuild inference client");
+
+    bool liveCompleted = false;
+    std::optional<QJsonObject> liveResponse;
+    QJsonObject liveParams;
+    liveParams[QStringLiteral("query")] = QStringLiteral("live-in-flight");
+    liveParams[QStringLiteral("requestId")] = QStringLiteral("live-in-flight-1");
+    liveClient.sendRequestAsync(
+        QStringLiteral("embed_query"),
+        liveParams,
+        5000,
+        [&](const std::optional<QJsonObject>& response) {
+            liveResponse = response;
+            liveCompleted = true;
+        });
+
+    QTest::qWait(100);
+
+    QJsonObject rebuildParams;
+    QJsonArray texts;
+    texts.append(QStringLiteral("rebuild content"));
+    rebuildParams[QStringLiteral("texts")] = texts;
+    rebuildParams[QStringLiteral("priority")] = QStringLiteral("rebuild");
+    rebuildParams[QStringLiteral("role")] = QStringLiteral("bi-encoder");
+    rebuildParams[QStringLiteral("requestId")] = QStringLiteral("rebuild-while-live-1");
+    const QJsonObject rebuildResponse =
+        bs::test::requestOrFailWithDiagnostics(rebuildClient,
+                                               QStringLiteral("embed_passages"),
+                                               rebuildParams,
+                                               1200,
+                                               harness.socketPath());
+    QVERIFY(bs::test::isResponse(rebuildResponse));
+    const QJsonObject rebuildPayload = bs::test::resultPayload(rebuildResponse);
+    QCOMPARE(rebuildPayload.value(QStringLiteral("status")).toString(), QStringLiteral("degraded"));
+    QVERIFY(rebuildPayload.value(QStringLiteral("overload")).toBool(false));
+    QCOMPARE(rebuildPayload.value(QStringLiteral("lane")).toString(), QStringLiteral("rebuild"));
+
+    const QString fallbackReason = rebuildPayload.value(QStringLiteral("fallbackReason")).toString();
+    QVERIFY(fallbackReason == QStringLiteral("worker_live_lane_busy")
+            || fallbackReason == QStringLiteral("global_live_lane_priority"));
+
+    QTRY_VERIFY_WITH_TIMEOUT(liveCompleted, 5000);
+    QVERIFY(liveResponse.has_value());
+    QVERIFY(bs::test::isResponse(liveResponse.value()));
 }
 
 QTEST_MAIN(TestInferenceServiceIpc)

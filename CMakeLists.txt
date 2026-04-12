@@ -53,6 +53,15 @@ target_compile_options(sqlite3 PRIVATE -w)
 
 # ---------- Optional Dependencies ----------
 option(BETTERSPOTLIGHT_WITH_ONNX "Enable ONNX Runtime for semantic search" ON)
+if(APPLE)
+    option(BETTERSPOTLIGHT_REQUIRE_POPPLER
+           "Require Poppler PDF extraction backend in supported macOS/dev builds"
+           ON)
+else()
+    option(BETTERSPOTLIGHT_REQUIRE_POPPLER
+           "Require Poppler PDF extraction backend in supported macOS/dev builds"
+           OFF)
+endif()
 option(BETTERSPOTLIGHT_ENABLE_SPARKLE "Enable Sparkle update framework integration" OFF)
 option(BETTERSPOTLIGHT_FETCH_MODELS
        "Fetch embedding model assets into data/models when missing"
@@ -132,8 +141,46 @@ if(PkgConfig_FOUND)
     endif()
 endif()
 
+set(BETTERSPOTLIGHT_POPPLER_BACKEND "none")
+if(POPPLER_QT6_FOUND)
+    set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-qt6")
+elseif(POPPLER_CPP_FOUND)
+    set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-cpp")
+endif()
+
+if(BETTERSPOTLIGHT_REQUIRE_POPPLER AND BETTERSPOTLIGHT_POPPLER_BACKEND STREQUAL "none")
+    message(FATAL_ERROR
+        "Poppler was not detected, but BETTERSPOTLIGHT_REQUIRE_POPPLER=ON.\n"
+        "Supported macOS/dev flows require PDF extraction capability.\n"
+        "Install Poppler (for example via Homebrew) and ensure pkg-config can find it,\n"
+        "or use -DBETTERSPOTLIGHT_REQUIRE_POPPLER=OFF only for unsupported local forensics."
+    )
+endif()
+
+message(STATUS "BetterSpotlight PDF backend: ${BETTERSPOTLIGHT_POPPLER_BACKEND}")
+
 if(BETTERSPOTLIGHT_WITH_ONNX)
     find_package(ONNXRuntime QUIET)
+    if(NOT ONNXRuntime_FOUND)
+        message(FATAL_ERROR
+            "BETTERSPOTLIGHT_WITH_ONNX=ON but ONNX Runtime was not found.\n"
+            "Provide a valid ONNXRuntime toolchain, or configure with "
+            "-DBETTERSPOTLIGHT_WITH_ONNX=OFF only for unsupported degraded flows."
+        )
+    endif()
+
+    if(NOT EXISTS "${ONNXRuntime_INCLUDE_DIR}/onnxruntime_cxx_api.h")
+        message(FATAL_ERROR
+            "ONNX Runtime include dir is stale or invalid: ${ONNXRuntime_INCLUDE_DIR}\n"
+            "Expected header: ${ONNXRuntime_INCLUDE_DIR}/onnxruntime_cxx_api.h"
+        )
+    endif()
+
+    if(NOT EXISTS "${ONNXRuntime_LIBRARY}")
+        message(FATAL_ERROR
+            "ONNX Runtime library path is stale or invalid: ${ONNXRuntime_LIBRARY}"
+        )
+    endif()
 endif()
 
 # ---------- Subdirectories ----------
@@ -146,11 +193,7 @@ add_subdirectory(src/app)
 
 add_custom_target(betterspotlight-dev-runtime
     DEPENDS
-        betterspotlight
-        betterspotlight-indexer
-        betterspotlight-extractor
-        betterspotlight-query
-        betterspotlight-inference
+        betterspotlight-sync-runtime-bundle
 )
 
 enable_testing()

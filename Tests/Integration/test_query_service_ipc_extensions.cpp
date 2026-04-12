@@ -67,6 +67,7 @@ private slots:
     void testExtendedIpcBranches();
     void testHealthRequestNotBlockedByDelayedSearch();
     void testHealthRemainsCacheFirstWhenDiagnosticsRefreshIsSlow();
+    void testHealthReturnsDegradedSnapshotWhenDiagnosticsDbIsMissing();
 };
 
 void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
@@ -434,8 +435,14 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
             QVERIFY(severity == QStringLiteral("critical") || severity == QStringLiteral("expected_gap"));
         }
         const QJsonObject processStats = details.value(QStringLiteral("processStats")).toObject();
-        QVERIFY(processStats.value(QStringLiteral("query")).toObject()
-                    .value(QStringLiteral("available")).toBool(false));
+        const bool queryProcessAvailable =
+            processStats.value(QStringLiteral("query")).toObject()
+                .value(QStringLiteral("available")).toBool(false);
+        if (detailsState == QStringLiteral("fresh")) {
+            QVERIFY(queryProcessAvailable);
+        } else {
+            QVERIFY(!processStats.isEmpty() || !queryProcessAvailable);
+        }
         const QJsonObject bsignore = details.value(QStringLiteral("bsignore")).toObject();
         QVERIFY(bsignore.value(QStringLiteral("fileExists")).toBool(false));
         QVERIFY(bsignore.value(QStringLiteral("patternCount")).toInt() >= 1);
@@ -767,6 +774,40 @@ void TestQueryServiceIpcExtensions::testHealthRemainsCacheFirstWhenDiagnosticsRe
     QVERIFY(details.contains(QStringLiteral("detailsState")));
     QVERIFY(details.contains(QStringLiteral("detailsTimeMs")));
     QVERIFY(details.contains(QStringLiteral("detailsLagMs")));
+}
+
+void TestQueryServiceIpcExtensions::testHealthReturnsDegradedSnapshotWhenDiagnosticsDbIsMissing()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+    QVERIFY(!QFileInfo::exists(QDir(dataDir).filePath(QStringLiteral("index.db"))));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    QVERIFY2(harness.start(launch), "Failed to start query service for empty-db health check");
+
+    const QJsonObject response = harness.request(QStringLiteral("getQueryHealthV3"), {}, 1500);
+    QVERIFY2(bs::test::isResponse(response),
+             "Fresh isolated query health should return a degraded snapshot instead of an IPC error");
+
+    const QJsonObject payload = bs::test::resultPayload(response);
+    const QJsonObject indexHealth = payload.value(QStringLiteral("indexHealth")).toObject();
+    QCOMPARE(indexHealth.value(QStringLiteral("overallStatus")).toString(),
+             QStringLiteral("degraded"));
+    QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
+             QStringLiteral("health_snapshot_unavailable"));
+    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotState")));
+    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotTimeMs")));
+    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotLagMs")));
 }
 
 QTEST_MAIN(TestQueryServiceIpcExtensions)

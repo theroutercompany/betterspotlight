@@ -97,6 +97,10 @@ private:
         std::atomic<qint64> timedOut{0};
         std::atomic<qint64> cancelled{0};
         std::atomic<qint64> failed{0};
+        std::atomic<qint64> inFlight{0};
+        std::atomic<qint64> inFlightLive{0};
+        std::atomic<qint64> inFlightRebuild{0};
+        std::atomic<qint64> timeoutCleanup{0};
     };
 
     void initWorkers();
@@ -165,6 +169,8 @@ private:
     QString m_supervisorMode = QStringLiteral("actor_primary");
     bool m_supervisorModeCoerced = false;
     bool m_placeholderWorkersEnabled = false;
+    std::atomic<qint64> m_cancelSignalCount{0};
+    std::atomic<qint64> m_timeoutCleanupCount{0};
 
     static constexpr int kWorkerQueueLimitLive = 64;
     static constexpr int kWorkerQueueLimitRebuild = 512;
