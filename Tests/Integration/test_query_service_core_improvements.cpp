@@ -136,6 +136,7 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
 
     const QString docsDir = QDir(tempHome.path()).filePath(QStringLiteral("Documents"));
     QVERIFY(QDir().mkpath(docsDir));
+    QVERIFY(store.setSetting(QStringLiteral("activeVectorGeneration"), QStringLiteral("v1")));
 
     // Parser/filter corpus.
     const QString pdfPath = QDir(docsDir).filePath(QStringLiteral("breaking-sound-barrier.pdf"));
@@ -191,6 +192,10 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert(QStringLiteral("HOME"), tempHome.path());
     env.insert(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR"), dataDir);
+    env.insert(QStringLiteral("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE"), QStringLiteral("legacy"));
+    env.insert(QStringLiteral("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE"), QStringLiteral("legacy"));
+    env.insert(QStringLiteral("BETTERSPOTLIGHT_CONTROL_PLANE_MODE"), QStringLiteral("legacy"));
+    env.remove(QStringLiteral("BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES"));
     queryProcess.setProcessEnvironment(env);
     queryProcess.setProgram(queryBinary);
     queryProcess.setArguments({});
@@ -222,6 +227,28 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
                  QStringLiteral("indexer_unavailable"));
         QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);
         QCOMPARE(indexHealth.value(QStringLiteral("expectedGapFailures")).toInt(), 1);
+        QVERIFY(indexHealth.value(QStringLiteral("requiredModelInventoryReady")).toBool(false));
+        QCOMPARE(indexHealth.value(QStringLiteral("requiredModelInventoryReason")).toString(),
+                 QStringLiteral("ready"));
+        QVERIFY(indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(false));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationState")).toString(),
+                 QStringLiteral("migration_required"));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorMigrationReason")).toString(),
+                 QStringLiteral("target_generation_not_active"));
+        const QJsonObject runtimeSettings =
+            indexHealth.value(QStringLiteral("runtimeSettings")).toObject();
+        QCOMPARE(runtimeSettings.value(QStringLiteral("pipelineActorModeEffective")).toString(),
+                 QStringLiteral("actor_primary"));
+        QCOMPARE(runtimeSettings.value(QStringLiteral("healthSourceModeEffective")).toString(),
+                 QStringLiteral("aggregator_primary"));
+        QCOMPARE(runtimeSettings.value(QStringLiteral("controlPlaneModeEffective")).toString(),
+                 QStringLiteral("actor_primary"));
+        QVERIFY(runtimeSettings.value(QStringLiteral("pipelineActorModeCoerced")).toBool(false));
+        QVERIFY(runtimeSettings.value(QStringLiteral("healthSourceModeCoerced")).toBool(false));
+        QVERIFY(runtimeSettings.value(QStringLiteral("controlPlaneModeCoerced")).toBool(false));
+        QVERIFY(!runtimeSettings.value(QStringLiteral("unsupportedRuntimeModesAllowed")).toBool(true));
+        QCOMPARE(store.getSetting(QStringLiteral("activeVectorGeneration")).value_or(QString()),
+                 QStringLiteral("v1"));
         QVERIFY(!indexHealth.value(QStringLiteral("m2ModulesInitialized")).toBool(true));
     }
 
@@ -274,6 +301,9 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         QCOMPARE(indexHealth.value(QStringLiteral("queueInProgress")).toInt(), 2);
         QCOMPARE(indexHealth.value(QStringLiteral("queuePreparing")).toInt(), 2);
         QCOMPARE(indexHealth.value(QStringLiteral("queueCoalesced")).toInt(), 11);
+        QVERIFY(indexHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(false));
+        QCOMPARE(indexHealth.value(QStringLiteral("vectorGenerationState")).toString(),
+                 QStringLiteral("migration_required"));
         QVERIFY(indexHealth.value(QStringLiteral("retrievalAdvisory")).toObject().contains(
             QStringLiteral("code")));
     }

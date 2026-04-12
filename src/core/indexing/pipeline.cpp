@@ -3,6 +3,7 @@
 #include "core/extraction/extraction_manager.h"
 #include "core/fs/file_scanner.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -84,8 +85,16 @@ bool isTransientExtractionFailure(const PreparedWork& prepared)
 
 Pipeline::ActorMode readActorMode()
 {
-    const QString raw =
+    const QString requested =
         qEnvironmentVariable("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE").trimmed().toLower();
+    bool coerced = false;
+    const QString raw = runtime_mode_policy::effectivePipelineActorMode(requested, &coerced);
+    if (coerced) {
+        LOG_WARN(bsIndex,
+                 "Ignoring unsupported production pipeline mode '%s'; using actor_primary. "
+                 "Set BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES=1 to override for tests/forensics.",
+                 qPrintable(requested));
+    }
     if (raw == QLatin1String("legacy")) {
         return Pipeline::ActorMode::Legacy;
     }

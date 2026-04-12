@@ -639,6 +639,11 @@ void HealthAggregatorActor::buildAndPublishSnapshot(const QJsonObject& queryHeal
     vector[QStringLiteral("activeEmbedded")] = mergedHealth.value(QStringLiteral("totalEmbeddedVectors")).toInteger();
     vector[QStringLiteral("rebuildEmbedded")] = mergedHealth.value(QStringLiteral("vectorRebuildEmbedded")).toInteger();
     vector[QStringLiteral("rebuildStatus")] = mergedHealth.value(QStringLiteral("vectorRebuildStatus")).toString();
+    vector[QStringLiteral("activeGeneration")] = mergedHealth.value(QStringLiteral("vectorGenerationActive")).toString();
+    vector[QStringLiteral("targetGeneration")] = mergedHealth.value(QStringLiteral("vectorGenerationTarget")).toString();
+    vector[QStringLiteral("state")] = mergedHealth.value(QStringLiteral("vectorGenerationState")).toString();
+    vector[QStringLiteral("migrationRequired")] = mergedHealth.value(QStringLiteral("vectorMigrationRequired")).toBool(false);
+    vector[QStringLiteral("migrationReason")] = mergedHealth.value(QStringLiteral("vectorMigrationReason")).toString();
     snapshot.vector = vector;
 
     QJsonObject inference;

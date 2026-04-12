@@ -136,7 +136,6 @@ private:
 
     QJsonArray m_cachedServiceSnapshot;
     QJsonObject m_latestHealthSnapshot;
-    bool m_controlPlaneModeLegacy = false;
     bool m_healthModeLegacy = false;
 
     QString m_indexerStatus;
@@ -151,8 +150,6 @@ private:
     QTimer m_indexingStatusTimer;
     bool m_lastQueueRebuildRunning = false;
     qint64 m_lastQueueRebuildFinishedAtMs = 0;
-    bool m_pendingPostRebuildVectorRefresh = false;
-    int m_pendingPostRebuildVectorRefreshAttempts = 0;
     bool m_started = false;
     bool m_stopping = false;
     std::thread m_modelDownloadThread;

@@ -13,6 +13,57 @@ namespace bs {
 
 namespace {
 
+bool manifestHasRequiredRoles(const ModelManifest& manifest,
+                              QStringList* missingRolesOut = nullptr)
+{
+    QStringList missingRoles;
+    for (const QString& role : ModelRegistry::requiredProductionRoles()) {
+        const auto it = manifest.models.find(role.toStdString());
+        if (it == manifest.models.end() || it->second.file.trimmed().isEmpty()) {
+            missingRoles.append(role);
+        }
+    }
+    if (missingRolesOut) {
+        *missingRolesOut = missingRoles;
+    }
+    return missingRoles.isEmpty();
+}
+
+std::optional<ModelManifest> loadUsableManifest(const QString& dir,
+                                                QString* reasonOut = nullptr)
+{
+    if (reasonOut) {
+        *reasonOut = QString();
+    }
+
+    const QString manifestPath = QDir(dir).filePath(QStringLiteral("manifest.json"));
+    if (!QFile::exists(manifestPath)) {
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("manifest_missing");
+        }
+        return std::nullopt;
+    }
+
+    const std::optional<ModelManifest> manifest = ModelManifest::loadFromFile(manifestPath);
+    if (!manifest.has_value()) {
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("manifest_invalid");
+        }
+        return std::nullopt;
+    }
+
+    QStringList missingRoles;
+    if (!manifestHasRequiredRoles(manifest.value(), &missingRoles)) {
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("missing_required_roles:%1")
+                             .arg(missingRoles.join(QStringLiteral(",")));
+        }
+        return std::nullopt;
+    }
+
+    return manifest;
+}
+
 QStringList modelDirCandidates(bool includeEnvOverride)
 {
     const QString appDir = QCoreApplication::applicationDirPath();
@@ -173,24 +224,33 @@ void ModelRegistry::preload(const std::vector<std::string>& roles)
 
 QString ModelRegistry::resolveModelsDir()
 {
-    const QString appDir = QCoreApplication::applicationDirPath();
     const QStringList candidates = modelDirCandidates(/*includeEnvOverride=*/true);
 
     for (const QString& dir : candidates) {
-        const QString manifestPath = dir + QStringLiteral("/manifest.json");
-        if (QFile::exists(manifestPath)) {
+        QString rejectionReason;
+        if (loadUsableManifest(dir, &rejectionReason).has_value()) {
             LOG_INFO(bsCore, "ModelRegistry: resolved models dir to %s", qPrintable(dir));
             return dir;
         }
+        if (!rejectionReason.isEmpty()) {
+            LOG_WARN(bsCore,
+                     "ModelRegistry: rejecting models dir %s (%s)",
+                     qPrintable(dir),
+                     qPrintable(rejectionReason));
+        }
     }
 
-    LOG_WARN(bsCore, "ModelRegistry: manifest.json not found in any candidate dir. Searched: %s",
+    LOG_ERROR(bsCore, "ModelRegistry: no usable models directory found. Searched: %s",
              qPrintable(candidates.join(QStringLiteral(", "))));
+    return QString();
+}
 
-    const QString fallback = candidates.isEmpty()
-        ? QDir::cleanPath(appDir + QStringLiteral("/../Resources/models"))
-        : candidates.first();
-    return fallback;
+QStringList ModelRegistry::requiredProductionRoles()
+{
+    return {
+        QStringLiteral("bi-encoder"),
+        QStringLiteral("cross-encoder"),
+    };
 }
 
 const ModelManifest& ModelRegistry::manifest() const
@@ -201,6 +261,11 @@ const ModelManifest& ModelRegistry::manifest() const
 const QString& ModelRegistry::modelsDir() const
 {
     return m_modelsDir;
+}
+
+bool ModelRegistry::hasRequiredProductionRoles(QStringList* missingRolesOut) const
+{
+    return manifestHasRequiredRoles(m_manifest, missingRolesOut);
 }
 
 QString ModelRegistry::writableModelsDir()
@@ -230,14 +295,14 @@ bool ModelRegistry::ensureWritableModelsSeeded(QString* errorOut)
     const QStringList sources = modelDirCandidates(/*includeEnvOverride=*/false);
     QString sourceDir;
     for (const QString& candidate : sources) {
-        if (QFile::exists(candidate + QStringLiteral("/manifest.json"))) {
+        if (loadUsableManifest(candidate).has_value()) {
             sourceDir = candidate;
             break;
         }
     }
     if (sourceDir.isEmpty()) {
         if (errorOut) {
-            *errorOut = QStringLiteral("No source models directory with manifest.json was found");
+            *errorOut = QStringLiteral("No usable source models directory was found");
         }
         return false;
     }
@@ -255,6 +320,12 @@ bool ModelRegistry::ensureWritableModelsSeeded(QString* errorOut)
     if (!manifest.has_value()) {
         if (errorOut) {
             *errorOut = QStringLiteral("Failed to load seeded manifest.json from writable models dir");
+        }
+        return false;
+    }
+    if (!manifestHasRequiredRoles(manifest.value())) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Seeded manifest.json is missing required production roles");
         }
         return false;
     }

@@ -4,6 +4,7 @@
 #include "core/models/model_session.h"
 
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 #include <mutex>
@@ -45,6 +46,9 @@ public:
     // Falls back to the first candidate if none contain the manifest.
     static QString resolveModelsDir();
 
+    // Required roles that must exist in a manifest for production startup.
+    static QStringList requiredProductionRoles();
+
     // Default writable model cache location used for first-run downloads.
     // This is usually:
     //   ~/Library/Application Support/BetterSpotlight/models
@@ -57,6 +61,7 @@ public:
 
     const ModelManifest& manifest() const;
     const QString& modelsDir() const;
+    bool hasRequiredProductionRoles(QStringList* missingRolesOut = nullptr) const;
 
 private:
     ModelSession* getSessionUnlocked(const std::string& role,

@@ -816,7 +816,7 @@ Window {
                                     Layout.fillWidth: true
 
                                     Label {
-                                        text: qsTr("Enable automatic vector generation migration")
+                                        text: qsTr("Show vector upgrade guidance when semantic models change")
                                         font.pixelSize: 13
                                         color: "#1A1A1A"
                                         Layout.fillWidth: true
@@ -2101,7 +2101,7 @@ Window {
                                         { label: qsTr("BM25 Content Weight"), key: "bm25WeightContent" },
                                         { label: qsTr("Personalized LTR Enabled"), key: "personalizedLtrEnabled" },
                                         { label: qsTr("QA Snippet Enabled"), key: "qaSnippetEnabled" },
-                                        { label: qsTr("Auto Vector Migration"), key: "autoVectorMigration" },
+                                        { label: qsTr("Vector Upgrade Guidance"), key: "autoVectorMigration" },
                                         { label: qsTr("Semantic Threshold NL Base"), key: "semanticThresholdNaturalLanguageBase" },
                                         { label: qsTr("Semantic Threshold Short Base"), key: "semanticThresholdShortAmbiguousBase" },
                                         { label: qsTr("Semantic Threshold Path/Code Base"), key: "semanticThresholdPathOrCodeBase" },

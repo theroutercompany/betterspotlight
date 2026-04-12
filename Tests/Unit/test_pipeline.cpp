@@ -12,6 +12,35 @@
 
 #include <atomic>
 
+namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, const QByteArray& value)
+        : m_key(key)
+        , m_oldValue(qgetenv(key))
+        , m_hadValue(!m_oldValue.isNull())
+    {
+        qputenv(m_key, value);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (m_hadValue) {
+            qputenv(m_key, m_oldValue);
+        } else {
+            qunsetenv(m_key);
+        }
+    }
+
+private:
+    const char* m_key = nullptr;
+    QByteArray m_oldValue;
+    bool m_hadValue = false;
+};
+
+} // namespace
+
 class TestPipeline : public QObject {
     Q_OBJECT
 
@@ -19,6 +48,7 @@ private slots:
     void testLifecycleAndBehaviorPaths();
     void testTransientExtractionFailureTriggersBoundedRetriesWithBackoff();
     void testRebuildAbortsWhenDrainCannotSettle();
+    void testUnsupportedActorModesAreCoercedUnlessExplicitlyAllowed();
 };
 
 void TestPipeline::testLifecycleAndBehaviorPaths()
@@ -250,6 +280,37 @@ void TestPipeline::testRebuildAbortsWhenDrainCannotSettle()
              "Pipeline should resume and drain normally after an aborted rebuild");
 
     pipeline.stop();
+}
+
+void TestPipeline::testUnsupportedActorModesAreCoercedUnlessExplicitlyAllowed()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    bs::ExtractionManager extractor;
+    bs::PathRules rules;
+
+    {
+        ScopedEnvVar requestedMode("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE",
+                                   QByteArrayLiteral("legacy"));
+        qunsetenv("BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES");
+        bs::Pipeline pipeline(store, extractor, rules);
+        QCOMPARE(pipeline.actorModeString(), QStringLiteral("actor_primary"));
+    }
+
+    {
+        ScopedEnvVar requestedMode("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE",
+                                   QByteArrayLiteral("dual"));
+        ScopedEnvVar allowUnsupported("BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES",
+                                      QByteArrayLiteral("1"));
+        bs::Pipeline pipeline(store, extractor, rules);
+        QCOMPARE(pipeline.actorModeString(), QStringLiteral("dual"));
+    }
 }
 
 QTEST_MAIN(TestPipeline)

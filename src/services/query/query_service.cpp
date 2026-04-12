@@ -11,6 +11,7 @@
 #include "core/shared/search_result.h"
 #include "core/shared/search_options.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 #include "core/ranking/match_classifier.h"
 #include "core/ranking/cross_encoder_reranker.h"
 #include "core/ranking/personalized_ltr.h"
@@ -1004,13 +1005,30 @@ void QueryService::initM2Modules()
     refreshVectorGenerationState();
 
     const QString modelsDir = ModelRegistry::resolveModelsDir();
-    m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
+    if (!modelsDir.isEmpty()) {
+        m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
+        m_requiredModelInventoryReady =
+            m_modelRegistry->hasRequiredProductionRoles(&m_requiredModelInventoryMissingRoles);
+    } else {
+        m_modelRegistry.reset();
+        m_requiredModelInventoryMissingRoles = ModelRegistry::requiredProductionRoles();
+        m_requiredModelInventoryReady = false;
+    }
+    m_requiredModelInventoryReason = m_requiredModelInventoryReady
+        ? QStringLiteral("ready")
+        : QStringLiteral("required_models_unavailable");
+    if (!m_requiredModelInventoryReady) {
+        LOG_ERROR(bsIpc,
+                  "Required production model inventory unavailable; missing roles=[%s]",
+                  qPrintable(m_requiredModelInventoryMissingRoles.join(QStringLiteral(", "))));
+    }
 
-    m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder");
-    m_fastEmbeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder-fast");
     bool embeddingAvailable = false;
     bool fastEmbeddingAvailable = false;
-    if (!m_embeddingManager->initialize()) {
+    if (m_modelRegistry && m_modelRegistry->hasModel("bi-encoder")) {
+        m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder");
+    }
+    if (!m_embeddingManager || !m_embeddingManager->initialize()) {
         LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
     } else {
         embeddingAvailable = true;
@@ -1022,7 +1040,11 @@ void QueryService::initM2Modules()
         m_activeVectorDimensions = std::max(m_embeddingManager->embeddingDimensions(), 1);
         LOG_INFO(bsIpc, "EmbeddingManager initialized");
     }
-    if (!m_fastEmbeddingManager->initialize()) {
+    if (m_modelRegistry && m_modelRegistry->hasModel("bi-encoder-fast")) {
+        m_fastEmbeddingManager =
+            std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder-fast");
+    }
+    if (!m_fastEmbeddingManager || !m_fastEmbeddingManager->initialize()) {
         LOG_WARN(bsIpc, "Fast EmbeddingManager unavailable, dual-index retrieval disabled");
     } else {
         fastEmbeddingAvailable = true;
@@ -1041,22 +1063,11 @@ void QueryService::initM2Modules()
         targetState.provider = m_embeddingManager->providerName().toStdString();
         targetState.state = (m_activeVectorGeneration == m_targetVectorGeneration)
             ? "active"
-            : "building";
+            : "migration_required";
         targetState.progressPct = (m_activeVectorGeneration == m_targetVectorGeneration) ? 100.0 : 0.0;
         targetState.active = (m_activeVectorGeneration == m_targetVectorGeneration);
         m_vectorStore->upsertGenerationState(targetState);
         m_store->setSetting(QStringLiteral("targetVectorGeneration"), m_targetVectorGeneration);
-
-        const bool hasActiveMappings =
-            m_vectorStore->countMappingsForGeneration(m_activeVectorGeneration.toStdString()) > 0;
-        const bool hasActiveIndexFiles =
-            QFile::exists(vectorIndexPathForGeneration(m_activeVectorGeneration))
-            && QFile::exists(vectorMetaPathForGeneration(m_activeVectorGeneration));
-        if (!hasActiveMappings && !hasActiveIndexFiles
-            && m_activeVectorGeneration != m_targetVectorGeneration) {
-            m_vectorStore->setActiveGeneration(m_targetVectorGeneration.toStdString());
-            m_store->setSetting(QStringLiteral("activeVectorGeneration"), m_targetVectorGeneration);
-        }
     }
     if (fastEmbeddingAvailable) {
         VectorStore::GenerationState fastState;
@@ -1136,17 +1147,21 @@ void QueryService::initM2Modules()
         m_fastVectorIndex = std::move(loadedFastVectorIndex);
     }
 
-    m_fastCrossEncoderReranker =
-        std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder-fast");
-    if (m_fastCrossEncoderReranker->initialize()) {
+    if (m_modelRegistry && m_modelRegistry->hasModel("cross-encoder-fast")) {
+        m_fastCrossEncoderReranker =
+            std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder-fast");
+    }
+    if (m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Fast cross-encoder reranker initialized");
     } else {
         LOG_WARN(bsIpc, "Fast cross-encoder reranker unavailable");
     }
 
-    m_crossEncoderReranker =
-        std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder");
-    if (m_crossEncoderReranker->initialize()) {
+    if (m_modelRegistry && m_modelRegistry->hasModel("cross-encoder")) {
+        m_crossEncoderReranker =
+            std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder");
+    }
+    if (m_crossEncoderReranker && m_crossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Cross-encoder reranker initialized");
     } else {
         LOG_WARN(bsIpc, "Cross-encoder reranker not available — skipping reranking");
@@ -1173,58 +1188,14 @@ void QueryService::initM2Modules()
         m_learningSchedulerTimer.stop();
     }
 
-    m_qaExtractiveModel =
-        std::make_unique<QaExtractiveModel>(m_modelRegistry.get(), "qa-extractive");
-    if (m_qaExtractiveModel->initialize()) {
+    if (m_modelRegistry && m_modelRegistry->hasModel("qa-extractive")) {
+        m_qaExtractiveModel =
+            std::make_unique<QaExtractiveModel>(m_modelRegistry.get(), "qa-extractive");
+    }
+    if (m_qaExtractiveModel && m_qaExtractiveModel->initialize()) {
         LOG_INFO(bsIpc, "QA extractive model initialized");
     } else {
         LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
-    }
-
-    maybeStartBackgroundVectorMigration();
-}
-
-void QueryService::maybeStartBackgroundVectorMigration()
-{
-    if (!m_embeddingManager || !m_embeddingManager->isAvailable() || !m_store.has_value()) {
-        return;
-    }
-
-    if (m_targetVectorGeneration.isEmpty()
-        || m_activeVectorGeneration == m_targetVectorGeneration) {
-        return;
-    }
-
-    const QString autoMigrationSetting = m_store->getSetting(
-        QStringLiteral("autoVectorMigration")).value_or(QStringLiteral("true"));
-    if (autoMigrationSetting.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0
-        || autoMigrationSetting.compare(QStringLiteral("0"), Qt::CaseInsensitive) == 0
-        || autoMigrationSetting.compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0) {
-        LOG_INFO(bsIpc, "Automatic vector migration disabled via autoVectorMigration setting");
-        return;
-    }
-
-    QJsonObject params;
-    params[QStringLiteral("targetGeneration")] = m_targetVectorGeneration;
-    const QJsonObject response = handleRebuildVectorIndex(/*id=*/0, params);
-    const QString type = response.value(QStringLiteral("type")).toString();
-    if (type == QLatin1String("error")) {
-        const QString errorMsg = response.value(QStringLiteral("error"))
-                                     .toObject()
-                                     .value(QStringLiteral("message"))
-                                     .toString();
-        LOG_WARN(bsIpc, "Automatic vector migration start failed: %s", qPrintable(errorMsg));
-        return;
-    }
-
-    const QJsonObject result = response.value(QStringLiteral("result")).toObject();
-    if (result.value(QStringLiteral("started")).toBool(false)) {
-        const qint64 runId = result.value(QStringLiteral("runId")).toInteger();
-        LOG_INFO(bsIpc, "Automatic vector migration started (runId=%lld target=%s)",
-                 static_cast<long long>(runId),
-                 qUtf8Printable(m_targetVectorGeneration));
-    } else if (result.value(QStringLiteral("alreadyRunning")).toBool(false)) {
-        LOG_INFO(bsIpc, "Automatic vector migration already running");
     }
 }
 
@@ -4164,6 +4135,32 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
                                    ? (100.0 * static_cast<double>(rebuildStateCopy.processed)
                                       / static_cast<double>(rebuildStateCopy.totalCandidates))
                                    : 0.0;
+    const QString modelsDirResolved = m_modelRegistry
+        ? m_modelRegistry->modelsDir()
+        : ModelRegistry::resolveModelsDir();
+    const bool requiredModelInventoryReady = m_modelRegistry
+        ? m_requiredModelInventoryReady
+        : !modelsDirResolved.isEmpty();
+    const QString requiredModelInventoryReason = requiredModelInventoryReady
+        ? QStringLiteral("ready")
+        : QStringLiteral("required_models_unavailable");
+    const QStringList requiredModelInventoryMissingRoles = requiredModelInventoryReady
+        ? QStringList{}
+        : (m_modelRegistry
+            ? m_requiredModelInventoryMissingRoles
+            : ModelRegistry::requiredProductionRoles());
+    const QString manifestPath = modelsDirResolved.isEmpty()
+        ? QString()
+        : (modelsDirResolved + QStringLiteral("/manifest.json"));
+    const bool vectorMigrationRequired =
+        !m_targetVectorGeneration.isEmpty()
+        && m_activeVectorGeneration != m_targetVectorGeneration;
+    const QString vectorGenerationState = vectorMigrationRequired
+        ? QStringLiteral("migration_required")
+        : QStringLiteral("ready");
+    const QString vectorMigrationReason = vectorMigrationRequired
+        ? QStringLiteral("target_generation_not_active")
+        : QString();
 
     int queuePending = 0;
     int queueInProgress = 0;
@@ -4186,6 +4183,26 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     QJsonObject queueBulkhead;
     QString queueSource = QStringLiteral("unavailable");
     QJsonArray queueRoots;
+    const QString requestedPipelineActorMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE").trimmed().toLower();
+    bool pipelineActorModeCoerced = false;
+    const QString effectivePipelineActorMode =
+        runtime_mode_policy::effectivePipelineActorMode(requestedPipelineActorMode,
+                                                       &pipelineActorModeCoerced);
+    const QString requestedHealthSourceMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower();
+    bool healthSourceModeCoerced = false;
+    const QString effectiveHealthSourceMode =
+        runtime_mode_policy::effectiveHealthSourceMode(requestedHealthSourceMode,
+                                                       &healthSourceModeCoerced);
+    const QString requestedControlPlaneMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_CONTROL_PLANE_MODE").trimmed().toLower();
+    bool controlPlaneModeCoerced = false;
+    const QString effectiveControlPlaneMode =
+        runtime_mode_policy::effectiveControlPlaneMode(requestedControlPlaneMode,
+                                                       &controlPlaneModeCoerced);
+    const bool unsupportedRuntimeModesAllowed =
+        runtime_mode_policy::allowUnsupportedRuntimeModes();
 
     if (includeIndexerQueueProbe) {
         // Compatibility path (legacy getHealth/getHealthV2): pull direct queue status from indexer.
@@ -4240,6 +4257,9 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         || health.totalIndexedItems == 0) {
         overallStatus = QStringLiteral("rebuilding");
         healthStatusReason = QStringLiteral("rebuilding");
+    } else if (!requiredModelInventoryReady) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = requiredModelInventoryReason;
     } else if (queueRebuildStatus == QLatin1String("aborted")
                || queueRebuildStatus == QLatin1String("failed")) {
         overallStatus = QStringLiteral("degraded");
@@ -4328,9 +4348,17 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     indexHealth[QStringLiteral("vectorMigrationState")] = migrationStateCopy;
     indexHealth[QStringLiteral("vectorMigrationProgressPct")] = migrationProgressCopy;
     indexHealth[QStringLiteral("vectorGenerationActive")] = m_activeVectorGeneration;
+    indexHealth[QStringLiteral("vectorGenerationTarget")] = m_targetVectorGeneration;
+    indexHealth[QStringLiteral("vectorGenerationState")] = vectorGenerationState;
+    indexHealth[QStringLiteral("vectorMigrationRequired")] = vectorMigrationRequired;
+    indexHealth[QStringLiteral("vectorMigrationReason")] = vectorMigrationReason;
     indexHealth[QStringLiteral("activeVectorModelId")] = m_activeVectorModelId;
     indexHealth[QStringLiteral("activeVectorProvider")] = m_activeVectorProvider;
     indexHealth[QStringLiteral("activeVectorDimensions")] = m_activeVectorDimensions;
+    indexHealth[QStringLiteral("requiredModelInventoryReady")] = requiredModelInventoryReady;
+    indexHealth[QStringLiteral("requiredModelInventoryReason")] = requiredModelInventoryReason;
+    indexHealth[QStringLiteral("requiredModelInventoryMissingRoles")] =
+        QJsonArray::fromStringList(requiredModelInventoryMissingRoles);
     indexHealth[QStringLiteral("recentErrors")] = recentErrors;
     indexHealth[QStringLiteral("indexRoots")] = queueRoots;
     indexHealth[QStringLiteral("vectorRebuildStatus")] =
@@ -4359,9 +4387,15 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     vectorMigration[QStringLiteral("progressPct")] = migrationProgressCopy;
     vectorMigration[QStringLiteral("activeGeneration")] = m_activeVectorGeneration;
     vectorMigration[QStringLiteral("targetGeneration")] = m_targetVectorGeneration;
+    vectorMigration[QStringLiteral("required")] = vectorMigrationRequired;
+    vectorMigration[QStringLiteral("reason")] = vectorMigrationReason;
     indexHealth[QStringLiteral("vectorMigration")] = vectorMigration;
     QJsonObject vectorGeneration;
     vectorGeneration[QStringLiteral("active")] = m_activeVectorGeneration;
+    vectorGeneration[QStringLiteral("target")] = m_targetVectorGeneration;
+    vectorGeneration[QStringLiteral("state")] = vectorGenerationState;
+    vectorGeneration[QStringLiteral("migrationRequired")] = vectorMigrationRequired;
+    vectorGeneration[QStringLiteral("migrationReason")] = vectorMigrationReason;
     vectorGeneration[QStringLiteral("modelId")] = m_activeVectorModelId;
     vectorGeneration[QStringLiteral("provider")] = m_activeVectorProvider;
     vectorGeneration[QStringLiteral("dimensions")] = m_activeVectorDimensions;
@@ -4559,6 +4593,28 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightContent"), 1.0));
     runtimeSettings[QStringLiteral("autoVectorMigration")] =
         readBoolRuntimeSetting(QStringLiteral("autoVectorMigration"), true);
+    runtimeSettings[QStringLiteral("vectorMigrationAssistanceEnabled")] =
+        runtimeSettings.value(QStringLiteral("autoVectorMigration")).toBool(true);
+    runtimeSettings[QStringLiteral("unsupportedRuntimeModesAllowed")] =
+        unsupportedRuntimeModesAllowed;
+    runtimeSettings[QStringLiteral("pipelineActorModeRequested")] =
+        requestedPipelineActorMode;
+    runtimeSettings[QStringLiteral("pipelineActorModeEffective")] =
+        effectivePipelineActorMode;
+    runtimeSettings[QStringLiteral("pipelineActorModeCoerced")] =
+        pipelineActorModeCoerced;
+    runtimeSettings[QStringLiteral("healthSourceModeRequested")] =
+        requestedHealthSourceMode;
+    runtimeSettings[QStringLiteral("healthSourceModeEffective")] =
+        effectiveHealthSourceMode;
+    runtimeSettings[QStringLiteral("healthSourceModeCoerced")] =
+        healthSourceModeCoerced;
+    runtimeSettings[QStringLiteral("controlPlaneModeRequested")] =
+        requestedControlPlaneMode;
+    runtimeSettings[QStringLiteral("controlPlaneModeEffective")] =
+        effectiveControlPlaneMode;
+    runtimeSettings[QStringLiteral("controlPlaneModeCoerced")] =
+        controlPlaneModeCoerced;
     runtimeSettings[QStringLiteral("semanticThresholdNaturalLanguageBase")] = std::clamp(
         readDoubleRuntimeSetting(QStringLiteral("semanticThresholdNaturalLanguageBase"), 0.62),
         0.0,
@@ -4808,18 +4864,24 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         (m_fastVectorIndex && m_fastVectorIndex->isAvailable());
     runtimeComponents[QStringLiteral("modelRegistryInitialized")] =
         (m_modelRegistry != nullptr);
+    runtimeComponents[QStringLiteral("requiredModelInventoryReady")] =
+        requiredModelInventoryReady;
+    runtimeComponents[QStringLiteral("requiredModelInventoryReason")] =
+        requiredModelInventoryReason;
+    runtimeComponents[QStringLiteral("requiredModelInventoryMissingRoles")] =
+        QJsonArray::fromStringList(requiredModelInventoryMissingRoles);
+    runtimeComponents[QStringLiteral("vectorGenerationState")] = vectorGenerationState;
+    runtimeComponents[QStringLiteral("vectorMigrationRequired")] = vectorMigrationRequired;
+    runtimeComponents[QStringLiteral("vectorMigrationReason")] = vectorMigrationReason;
     indexHealth[QStringLiteral("runtimeComponents")] = runtimeComponents;
     if (m_learningEngine) {
         indexHealth[QStringLiteral("learningHealth")] = learningHealthSnapshot();
     }
 
-    const QString modelsDirResolved = m_modelRegistry
-        ? m_modelRegistry->modelsDir()
-        : ModelRegistry::resolveModelsDir();
-    const QString manifestPath = modelsDirResolved + QStringLiteral("/manifest.json");
     indexHealth[QStringLiteral("modelsDirResolved")] = modelsDirResolved;
     indexHealth[QStringLiteral("manifestPathResolved")] = manifestPath;
-    indexHealth[QStringLiteral("manifestPresent")] = QFileInfo::exists(manifestPath);
+    indexHealth[QStringLiteral("manifestPresent")] =
+        !manifestPath.isEmpty() && QFileInfo::exists(manifestPath);
 
     QJsonArray modelManifest;
     if (m_modelRegistry) {

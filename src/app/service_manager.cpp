@@ -5,6 +5,7 @@
 #include "core/models/model_manifest.h"
 #include "core/models/model_registry.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -299,12 +300,31 @@ ServiceManager::ServiceManager(QObject* parent)
     , m_queryStatus(QStringLiteral("stopped"))
     , m_inferenceStatus(QStringLiteral("stopped"))
 {
-    m_controlPlaneModeLegacy =
-        qEnvironmentVariable("BETTERSPOTLIGHT_CONTROL_PLANE_MODE").trimmed().toLower()
-            == QLatin1String("legacy");
-    m_healthModeLegacy =
-        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower()
-            == QLatin1String("legacy");
+    const QString requestedControlPlaneMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_CONTROL_PLANE_MODE").trimmed().toLower();
+    bool controlPlaneModeCoerced = false;
+    const QString controlPlaneMode =
+        runtime_mode_policy::effectiveControlPlaneMode(requestedControlPlaneMode,
+                                                       &controlPlaneModeCoerced);
+    if (controlPlaneModeCoerced) {
+        LOG_WARN(bsCore,
+                 "Ignoring unsupported legacy control-plane mode; using actor_primary. "
+                 "Set BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES=1 to override for tests/forensics.");
+    }
+
+    const QString requestedHealthMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower();
+    bool healthModeCoerced = false;
+    const QString healthMode =
+        runtime_mode_policy::effectiveHealthSourceMode(requestedHealthMode,
+                                                       &healthModeCoerced);
+    if (healthModeCoerced) {
+        LOG_WARN(bsCore,
+                 "Ignoring unsupported legacy health source mode; using aggregator_primary. "
+                 "Set BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES=1 to override for tests/forensics.");
+    }
+    Q_UNUSED(controlPlaneMode);
+    m_healthModeLegacy = healthMode == QLatin1String("legacy");
 
     startControlPlaneThread();
     startHealthThread();
@@ -561,8 +581,6 @@ void ServiceManager::start()
     m_indexingActive = false;
     m_lastQueueRebuildRunning = false;
     m_lastQueueRebuildFinishedAtMs = 0;
-    m_pendingPostRebuildVectorRefresh = false;
-    m_pendingPostRebuildVectorRefreshAttempts = 0;
     setModelDownloadState(/*running=*/false, QString(), /*hasError=*/false);
 
     // Register all services
@@ -649,8 +667,6 @@ void ServiceManager::stop()
     m_indexingActive = false;
     m_lastQueueRebuildRunning = false;
     m_lastQueueRebuildFinishedAtMs = 0;
-    m_pendingPostRebuildVectorRefresh = false;
-    m_pendingPostRebuildVectorRefreshAttempts = 0;
     setModelDownloadState(/*running=*/false, modelDownloadStatus(), /*hasError=*/false);
     m_indexingStatusTimer.stop();
     m_indexerStatus = QStringLiteral("stopped");
@@ -1138,6 +1154,12 @@ bool ServiceManager::snapshotSatisfiesOperationalReadiness(const QJsonObject& sn
         return false;
     }
 
+    if (!snapshot.value(QStringLiteral("requiredModelInventoryReady")).toBool(true)) {
+        setReason(snapshot.value(QStringLiteral("requiredModelInventoryReason"))
+                      .toString(QStringLiteral("required_models_unavailable")));
+        return false;
+    }
+
     const QString overallStatus =
         snapshot.value(QStringLiteral("overallStatus")).toString(QStringLiteral("unknown"));
     if (overallStatus == QLatin1String("degraded")
@@ -1363,39 +1385,19 @@ void ServiceManager::refreshIndexerQueueStatus()
         && rebuildFinishedAtMs != m_lastQueueRebuildFinishedAtMs) {
         const QJsonObject settings = readAppSettings();
         if (readBoolSetting(settings, QStringLiteral("autoVectorMigration"), true)) {
-            m_pendingPostRebuildVectorRefresh = true;
-            m_pendingPostRebuildVectorRefreshAttempts = 0;
             LOG_INFO(bsCore,
-                     "ServiceManager: index rebuild completed at %lld, scheduling vector rebuild",
+                     "ServiceManager: index rebuild completed at %lld; vector upgrade guidance is enabled",
                      static_cast<long long>(rebuildFinishedAtMs));
+            requestHealthRefresh();
         } else {
             LOG_INFO(bsCore,
-                     "ServiceManager: index rebuild completed but auto vector migration is disabled");
+                     "ServiceManager: index rebuild completed and vector upgrade guidance is disabled");
         }
     }
 
     m_lastQueueRebuildRunning = rebuildRunning;
     if (rebuildFinishedAtMs > 0) {
         m_lastQueueRebuildFinishedAtMs = rebuildFinishedAtMs;
-    }
-
-    if (m_pendingPostRebuildVectorRefresh && !rebuildRunning) {
-        if (m_pendingPostRebuildVectorRefreshAttempts >= 5) {
-            LOG_WARN(bsCore,
-                     "ServiceManager: giving up auto vector rebuild after %d attempts",
-                     m_pendingPostRebuildVectorRefreshAttempts);
-            m_pendingPostRebuildVectorRefresh = false;
-            m_pendingPostRebuildVectorRefreshAttempts = 0;
-        } else {
-            ++m_pendingPostRebuildVectorRefreshAttempts;
-            if (rebuildVectorIndex()) {
-                LOG_INFO(bsCore,
-                         "ServiceManager: auto vector rebuild triggered (attempt=%d)",
-                         m_pendingPostRebuildVectorRefreshAttempts);
-                m_pendingPostRebuildVectorRefresh = false;
-                m_pendingPostRebuildVectorRefreshAttempts = 0;
-            }
-        }
     }
 
     if (m_indexingActive == active) {

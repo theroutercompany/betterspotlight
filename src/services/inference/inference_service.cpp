@@ -143,7 +143,6 @@ void InferenceService::initWorkers()
         auto worker = std::make_unique<Worker>();
         worker->role = role;
         worker->roleName = roleToString(role);
-        worker->registry = std::make_unique<ModelRegistry>(ModelRegistry::resolveModelsDir());
         initializeWorkerModel(*worker);
         startWorkerThread(*worker);
         m_workers.push_back(std::move(worker));
@@ -517,7 +516,14 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
         return true;
     }
 
-    worker.registry = std::make_unique<ModelRegistry>(ModelRegistry::resolveModelsDir());
+    const QString modelsDir = ModelRegistry::resolveModelsDir();
+    if (modelsDir.isEmpty()) {
+        LOG_ERROR(bsIpc,
+                  "InferenceService: required production model inventory unavailable for worker '%s'",
+                  qUtf8Printable(worker.roleName));
+        return false;
+    }
+    worker.registry = std::make_unique<ModelRegistry>(modelsDir);
 
     const auto initializeEmbedding = [&](const char* role) {
         worker.embedding = std::make_unique<EmbeddingManager>(worker.registry.get(), role);

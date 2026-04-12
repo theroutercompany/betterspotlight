@@ -184,6 +184,7 @@ private slots:
     void testLaunchAtLoginSuccessPersists();
     void testShowInDockFailureDoesNotPersist();
     void testShowInDockSuccessPersists();
+    void testAutoVectorMigrationRoundTripsAsGuidanceSetting();
     void testRuntimeBoolSettingReadsDbValue();
     void testClearFeedbackDataPurgesLearningTables();
     void testExportDataIncludesLearningTables();
@@ -302,6 +303,24 @@ void TestSettingsControllerPlatform::testShowInDockSuccessPersists()
 
     const QJsonObject settings = readSettings();
     QVERIFY(settings.value(QStringLiteral("showInDock")).toBool(false));
+}
+
+void TestSettingsControllerPlatform::testAutoVectorMigrationRoundTripsAsGuidanceSetting()
+{
+    bs::SettingsController controller;
+    QSignalSpy changedSpy(&controller, &bs::SettingsController::autoVectorMigrationChanged);
+    QSignalSpy settingsSpy(&controller, &bs::SettingsController::settingsChanged);
+
+    QVERIFY(controller.autoVectorMigration());
+    controller.setAutoVectorMigration(false);
+
+    QCOMPARE(changedSpy.count(), 1);
+    QCOMPARE(settingsSpy.count(), 1);
+    QVERIFY(!controller.autoVectorMigration());
+
+    const QJsonObject settings = readSettings();
+    QVERIFY(settings.contains(QStringLiteral("autoVectorMigration")));
+    QVERIFY(!settings.value(QStringLiteral("autoVectorMigration")).toBool(true));
 }
 
 void TestSettingsControllerPlatform::testRuntimeBoolSettingReadsDbValue()

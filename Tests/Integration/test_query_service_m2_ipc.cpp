@@ -625,9 +625,23 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     noFakeParams[QStringLiteral("includePaths")] = noFakePaths;
     const QJsonObject unsupportedResponse =
         noFakeHarness.request(QStringLiteral("rebuild_vector_index"), noFakeParams, 8000);
-    QVERIFY(bs::test::isError(unsupportedResponse));
-    QCOMPARE(bs::test::errorPayload(unsupportedResponse).value(QStringLiteral("code")).toInt(),
-             static_cast<int>(bs::IpcErrorCode::Unsupported));
+    QVERIFY(bs::test::isResponse(unsupportedResponse));
+    const QJsonObject unsupportedResult = bs::test::resultPayload(unsupportedResponse);
+    QVERIFY(unsupportedResult.value(QStringLiteral("started")).toBool(false)
+            || unsupportedResult.value(QStringLiteral("alreadyRunning")).toBool(false));
+
+    const QJsonObject noFakeHealth =
+        noFakeHarness.request(QStringLiteral("getHealth"), {}, 8000);
+    QVERIFY(bs::test::isResponse(noFakeHealth));
+    const QJsonObject noFakeIndexHealth = bs::test::resultPayload(noFakeHealth)
+                                              .value(QStringLiteral("indexHealth"))
+                                              .toObject();
+    QVERIFY(noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReady")).toBool(false));
+    QCOMPARE(noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReason")).toString(),
+             QStringLiteral("ready"));
+    QVERIFY(QDir::cleanPath(
+                noFakeIndexHealth.value(QStringLiteral("modelsDirResolved")).toString())
+            != QDir::cleanPath(fakeModelsDir.path()));
 }
 
 void TestQueryServiceM2Ipc::testRecordInteractionRemainsCompatibleWithPathAndTypeAffinity()

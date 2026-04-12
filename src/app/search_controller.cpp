@@ -3,6 +3,7 @@
 #include "core/ipc/service_base.h"
 #include "core/ipc/supervisor.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 
 #include <QClipboard>
 #include <QDateTime>
@@ -547,9 +548,16 @@ QVariantMap SearchController::getHealthSync()
         return unavailable;
     };
 
-    const QString mode = qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE")
-                             .trimmed()
-                             .toLower();
+    const QString requestedMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower();
+    bool coercedMode = false;
+    const QString mode =
+        runtime_mode_policy::effectiveHealthSourceMode(requestedMode, &coercedMode);
+    if (coercedMode) {
+        LOG_WARN(bsCore,
+                 "Ignoring unsupported legacy health source mode; using aggregator_primary. "
+                 "Set BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES=1 to override for tests/forensics.");
+    }
     const bool actorPreferred = mode != QLatin1String("legacy");
     const bool actorOnly = mode == QLatin1String("aggregator_primary");
 

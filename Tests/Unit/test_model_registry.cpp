@@ -86,6 +86,79 @@ bool prepareCrossEncoderFixtureDir(const QString& modelsDir, bool includeAliasFa
     return true;
 }
 
+bool prepareUsableProductionFixtureDir(const QString& modelsDir)
+{
+    if (!bs::test::prepareFixtureEmbeddingModelFiles(modelsDir)) {
+        return false;
+    }
+
+    QJsonObject strongEntry;
+    strongEntry.insert(QStringLiteral("name"), QStringLiteral("fixture-embed"));
+    strongEntry.insert(QStringLiteral("modelId"), QStringLiteral("fixture-embed-v1"));
+    strongEntry.insert(QStringLiteral("generationId"), QStringLiteral("v1"));
+    strongEntry.insert(QStringLiteral("file"), QStringLiteral("bge-small-en-v1.5-int8.onnx"));
+    strongEntry.insert(QStringLiteral("vocab"), QStringLiteral("vocab.txt"));
+    strongEntry.insert(QStringLiteral("tokenizer"), QStringLiteral("wordpiece"));
+    strongEntry.insert(QStringLiteral("task"), QStringLiteral("embedding"));
+    strongEntry.insert(QStringLiteral("inputs"), QJsonArray{
+        QStringLiteral("input_ids"),
+        QStringLiteral("attention_mask"),
+        QStringLiteral("token_type_ids"),
+    });
+    strongEntry.insert(QStringLiteral("outputs"), QJsonArray{
+        QStringLiteral("last_hidden_state"),
+    });
+
+    QJsonObject rerankEntry = strongEntry;
+    rerankEntry.insert(QStringLiteral("name"), QStringLiteral("fixture-rerank"));
+    rerankEntry.insert(QStringLiteral("modelId"), QStringLiteral("fixture-rerank-v1"));
+    rerankEntry.insert(QStringLiteral("task"), QStringLiteral("rerank"));
+    rerankEntry.insert(QStringLiteral("outputs"), QJsonArray{
+        QStringLiteral("logits"),
+    });
+
+    QJsonObject models;
+    models.insert(QStringLiteral("bi-encoder"), strongEntry);
+    models.insert(QStringLiteral("cross-encoder"), rerankEntry);
+
+    QJsonObject root;
+    root.insert(QStringLiteral("models"), models);
+
+    QFile manifestFile(QDir(modelsDir).filePath(QStringLiteral("manifest.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    manifestFile.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    manifestFile.close();
+    return true;
+}
+
+QStringList fallbackFixtureCandidateDirs()
+{
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QStringList dirs = {
+        QDir::cleanPath(appDir + QStringLiteral("/../Resources/models")),
+        QDir::cleanPath(appDir + QStringLiteral("/../../app/betterspotlight.app/Contents/Resources/models")),
+        QDir::cleanPath(appDir + QStringLiteral("/../../../app/betterspotlight.app/Contents/Resources/models")),
+    };
+    dirs.removeDuplicates();
+    return dirs;
+}
+
+bool prepareUsableFallbackFixtureCandidates()
+{
+    bool preparedAny = false;
+    for (const QString& dir : fallbackFixtureCandidateDirs()) {
+        if (!QDir().mkpath(dir)) {
+            continue;
+        }
+        if (prepareUsableProductionFixtureDir(dir)) {
+            preparedAny = true;
+        }
+    }
+    return preparedAny;
+}
+
 } // namespace
 
 class TestModelRegistry : public QObject {
@@ -244,6 +317,8 @@ void TestModelRegistry::runResolveModelsDirUsesEnvOverride()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
+    QVERIFY2(prepareUsableFallbackFixtureCandidates(),
+             "Failed to prepare usable fallback model fixture candidates");
 
     QFile manifestFile(tempDir.path() + QStringLiteral("/manifest.json"));
     QVERIFY(manifestFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
@@ -252,7 +327,13 @@ void TestModelRegistry::runResolveModelsDirUsesEnvOverride()
 
     ScopedEnvVar envModelsDir("BETTERSPOTLIGHT_MODELS_DIR", tempDir.path().toUtf8());
     const QString resolved = bs::ModelRegistry::resolveModelsDir();
-    QCOMPARE(QDir::cleanPath(resolved), QDir::cleanPath(tempDir.path()));
+    QVERIFY2(!resolved.isEmpty(), "Expected resolveModelsDir to find a usable fallback directory");
+    QVERIFY(QDir::cleanPath(resolved) != QDir::cleanPath(tempDir.path()));
+
+    bs::ModelRegistry registry(resolved);
+    QStringList missingRoles;
+    QVERIFY(registry.hasRequiredProductionRoles(&missingRoles));
+    QVERIFY(missingRoles.isEmpty());
 }
 
 void TestModelRegistry::runGetSessionFallbackRoleAndPreload()
@@ -321,20 +402,15 @@ void TestModelRegistry::runEnsureWritableModelsSeeded()
 {
     QStandardPaths::setTestModeEnabled(true);
 
-    const QString sourceDir = QDir::cleanPath(
-        QCoreApplication::applicationDirPath() + QStringLiteral("/../Resources/models"));
-    QVERIFY(QDir().mkpath(sourceDir));
-
-    QFile sourceManifest(sourceDir + QStringLiteral("/manifest.json"));
-    QVERIFY(sourceManifest.open(QIODevice::WriteOnly | QIODevice::Truncate));
-    sourceManifest.write("{\"models\":{}}");
-    sourceManifest.close();
+    QVERIFY2(prepareUsableFallbackFixtureCandidates(),
+             "Failed to prepare usable production fixture models directory");
+    const QString writable = bs::ModelRegistry::writableModelsDir();
+    QDir(writable).removeRecursively();
 
     QString error;
     QVERIFY(bs::ModelRegistry::ensureWritableModelsSeeded(&error));
     QVERIFY2(error.isEmpty(), qPrintable(error));
 
-    const QString writable = bs::ModelRegistry::writableModelsDir();
     const QString manifestPath = writable + QStringLiteral("/manifest.json");
     const QString vocabPath = writable + QStringLiteral("/vocab.txt");
     QVERIFY(QFileInfo::exists(manifestPath));

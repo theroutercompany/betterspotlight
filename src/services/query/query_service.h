@@ -142,11 +142,13 @@ private:
     QString m_activeVectorModelId = QStringLiteral("legacy");
     QString m_activeVectorProvider = QStringLiteral("cpu");
     int m_activeVectorDimensions = 384;
+    bool m_requiredModelInventoryReady = false;
+    QString m_requiredModelInventoryReason = QStringLiteral("required_models_unavailable");
+    QStringList m_requiredModelInventoryMissingRoles;
 
     QString vectorIndexPathForGeneration(const QString& generation) const;
     QString vectorMetaPathForGeneration(const QString& generation) const;
     void refreshVectorGenerationState();
-    void maybeStartBackgroundVectorMigration();
 
     // Opens the store if not already open. Returns true on success.
     bool ensureStoreOpen();

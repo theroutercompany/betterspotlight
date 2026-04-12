@@ -10,6 +10,7 @@ class TestHealthConsistencyV2 : public QObject {
 private slots:
     void initTestCase();
     void testSearchControllerUsesActorSnapshotInAggregatorPrimary();
+    void testLegacyHealthSourceIsCoercedToAggregatorPrimary();
     void testSnapshotSchemaContainsRequiredSections();
 };
 
@@ -59,6 +60,44 @@ void TestHealthConsistencyV2::testSearchControllerUsesActorSnapshotInAggregatorP
 
     const QVariantMap processMap = health.value(QStringLiteral("processes")).toMap();
     QVERIFY(!processMap.value(QStringLiteral("managed")).toList().isEmpty());
+}
+
+void TestHealthConsistencyV2::testLegacyHealthSourceIsCoercedToAggregatorPrimary()
+{
+    qputenv("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE", QByteArray("legacy"));
+    qunsetenv("BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES");
+
+    bs::ServiceManager manager;
+    bs::SearchController controller;
+    controller.setServiceManager(&manager);
+
+    QJsonObject snapshot;
+    snapshot[QStringLiteral("schemaVersion")] = 2;
+    snapshot[QStringLiteral("snapshotId")] = QStringLiteral("inst:2");
+    snapshot[QStringLiteral("snapshotTimeMs")] = static_cast<qint64>(2);
+    snapshot[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    snapshot[QStringLiteral("instanceId")] = QStringLiteral("inst");
+    snapshot[QStringLiteral("overallStatus")] = QStringLiteral("healthy");
+    snapshot[QStringLiteral("snapshotState")] = QStringLiteral("fresh");
+    snapshot[QStringLiteral("healthStatusReason")] = QStringLiteral("healthy");
+
+    QJsonObject processes;
+    processes[QStringLiteral("managed")] = QJsonArray{};
+    snapshot[QStringLiteral("processes")] = processes;
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &manager,
+        "onHealthSnapshotUpdated",
+        Qt::DirectConnection,
+        Q_ARG(QJsonObject, snapshot)));
+
+    const QVariantMap health = controller.getHealthSync();
+    QCOMPARE(health.value(QStringLiteral("overallStatus")).toString(),
+             QStringLiteral("healthy"));
+    QCOMPARE(health.value(QStringLiteral("snapshotState")).toString(),
+             QStringLiteral("fresh"));
+
+    qputenv("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE", QByteArray("aggregator_primary"));
 }
 
 void TestHealthConsistencyV2::testSnapshotSchemaContainsRequiredSections()

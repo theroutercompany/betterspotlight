@@ -45,11 +45,6 @@ QString fixtureModelsSourceDir()
         return QDir::cleanPath(explicitEnv);
     }
 
-    const QString resolved = bs::ModelRegistry::resolveModelsDir();
-    if (hasFixtureModelPair(resolved)) {
-        return QDir::cleanPath(resolved);
-    }
-
     const QString appCandidate =
         findRepoModelsDirFrom(QCoreApplication::applicationDirPath());
     if (!appCandidate.isEmpty()) {
@@ -59,6 +54,11 @@ QString fixtureModelsSourceDir()
     const QString cwdCandidate = findRepoModelsDirFrom(QDir::currentPath());
     if (!cwdCandidate.isEmpty()) {
         return cwdCandidate;
+    }
+
+    const QString resolved = bs::ModelRegistry::resolveModelsDir();
+    if (hasFixtureModelPair(resolved)) {
+        return QDir::cleanPath(resolved);
     }
 
     return QString();
