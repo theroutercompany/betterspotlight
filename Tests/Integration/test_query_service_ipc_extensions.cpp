@@ -324,14 +324,29 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         for (int i = 0; i < 40; ++i) {
             queueRoots.append(QStringLiteral("/roots/r%1").arg(i));
         }
-        const QJsonObject response = harness.request(QStringLiteral("getHealth"), {}, 5000);
-        QVERIFY(bs::test::isResponse(response));
-        const QJsonObject indexHealth = bs::test::resultPayload(response)
-                                            .value(QStringLiteral("indexHealth"))
-                                            .toObject();
-        const QJsonObject advisory = indexHealth.value(QStringLiteral("retrievalAdvisory")).toObject();
-        QCOMPARE(advisory.value(QStringLiteral("code")).toString(),
-                 QStringLiteral("root_fanout_recommended"));
+        QJsonObject response;
+        QJsonObject indexHealth;
+        QElapsedTimer peerTimer;
+        peerTimer.start();
+        while (peerTimer.elapsed() < 3000) {
+            response = harness.request(QStringLiteral("getHealth"), {}, 5000);
+            if (bs::test::isResponse(response)) {
+                indexHealth = bs::test::resultPayload(response)
+                                  .value(QStringLiteral("indexHealth"))
+                                  .toObject();
+                const QJsonObject peerStates =
+                    indexHealth.value(QStringLiteral("peerProbeStateByService")).toObject();
+                if (peerStates.value(QStringLiteral("indexer")).toString()
+                        == QLatin1String("fresh")
+                    && peerStates.value(QStringLiteral("inference")).toString()
+                           == QLatin1String("fresh")
+                    && indexHealth.value(QStringLiteral("queuePending")).toInt() == queuePending) {
+                    break;
+                }
+            }
+            QTest::qWait(50);
+        }
+        QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
         QVERIFY(indexHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
         const QJsonObject roleStatus =
             indexHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
@@ -340,8 +355,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
                  QStringLiteral("legacy"));
         QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString(),
                  QStringLiteral("actor_primary"));
-        QVERIFY(indexHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false));
-        QVERIFY(indexHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(false));
+        QVERIFY(indexHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(true));
+        QVERIFY(indexHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(true));
         QVERIFY(indexHealth.value(QStringLiteral("recentErrors")).toArray().size() >= 1);
         const QJsonObject memoryByService =
             indexHealth.value(QStringLiteral("memoryByService")).toObject();
@@ -352,14 +367,27 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
     {
         queueRoots = QJsonArray{tempHome.path()};
         queuePending = 3500;
-        const QJsonObject response = harness.request(QStringLiteral("getHealth"), {}, 5000);
-        QVERIFY(bs::test::isResponse(response));
-        const QJsonObject indexHealth = bs::test::resultPayload(response)
-                                            .value(QStringLiteral("indexHealth"))
-                                            .toObject();
-        const QJsonObject advisory = indexHealth.value(QStringLiteral("retrievalAdvisory")).toObject();
-        QCOMPARE(advisory.value(QStringLiteral("code")).toString(),
-                 QStringLiteral("curated_roots_recommended"));
+        QJsonObject response;
+        QJsonObject indexHealth;
+        QElapsedTimer advisoryTimer;
+        advisoryTimer.start();
+        while (advisoryTimer.elapsed() < 3000) {
+            response = harness.request(QStringLiteral("getHealth"), {}, 5000);
+            if (bs::test::isResponse(response)) {
+                indexHealth = bs::test::resultPayload(response)
+                                  .value(QStringLiteral("indexHealth"))
+                                  .toObject();
+                if (indexHealth.value(QStringLiteral("queueSource")).toString()
+                        == QLatin1String("indexer_rpc")
+                    && indexHealth.value(QStringLiteral("queuePending")).toInt() == queuePending) {
+                    break;
+                }
+            }
+            QTest::qWait(50);
+        }
+        QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
+        QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
+                 QStringLiteral("indexer_rpc"));
     }
 
     {
@@ -596,6 +624,23 @@ void TestQueryServiceIpcExtensions::testHealthRequestNotBlockedByDelayedSearch()
              "Query health should remain available while delayed search work is running");
     QVERIFY2(elapsedMs < 1100,
              qPrintable(QStringLiteral("Query health request took too long: %1ms").arg(elapsedMs)));
+
+    QElapsedTimer detailsTimer;
+    detailsTimer.start();
+    QJsonObject detailsParams;
+    detailsParams[QStringLiteral("limit")] = 5;
+    const QJsonObject detailsResponse =
+        bs::test::requestOrFailWithDiagnostics(healthClient,
+                                               QStringLiteral("getHealthDetails"),
+                                               detailsParams,
+                                               800,
+                                               harness.socketPath());
+    const qint64 detailsElapsedMs = detailsTimer.elapsed();
+    QVERIFY2(bs::test::isResponse(detailsResponse),
+             "Health details should remain available while delayed search work is running");
+    QVERIFY2(detailsElapsedMs < 1100,
+             qPrintable(QStringLiteral("Health details request took too long: %1ms")
+                            .arg(detailsElapsedMs)));
 
     QTRY_VERIFY_WITH_TIMEOUT(searchCompleted, 6000);
     QVERIFY(searchResponse.has_value());

@@ -663,6 +663,7 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
     m_store->setSetting(QStringLiteral("targetVectorGeneration"), targetGeneration);
     m_store->setSetting(QStringLiteral("vectorMigrationState"), QStringLiteral("building"));
     m_store->setSetting(QStringLiteral("vectorMigrationProgressPct"), QStringLiteral("0"));
+    refreshRuntimeMirror();
 
     joinVectorRebuildThread();
     m_vectorRebuildThread = std::thread(
@@ -1445,6 +1446,99 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             }
         }
     }
+
+    {
+        VectorStore::GenerationState stagedState;
+        stagedState.generationId = targetGeneration.toStdString();
+        stagedState.modelId = rebuiltMeta.modelId;
+        stagedState.dimensions = embeddingDimensions;
+        stagedState.provider = rebuiltMeta.provider;
+        stagedState.state = "cutover_pending";
+        stagedState.progressPct = 100.0;
+        stagedState.active = false;
+        if (!workerVectorStore.upsertGenerationState(stagedState)) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to stage generation state"));
+            closeResources();
+            return;
+        }
+        if (fastEmbeddingAvailable && rebuiltFastIndex) {
+            VectorStore::GenerationState fastStagedState;
+            fastStagedState.generationId = fastGeneration.toStdString();
+            fastStagedState.modelId = rebuiltFastMeta.modelId;
+            fastStagedState.dimensions = fastEmbeddingDimensions;
+            fastStagedState.provider = rebuiltFastMeta.provider;
+            fastStagedState.state = "cutover_pending";
+            fastStagedState.progressPct = 100.0;
+            fastStagedState.active = false;
+            if (!workerVectorStore.upsertGenerationState(fastStagedState)) {
+                rollbackIfNeeded();
+                updateFailedState(QStringLiteral("Failed to stage fast generation state"));
+                closeResources();
+                return;
+            }
+        }
+
+        if (!execSql("COMMIT;")) {
+            rollbackIfNeeded();
+            updateFailedState(QStringLiteral("Failed to commit staged vector rebuild"));
+            closeResources();
+            return;
+        }
+        inTransaction = false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId == runId
+            && m_vectorRebuildState.status == VectorRebuildState::Status::Running) {
+            m_vectorMigrationState = QStringLiteral("cutover_pending");
+            m_vectorMigrationProgressPct = 100.0;
+        }
+    }
+
+    if (m_shuttingDown.load() || m_stopRebuildRequested.load()) {
+        updateFailedState(QStringLiteral("Vector rebuild cancelled before cutover"));
+        QFile::remove(tmpIndexPath);
+        QFile::remove(tmpMetaPath);
+        QFile::remove(tmpFastIndexPath);
+        QFile::remove(tmpFastMetaPath);
+        closeResources();
+        return;
+    }
+
+    VectorRebuildCutoverPayload cutoverPayload;
+    cutoverPayload.runId = runId;
+    cutoverPayload.targetGeneration = targetGeneration;
+    cutoverPayload.targetIndexPath = indexPath;
+    cutoverPayload.targetMetaPath = metaPath;
+    cutoverPayload.tempIndexPath = tmpIndexPath;
+    cutoverPayload.tempMetaPath = tmpMetaPath;
+    cutoverPayload.modelId = QString::fromStdString(rebuiltMeta.modelId);
+    cutoverPayload.provider = QString::fromStdString(rebuiltMeta.provider);
+    cutoverPayload.dimensions = embeddingDimensions;
+    cutoverPayload.totalCandidates = totalCandidates;
+    cutoverPayload.processed = processed;
+    cutoverPayload.embedded = embeddedCount;
+    cutoverPayload.skipped = skippedCount;
+    cutoverPayload.failed = failedCount;
+    cutoverPayload.expectedPrimaryMappings = static_cast<int>(pendingMappings.size());
+    cutoverPayload.hasFastIndex = fastEmbeddingAvailable && rebuiltFastIndex;
+    cutoverPayload.fastGeneration = fastGeneration;
+    cutoverPayload.fastIndexPath = fastIndexPath;
+    cutoverPayload.fastMetaPath = fastMetaPath;
+    cutoverPayload.tempFastIndexPath = tmpFastIndexPath;
+    cutoverPayload.tempFastMetaPath = tmpFastMetaPath;
+    cutoverPayload.fastModelId = QString::fromStdString(rebuiltFastMeta.modelId);
+    cutoverPayload.fastProvider = QString::fromStdString(rebuiltFastMeta.provider);
+    cutoverPayload.fastDimensions = fastEmbeddingDimensions;
+    cutoverPayload.expectedFastMappings = static_cast<int>(pendingFastMappings.size());
+
+    enqueueDefaultControlTask([this, cutoverPayload]() {
+        applyVectorRebuildCutover(cutoverPayload);
+    });
+    closeResources();
+    return;
 
     auto setSettingWorker = [&](const QString& key, const QString& value) -> bool {
         const char* sql = R"(

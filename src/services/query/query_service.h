@@ -18,7 +18,10 @@
 #include <QTimer>
 #include <QStringList>
 #include <shared_mutex>
+#include <functional>
 #include <thread>
+
+struct sqlite3;
 
 namespace bs {
 
@@ -64,6 +67,71 @@ private:
     struct LaneTask {
         QJsonObject request;
         RequestResponder responder;
+    };
+
+    struct RuntimeMirror {
+        bool m2Initialized = false;
+        QString modelsDirResolved;
+        bool requiredModelInventoryReady = false;
+        QString requiredModelInventoryReason = QStringLiteral("required_models_unavailable");
+        QStringList requiredModelInventoryMissingRoles;
+        QString activeVectorGeneration = QStringLiteral("v1");
+        QString targetVectorGeneration = QStringLiteral("v2");
+        QString fastVectorGeneration = QStringLiteral("v3_fast");
+        QString vectorMigrationState = QStringLiteral("idle");
+        double vectorMigrationProgressPct = 0.0;
+        QString activeVectorModelId = QStringLiteral("legacy");
+        QString activeVectorProvider = QStringLiteral("cpu");
+        int activeVectorDimensions = 384;
+        bool embeddingManagerAvailable = false;
+        QString embeddingManagerActiveModelId;
+        bool fastEmbeddingManagerAvailable = false;
+        QString fastEmbeddingManagerActiveModelId;
+        bool crossEncoderAvailable = false;
+        bool fastCrossEncoderAvailable = false;
+        bool qaExtractiveAvailable = false;
+        QJsonObject bsignoreStatus;
+    };
+
+    struct LocalHealthSnapshotCache {
+        QJsonObject indexHealth;
+        qint64 snapshotTimeMs = 0;
+        QString state = QStringLiteral("unavailable");
+    };
+
+    struct PeerProbeCache {
+        QJsonObject payload;
+        qint64 snapshotTimeMs = 0;
+        QString state = QStringLiteral("unavailable");
+        bool refreshInFlight = false;
+    };
+
+    struct VectorRebuildCutoverPayload {
+        uint64_t runId = 0;
+        QString targetGeneration;
+        QString targetIndexPath;
+        QString targetMetaPath;
+        QString tempIndexPath;
+        QString tempMetaPath;
+        QString modelId;
+        QString provider;
+        int dimensions = 0;
+        int totalCandidates = 0;
+        int processed = 0;
+        int embedded = 0;
+        int skipped = 0;
+        int failed = 0;
+        int expectedPrimaryMappings = 0;
+        bool hasFastIndex = false;
+        QString fastGeneration;
+        QString fastIndexPath;
+        QString fastMetaPath;
+        QString tempFastIndexPath;
+        QString tempFastMetaPath;
+        QString fastModelId;
+        QString fastProvider;
+        int fastDimensions = 0;
+        int expectedFastMappings = 0;
     };
 
     // ── M1 handlers ──
@@ -172,10 +240,14 @@ private:
 
     // Opens the store if not already open. Returns true on success.
     bool ensureStoreOpen();
+    void resolveDataPathsIfNeeded();
     bool ensureM2ModulesInitialized();
     bool ensureTypoLexiconReady();
+    bool ensureHealthDiagnosticsOpen();
+    void closeHealthDiagnostics();
     void startRequestExecutionLanes();
     void stopRequestExecutionLanes();
+    void enqueueDefaultControlTask(std::function<void()> task);
     void enqueueRequestTask(RequestExecutionLane lane,
                             const QJsonObject& request,
                             RequestResponder responder);
@@ -196,6 +268,20 @@ private:
     void disconnectInferenceLane(InferenceLane lane);
     static QString inferenceLaneName(InferenceLane lane);
     QJsonObject inferenceHealthSnapshot();
+    void schedulePeerProbeRefresh(bool force = false);
+    void refreshPeerProbesIfNeeded(bool force = false);
+    void refreshIndexerPeerProbe(bool force = false);
+    void refreshInferencePeerProbe(bool force = false);
+    RuntimeMirror runtimeMirrorSnapshot() const;
+    void refreshRuntimeMirror();
+    void maybeRefreshLocalHealthSnapshot();
+    QJsonObject buildLocalHealthSnapshotFromDiagnostics();
+    QJsonObject buildRuntimeSettingsSnapshot(sqlite3* db) const;
+    QJsonArray buildModelManifestSnapshot(const QString& modelsDirResolved,
+                                          const RuntimeMirror& runtimeMirror,
+                                          const QJsonObject& runtimeSettings,
+                                          const QJsonObject& inferenceHealth) const;
+    void applyVectorRebuildCutover(const VectorRebuildCutoverPayload& payload);
     void noteLearningSchedulerOutcome(bool promoted, const QString& reason);
     QJsonObject learningSchedulerSnapshot() const;
     QJsonObject learningHealthSnapshot() const;
@@ -234,6 +320,7 @@ private:
     mutable std::mutex m_inferenceStatsMutex;
     mutable std::mutex m_learningSchedulerMutex;
     QTimer m_learningSchedulerTimer;
+    QTimer m_peerProbeRefreshTimer;
     qint64 m_learningSchedulerLastTickAtMs = 0;
     qint64 m_learningSchedulerLastPromotedAtMs = 0;
     qint64 m_learningSchedulerTicks = 0;
@@ -244,9 +331,19 @@ private:
     std::condition_variable m_requestLaneCv;
     std::deque<LaneTask> m_defaultRequestQueue;
     std::deque<LaneTask> m_healthRequestQueue;
+    std::deque<std::function<void()>> m_defaultControlQueue;
     std::thread m_defaultRequestThread;
     std::thread m_healthRequestThread;
     bool m_stopRequestLanes = false;
+    std::atomic<bool> m_shuttingDown{false};
+    sqlite3* m_healthDiagnosticsDb = nullptr;
+    mutable std::mutex m_runtimeMirrorMutex;
+    RuntimeMirror m_runtimeMirror;
+    mutable std::mutex m_peerProbeMutex;
+    PeerProbeCache m_indexerPeerCache;
+    PeerProbeCache m_inferencePeerCache;
+    LocalHealthSnapshotCache m_localHealthSnapshotCache;
+    std::unique_ptr<SocketClient> m_indexerHealthClient;
     bool m_inferenceServiceConnected = false;
     bool m_inferenceLiveLaneConnected = false;
     bool m_inferenceHealthLaneConnected = false;

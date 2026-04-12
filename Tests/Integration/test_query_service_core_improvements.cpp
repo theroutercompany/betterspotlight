@@ -285,14 +285,31 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
     }), "Failed to start fake indexer socket server");
 
     {
-        const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getHealth"));
-        QCOMPARE(response.value(QStringLiteral("type")).toString(), QStringLiteral("response"));
-        const QJsonObject indexHealth = response.value(QStringLiteral("result"))
-                                            .toObject()
-                                            .value(QStringLiteral("indexHealth"))
-                                            .toObject();
+        QJsonObject response;
+        QJsonObject indexHealth;
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 3000) {
+            response = sendOrFail(queryClient, QStringLiteral("getHealth"));
+            if (response.value(QStringLiteral("type")).toString() == QLatin1String("response")) {
+                indexHealth = response.value(QStringLiteral("result"))
+                                  .toObject()
+                                  .value(QStringLiteral("indexHealth"))
+                                  .toObject();
+                if (indexHealth.value(QStringLiteral("queueSource")).toString()
+                    == QLatin1String("indexer_rpc")) {
+                    break;
+                }
+            }
+            QTest::qWait(50);
+        }
         QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
                  QStringLiteral("indexer_rpc"));
+        QCOMPARE(indexHealth.value(QStringLiteral("peerProbeStateByService"))
+                     .toObject()
+                     .value(QStringLiteral("indexer"))
+                     .toString(),
+                 QStringLiteral("fresh"));
         QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
                  QStringLiteral("healthy"));
         QCOMPARE(indexHealth.value(QStringLiteral("criticalFailures")).toInt(), 0);

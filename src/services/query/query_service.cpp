@@ -440,6 +440,263 @@ bool isExpectedGapFailureMessage(const QString& errorMessage)
         || lowered == QLatin1String("file appears to be a cloud placeholder (size reported but no content readable)");
 }
 
+constexpr qint64 kLocalHealthSnapshotTtlMs = 250;
+constexpr qint64 kPeerProbeStaleMs = 1500;
+constexpr int kPeerProbeRefreshIntervalMs = 250;
+
+std::optional<QString> readSettingFromSqlite(sqlite3* db, const QString& key)
+{
+    if (!db || key.trimmed().isEmpty()) {
+        return std::nullopt;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT value FROM settings WHERE key = ?1 LIMIT 1",
+                           -1,
+                           &stmt,
+                           nullptr)
+        != SQLITE_OK) {
+        return std::nullopt;
+    }
+
+    const QByteArray keyUtf8 = key.toUtf8();
+    sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+
+    QString value;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* rawValue = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        value = rawValue ? QString::fromUtf8(rawValue) : QString();
+    }
+    sqlite3_finalize(stmt);
+
+    if (value.isNull()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+IndexHealth readIndexHealthFromSqlite(sqlite3* db)
+{
+    IndexHealth health;
+    if (!db) {
+        return health;
+    }
+
+    auto readCount = [&](const char* sql, int64_t* out) {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return;
+        }
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            *out = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    };
+
+    readCount("SELECT COUNT(*) FROM items", &health.totalIndexedItems);
+    readCount("SELECT COUNT(*) FROM content", &health.totalChunks);
+    readCount(
+        R"(
+            SELECT COUNT(*)
+            FROM failures
+            WHERE stage = 'extraction'
+              AND (
+                  error_message LIKE 'PDF extraction unavailable (%'
+                  OR error_message LIKE 'OCR extraction unavailable (%'
+                  OR error_message LIKE 'Leptonica failed to read image%'
+                  OR error_message LIKE 'Extension % is not supported by extractor'
+                  OR error_message LIKE 'File size % exceeds configured limit %'
+                  OR error_message = 'File does not exist or is not a regular file'
+                  OR error_message = 'File is not readable'
+                  OR error_message = 'Failed to load PDF document'
+                  OR error_message = 'PDF is encrypted or password-protected'
+                  OR error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
+              )
+        )",
+        &health.expectedGapFailures);
+    readCount(
+        R"(
+            SELECT COUNT(*)
+            FROM failures
+            WHERE NOT (
+                stage = 'extraction'
+                AND (
+                    error_message LIKE 'PDF extraction unavailable (%'
+                    OR error_message LIKE 'OCR extraction unavailable (%'
+                    OR error_message LIKE 'Leptonica failed to read image%'
+                    OR error_message LIKE 'Extension % is not supported by extractor'
+                    OR error_message LIKE 'File size % exceeds configured limit %'
+                    OR error_message = 'File does not exist or is not a regular file'
+                    OR error_message = 'File is not readable'
+                    OR error_message = 'Failed to load PDF document'
+                    OR error_message = 'PDF is encrypted or password-protected'
+                    OR error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
+                )
+            )
+        )",
+        &health.criticalFailures);
+    readCount(
+        "SELECT (SELECT COUNT(*) FROM items) - (SELECT COUNT(DISTINCT item_id) FROM content)",
+        &health.itemsWithoutContent);
+    readCount(
+        "SELECT (page_count - freelist_count) * page_size "
+        "FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()",
+        &health.ftsIndexSize);
+
+    if (const std::optional<QString> lastIndex =
+            readSettingFromSqlite(db, QStringLiteral("last_full_index_at"));
+        lastIndex.has_value()) {
+        bool ok = false;
+        const double parsed = lastIndex->toDouble(&ok);
+        if (ok) {
+            health.lastIndexTime = parsed;
+            if (parsed > 0.0) {
+                const double now = static_cast<double>(QDateTime::currentSecsSinceEpoch());
+                health.indexAge = now - parsed;
+            }
+        }
+    }
+
+    health.totalFailures = health.criticalFailures;
+    health.isHealthy = (health.criticalFailures == 0);
+    return health;
+}
+
+int countMappingsForGenerationFromSqlite(sqlite3* db, const QString& generation)
+{
+    if (!db || generation.trimmed().isEmpty()) {
+        return 0;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT COUNT(*) FROM vector_map WHERE generation_id = ?1",
+                           -1,
+                           &stmt,
+                           nullptr)
+        != SQLITE_OK) {
+        return 0;
+    }
+
+    const QByteArray generationUtf8 = generation.toUtf8();
+    sqlite3_bind_text(stmt, 1, generationUtf8.constData(), -1, SQLITE_TRANSIENT);
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        count = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+QJsonArray loadRecentErrorsFromSqlite(sqlite3* db, int limit = 25)
+{
+    QJsonArray recentErrors;
+    if (!db) {
+        return recentErrors;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    static constexpr const char* kSql = R"(
+        SELECT i.path, f.error_message
+        FROM failures f
+        JOIN items i ON i.id = f.item_id
+        WHERE NOT (
+            f.stage = 'extraction'
+            AND (
+                f.error_message LIKE 'PDF extraction unavailable (%'
+                OR f.error_message LIKE 'OCR extraction unavailable (%'
+                OR f.error_message LIKE 'Leptonica failed to read image%'
+                OR f.error_message LIKE 'Extension % is not supported by extractor'
+                OR f.error_message LIKE 'File size % exceeds configured limit %'
+                OR f.error_message = 'File does not exist or is not a regular file'
+                OR f.error_message = 'File is not readable'
+                OR f.error_message = 'Failed to load PDF document'
+                OR f.error_message = 'PDF is encrypted or password-protected'
+                OR f.error_message = 'File appears to be a cloud placeholder (size reported but no content readable)'
+            )
+        )
+        ORDER BY f.last_failed_at DESC
+        LIMIT ?1
+    )";
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return recentErrors;
+    }
+
+    sqlite3_bind_int(stmt, 1, std::max(1, limit));
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* error = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        QJsonObject entry;
+        entry[QStringLiteral("path")] = path ? QString::fromUtf8(path) : QString();
+        entry[QStringLiteral("error")] = error ? QString::fromUtf8(error) : QString();
+        recentErrors.append(entry);
+    }
+    sqlite3_finalize(stmt);
+    return recentErrors;
+}
+
+struct FailureDetailsPage {
+    QJsonArray failures;
+    int expectedGapRows = 0;
+    int criticalRows = 0;
+};
+
+FailureDetailsPage loadFailureDetailsPageFromSqlite(sqlite3* db, int limit, int offset)
+{
+    FailureDetailsPage page;
+    if (!db) {
+        return page;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    static constexpr const char* kSql = R"(
+        SELECT i.path, f.stage, f.error_message, f.failure_count, f.last_failed_at
+        FROM failures f
+        JOIN items i ON i.id = f.item_id
+        ORDER BY f.last_failed_at DESC
+        LIMIT ?1 OFFSET ?2
+    )";
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return page;
+    }
+
+    sqlite3_bind_int(stmt, 1, limit);
+    sqlite3_bind_int(stmt, 2, offset);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* path = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* stage = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* error = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const int failureCount = sqlite3_column_int(stmt, 3);
+        const double lastFailedAt = sqlite3_column_double(stmt, 4);
+
+        const QString errorText = error ? QString::fromUtf8(error) : QString();
+        const bool expectedGap = isExpectedGapFailureMessage(errorText);
+        if (expectedGap) {
+            ++page.expectedGapRows;
+        } else {
+            ++page.criticalRows;
+        }
+
+        QJsonObject entry;
+        entry[QStringLiteral("path")] = path ? QString::fromUtf8(path) : QString();
+        entry[QStringLiteral("stage")] = stage ? QString::fromUtf8(stage) : QString();
+        entry[QStringLiteral("error")] = errorText;
+        entry[QStringLiteral("failureCount")] = failureCount;
+        entry[QStringLiteral("expectedGap")] = expectedGap;
+        entry[QStringLiteral("severity")] =
+            expectedGap ? QStringLiteral("expected_gap") : QStringLiteral("critical");
+        entry[QStringLiteral("lastFailedAt")] = lastFailedAt > 0.0
+            ? QDateTime::fromSecsSinceEpoch(static_cast<qint64>(lastFailedAt))
+                  .toUTC()
+                  .toString(Qt::ISODate)
+            : QString();
+        page.failures.append(entry);
+    }
+    sqlite3_finalize(stmt);
+    return page;
+}
+
 struct QueryHints {
     bool downloadsHint = false;
     bool documentsHint = false;
@@ -502,6 +759,7 @@ QueryService::QueryService(QObject* parent)
     : ServiceBase(QStringLiteral("query"), parent)
 {
     LOG_INFO(bsIpc, "QueryService created");
+    resolveDataPathsIfNeeded();
     int schedulerIntervalMs = 15000;
     if (qEnvironmentVariableIsSet("BS_TEST_LEARNING_SCHEDULER_INTERVAL_MS")) {
         bool ok = false;
@@ -534,16 +792,149 @@ QueryService::QueryService(QObject* parent)
                       qUtf8Printable(idleReason));
         }
     });
+    m_peerProbeRefreshTimer.setInterval(kPeerProbeRefreshIntervalMs);
+    m_peerProbeRefreshTimer.setSingleShot(false);
+    QObject::connect(&m_peerProbeRefreshTimer, &QTimer::timeout, this, [this]() {
+        refreshPeerProbesIfNeeded(false);
+    });
     initBsignoreWatch();
+    refreshRuntimeMirror();
     startRequestExecutionLanes();
+    m_peerProbeRefreshTimer.start();
+    QMetaObject::invokeMethod(this, [this]() {
+        refreshPeerProbesIfNeeded(true);
+    }, Qt::QueuedConnection);
 }
 
 QueryService::~QueryService()
 {
-    stopRequestExecutionLanes();
-    m_learningSchedulerTimer.stop();
+    m_shuttingDown.store(true);
     m_stopRebuildRequested.store(true);
     joinVectorRebuildThread();
+    m_peerProbeRefreshTimer.stop();
+    if (m_indexerHealthClient) {
+        m_indexerHealthClient->disconnect();
+    }
+    if (m_inferenceHealthClient) {
+        m_inferenceHealthClient->disconnect();
+    }
+    stopRequestExecutionLanes();
+    closeHealthDiagnostics();
+    m_learningSchedulerTimer.stop();
+}
+
+void QueryService::resolveDataPathsIfNeeded()
+{
+    if (!m_dataDir.isEmpty() && !m_dbPath.isEmpty()) {
+        return;
+    }
+
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString envDataDir = env.value(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR")).trimmed();
+    if (!envDataDir.isEmpty()) {
+        m_dataDir = QDir::cleanPath(envDataDir);
+    } else if (m_dataDir.isEmpty()) {
+        m_dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                    + QStringLiteral("/betterspotlight");
+    }
+    if (m_dbPath.isEmpty()) {
+        m_dbPath = m_dataDir + QStringLiteral("/index.db");
+    }
+    if (m_vectorIndexPath.isEmpty()) {
+        m_vectorIndexPath = vectorIndexPathForGeneration(m_activeVectorGeneration);
+    }
+    if (m_vectorMetaPath.isEmpty()) {
+        m_vectorMetaPath = vectorMetaPathForGeneration(m_activeVectorGeneration);
+    }
+    if (m_fastVectorIndexPath.isEmpty()) {
+        m_fastVectorIndexPath = vectorIndexPathForGeneration(m_fastVectorGeneration);
+    }
+    if (m_fastVectorMetaPath.isEmpty()) {
+        m_fastVectorMetaPath = vectorMetaPathForGeneration(m_fastVectorGeneration);
+    }
+}
+
+bool QueryService::ensureHealthDiagnosticsOpen()
+{
+    if (m_healthDiagnosticsDb) {
+        return true;
+    }
+
+    resolveDataPathsIfNeeded();
+    if (m_dbPath.trimmed().isEmpty()) {
+        return false;
+    }
+
+    sqlite3* db = nullptr;
+    const int rc = sqlite3_open_v2(m_dbPath.toUtf8().constData(),
+                                   &db,
+                                   SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                                   nullptr);
+    if (rc != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    sqlite3_busy_timeout(db, 1000);
+    m_healthDiagnosticsDb = db;
+    return true;
+}
+
+void QueryService::closeHealthDiagnostics()
+{
+    if (!m_healthDiagnosticsDb) {
+        return;
+    }
+    sqlite3_close(m_healthDiagnosticsDb);
+    m_healthDiagnosticsDb = nullptr;
+}
+
+QueryService::RuntimeMirror QueryService::runtimeMirrorSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_runtimeMirrorMutex);
+    return m_runtimeMirror;
+}
+
+void QueryService::refreshRuntimeMirror()
+{
+    RuntimeMirror mirror;
+    mirror.m2Initialized = m_m2Initialized;
+    mirror.modelsDirResolved = m_modelRegistry
+        ? m_modelRegistry->modelsDir()
+        : ModelRegistry::resolveModelsDir();
+    mirror.requiredModelInventoryReady = m_requiredModelInventoryReady;
+    mirror.requiredModelInventoryReason = m_requiredModelInventoryReason;
+    mirror.requiredModelInventoryMissingRoles = m_requiredModelInventoryMissingRoles;
+    mirror.activeVectorGeneration = m_activeVectorGeneration;
+    mirror.targetVectorGeneration = m_targetVectorGeneration;
+    mirror.fastVectorGeneration = m_fastVectorGeneration;
+    mirror.vectorMigrationState = m_vectorMigrationState;
+    mirror.vectorMigrationProgressPct = m_vectorMigrationProgressPct;
+    mirror.activeVectorModelId = m_activeVectorModelId;
+    mirror.activeVectorProvider = m_activeVectorProvider;
+    mirror.activeVectorDimensions = m_activeVectorDimensions;
+    mirror.embeddingManagerAvailable =
+        m_embeddingManager && m_embeddingManager->isAvailable();
+    mirror.embeddingManagerActiveModelId = m_embeddingManager
+        ? m_embeddingManager->activeModelId()
+        : QString();
+    mirror.fastEmbeddingManagerAvailable =
+        m_fastEmbeddingManager && m_fastEmbeddingManager->isAvailable();
+    mirror.fastEmbeddingManagerActiveModelId = m_fastEmbeddingManager
+        ? m_fastEmbeddingManager->activeModelId()
+        : QString();
+    mirror.crossEncoderAvailable =
+        m_crossEncoderReranker && m_crossEncoderReranker->isAvailable();
+    mirror.fastCrossEncoderAvailable =
+        m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->isAvailable();
+    mirror.qaExtractiveAvailable =
+        m_qaExtractiveModel && m_qaExtractiveModel->isAvailable();
+    mirror.bsignoreStatus = bsignoreStatusJson();
+
+    std::lock_guard<std::mutex> lock(m_runtimeMirrorMutex);
+    m_runtimeMirror = std::move(mirror);
 }
 
 QString QueryService::vectorRebuildStatusToString(VectorRebuildState::Status status)
@@ -673,6 +1064,7 @@ void QueryService::refreshVectorGenerationState()
             }
         }
     }
+    refreshRuntimeMirror();
 }
 
 QJsonObject QueryService::handleRequest(const QJsonObject& request)
@@ -714,6 +1106,12 @@ void QueryService::handleRequestWithResponder(const QJsonObject& request,
     const QString method = request.value(QStringLiteral("method")).toString();
     if (method == QLatin1String("ping") || method == QLatin1String("shutdown")) {
         responder.send(handleRequest(request));
+        return;
+    }
+
+    if (isHealthRequestMethod(method)) {
+        enqueueRequestTask(RequestExecutionLane::Health, request, std::move(responder));
+        schedulePeerProbeRefresh(false);
         return;
     }
 
@@ -762,6 +1160,9 @@ void QueryService::stopRequestExecutionLanes()
             return;
         }
         m_stopRequestLanes = true;
+        m_defaultControlQueue.clear();
+        m_defaultRequestQueue.clear();
+        m_healthRequestQueue.clear();
     }
     m_requestLaneCv.notify_all();
     if (m_defaultRequestThread.joinable()) {
@@ -770,6 +1171,18 @@ void QueryService::stopRequestExecutionLanes()
     if (m_healthRequestThread.joinable()) {
         m_healthRequestThread.join();
     }
+}
+
+void QueryService::enqueueDefaultControlTask(std::function<void()> task)
+{
+    if (!task) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_requestLaneMutex);
+        m_defaultControlQueue.push_back(std::move(task));
+    }
+    m_requestLaneCv.notify_all();
 }
 
 void QueryService::enqueueRequestTask(RequestExecutionLane lane,
@@ -796,8 +1209,17 @@ void QueryService::requestLaneLoop(RequestExecutionLane lane)
                 ? m_healthRequestQueue
                 : m_defaultRequestQueue;
             m_requestLaneCv.wait(lock, [&]() {
-                return m_stopRequestLanes || !queue.empty();
+                const bool hasDefaultControl =
+                    lane == RequestExecutionLane::Default && !m_defaultControlQueue.empty();
+                return m_stopRequestLanes || !queue.empty() || hasDefaultControl;
             });
+            if (lane == RequestExecutionLane::Default && !m_defaultControlQueue.empty()) {
+                auto controlTask = std::move(m_defaultControlQueue.front());
+                m_defaultControlQueue.pop_front();
+                lock.unlock();
+                controlTask();
+                continue;
+            }
             if (m_stopRequestLanes && queue.empty()) {
                 return;
             }
@@ -818,6 +1240,149 @@ void QueryService::requestLaneLoop(RequestExecutionLane lane)
         }
         task.responder.send(handleRequest(task.request));
     }
+}
+
+void QueryService::schedulePeerProbeRefresh(bool force)
+{
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    QMetaObject::invokeMethod(
+        this,
+        [this, force]() {
+            refreshPeerProbesIfNeeded(force);
+        },
+        Qt::QueuedConnection);
+}
+
+void QueryService::refreshPeerProbesIfNeeded(bool force)
+{
+    if (m_shuttingDown.load()) {
+        return;
+    }
+    refreshIndexerPeerProbe(force);
+    refreshInferencePeerProbe(force);
+}
+
+void QueryService::refreshIndexerPeerProbe(bool force)
+{
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        if (m_indexerPeerCache.refreshInFlight) {
+            return;
+        }
+        const bool stale =
+            m_indexerPeerCache.snapshotTimeMs <= 0
+            || (nowMs - m_indexerPeerCache.snapshotTimeMs) > kPeerProbeStaleMs;
+        if (!force && !stale) {
+            return;
+        }
+        m_indexerPeerCache.refreshInFlight = true;
+    }
+
+    if (!m_indexerHealthClient) {
+        m_indexerHealthClient = std::make_unique<SocketClient>();
+    }
+
+    const QString socketPath = ServiceBase::socketPath(QStringLiteral("indexer"));
+    if (!m_indexerHealthClient->isConnected()
+        && !m_indexerHealthClient->connectToServer(socketPath, 100)) {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        m_indexerPeerCache.refreshInFlight = false;
+        m_indexerPeerCache.state = m_indexerPeerCache.payload.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        return;
+    }
+
+    QPointer<QueryService> self(this);
+    m_indexerHealthClient->sendRequestAsync(
+        QStringLiteral("getQueueStatus"),
+        {},
+        250,
+        [self](const std::optional<QJsonObject>& response) {
+            if (!self) {
+                return;
+            }
+            const qint64 nowMsInner = QDateTime::currentMSecsSinceEpoch();
+            std::lock_guard<std::mutex> lock(self->m_peerProbeMutex);
+            self->m_indexerPeerCache.refreshInFlight = false;
+            if (!response.has_value()
+                || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                self->m_indexerPeerCache.state = self->m_indexerPeerCache.payload.isEmpty()
+                    ? QStringLiteral("unavailable")
+                    : QStringLiteral("stale");
+                return;
+            }
+            self->m_indexerPeerCache.payload =
+                response->value(QStringLiteral("result")).toObject();
+            self->m_indexerPeerCache.snapshotTimeMs = nowMsInner;
+            self->m_indexerPeerCache.state = QStringLiteral("fresh");
+        });
+}
+
+void QueryService::refreshInferencePeerProbe(bool force)
+{
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        if (m_inferencePeerCache.refreshInFlight) {
+            return;
+        }
+        const bool stale =
+            m_inferencePeerCache.snapshotTimeMs <= 0
+            || (nowMs - m_inferencePeerCache.snapshotTimeMs) > kPeerProbeStaleMs;
+        if (!force && !stale) {
+            return;
+        }
+        m_inferencePeerCache.refreshInFlight = true;
+    }
+
+    if (!m_inferenceHealthClient) {
+        m_inferenceHealthClient = std::make_unique<SocketClient>();
+    }
+
+    const QString socketPath = ServiceBase::socketPath(QStringLiteral("inference"));
+    if (!m_inferenceHealthClient->isConnected()
+        && !m_inferenceHealthClient->connectToServer(socketPath, 100)) {
+        recordInferenceConnected(InferenceLane::Health, false);
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        m_inferencePeerCache.refreshInFlight = false;
+        m_inferencePeerCache.state = m_inferencePeerCache.payload.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        return;
+    }
+
+    QPointer<QueryService> self(this);
+    m_inferenceHealthClient->sendRequestAsync(
+        QStringLiteral("get_inference_health"),
+        {},
+        300,
+        [self](const std::optional<QJsonObject>& response) {
+            if (!self) {
+                return;
+            }
+            const qint64 nowMsInner = QDateTime::currentMSecsSinceEpoch();
+            std::lock_guard<std::mutex> lock(self->m_peerProbeMutex);
+            self->m_inferencePeerCache.refreshInFlight = false;
+            if (!response.has_value()
+                || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+                self->recordInferenceConnected(InferenceLane::Health, false);
+                self->m_inferencePeerCache.state = self->m_inferencePeerCache.payload.isEmpty()
+                    ? QStringLiteral("unavailable")
+                    : QStringLiteral("stale");
+                return;
+            }
+            self->m_inferencePeerCache.payload =
+                response->value(QStringLiteral("result")).toObject();
+            self->m_inferencePeerCache.snapshotTimeMs = nowMsInner;
+            self->m_inferencePeerCache.state = QStringLiteral("fresh");
+            self->recordInferenceConnected(
+                InferenceLane::Health,
+                self->m_inferencePeerCache.payload.value(QStringLiteral("connected")).toBool(false));
+        });
 }
 
 bool QueryService::isHealthRequestMethod(const QString& method)
@@ -852,15 +1417,7 @@ bool QueryService::ensureStoreOpen()
         return true;
     }
 
-    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    const QString envDataDir = env.value(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR")).trimmed();
-    if (!envDataDir.isEmpty()) {
-        m_dataDir = QDir::cleanPath(envDataDir);
-    } else {
-        m_dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                    + QStringLiteral("/betterspotlight");
-    }
-    m_dbPath = m_dataDir + QStringLiteral("/index.db");
+    resolveDataPathsIfNeeded();
     m_vectorIndexPath = vectorIndexPathForGeneration(m_activeVectorGeneration);
     m_vectorMetaPath = vectorMetaPathForGeneration(m_activeVectorGeneration);
 
@@ -874,6 +1431,7 @@ bool QueryService::ensureStoreOpen()
     LOG_INFO(bsIpc, "Database opened at: %s", qPrintable(m_dbPath));
 
     initBsignoreWatch();
+    refreshRuntimeMirror();
     return true;
 }
 
@@ -1142,20 +1700,13 @@ QJsonObject QueryService::inferenceHealthSnapshot()
     snapshot[QStringLiteral("inferenceFallbackCountByRole")] = fallbackCounts;
     snapshot[QStringLiteral("inferenceTransportConnectedByLane")] = laneConnections;
     snapshot[QStringLiteral("inferenceTransportLaneIsolationEnabled")] = true;
-
-    std::lock_guard<std::mutex> lock(m_inferenceRpcMutexHealth);
-    if (!ensureInferenceClientConnected(InferenceLane::Health) || !m_inferenceHealthClient) {
-        return snapshot;
+    PeerProbeCache peerCache;
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        peerCache = m_inferencePeerCache;
     }
 
-    auto response =
-        m_inferenceHealthClient->sendRequest(QStringLiteral("get_inference_health"), {}, 250);
-    if (!response.has_value() || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        recordInferenceConnected(InferenceLane::Health, false);
-        return snapshot;
-    }
-
-    const QJsonObject payload = response->value(QStringLiteral("result")).toObject();
+    const QJsonObject payload = peerCache.payload;
     if (payload.isEmpty()) {
         return snapshot;
     }
@@ -1190,9 +1741,8 @@ QJsonObject QueryService::inferenceHealthSnapshot()
         payload.value(QStringLiteral("supervisorModeCoerced")).toBool(false);
     snapshot[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
         payload.value(QStringLiteral("placeholderWorkersEnabled")).toBool(false);
-    recordInferenceConnected(
-        InferenceLane::Health,
-        snapshot.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
+    snapshot[QStringLiteral("inferencePeerProbeState")] = peerCache.state;
+    snapshot[QStringLiteral("inferencePeerProbeTimeMs")] = peerCache.snapshotTimeMs;
     return snapshot;
 }
 
@@ -1246,6 +1796,766 @@ QJsonObject QueryService::learningHealthSnapshot() const
     QJsonObject learning = m_learningEngine->healthSnapshot();
     learning[QStringLiteral("scheduler")] = learningSchedulerSnapshot();
     return learning;
+}
+
+void QueryService::maybeRefreshLocalHealthSnapshot()
+{
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const bool needsRefresh =
+        m_localHealthSnapshotCache.snapshotTimeMs <= 0
+        || (nowMs - m_localHealthSnapshotCache.snapshotTimeMs) > kLocalHealthSnapshotTtlMs;
+    if (!needsRefresh) {
+        return;
+    }
+
+    const QJsonObject snapshot = buildLocalHealthSnapshotFromDiagnostics();
+    if (!snapshot.isEmpty()) {
+        m_localHealthSnapshotCache.indexHealth = snapshot;
+        m_localHealthSnapshotCache.snapshotTimeMs = nowMs;
+        m_localHealthSnapshotCache.state = QStringLiteral("fresh");
+    } else if (!m_localHealthSnapshotCache.indexHealth.isEmpty()) {
+        m_localHealthSnapshotCache.state = QStringLiteral("stale");
+    }
+}
+
+QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
+{
+    const auto readBoolRuntimeSetting = [&](const QString& key, bool defaultValue) -> bool {
+        const std::optional<QString> value = readSettingFromSqlite(db, key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        return envFlagEnabled(value.value());
+    };
+    const auto readIntRuntimeSetting = [&](const QString& key, int defaultValue) -> int {
+        const std::optional<QString> value = readSettingFromSqlite(db, key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const int parsed = value.value().toInt(&ok);
+        return ok ? parsed : defaultValue;
+    };
+    const auto readDoubleRuntimeSetting = [&](const QString& key, double defaultValue) -> double {
+        const std::optional<QString> value = readSettingFromSqlite(db, key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        bool ok = false;
+        const double parsed = value.value().toDouble(&ok);
+        return ok ? parsed : defaultValue;
+    };
+    const auto readStringRuntimeSetting = [&](const QString& key,
+                                              const QString& defaultValue) -> QString {
+        const std::optional<QString> value = readSettingFromSqlite(db, key);
+        if (!value.has_value()) {
+            return defaultValue;
+        }
+        return value.value().trimmed();
+    };
+
+    const QString requestedPipelineActorMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE").trimmed().toLower();
+    bool pipelineActorModeCoerced = false;
+    const QString effectivePipelineActorMode =
+        runtime_mode_policy::effectivePipelineActorMode(requestedPipelineActorMode,
+                                                       &pipelineActorModeCoerced);
+    const QString requestedHealthSourceMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_HEALTH_SOURCE_MODE").trimmed().toLower();
+    bool healthSourceModeCoerced = false;
+    const QString effectiveHealthSourceMode =
+        runtime_mode_policy::effectiveHealthSourceMode(requestedHealthSourceMode,
+                                                       &healthSourceModeCoerced);
+    const QString requestedControlPlaneMode =
+        qEnvironmentVariable("BETTERSPOTLIGHT_CONTROL_PLANE_MODE").trimmed().toLower();
+    bool controlPlaneModeCoerced = false;
+    const QString effectiveControlPlaneMode =
+        runtime_mode_policy::effectiveControlPlaneMode(requestedControlPlaneMode,
+                                                       &controlPlaneModeCoerced);
+
+    QJsonObject runtimeSettings;
+    runtimeSettings[QStringLiteral("embeddingEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("embeddingEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceServiceEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceServiceEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceEmbedOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceRerankOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceQaOffloadEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceQaOffloadEnabled"), true);
+    runtimeSettings[QStringLiteral("inferenceShadowModeEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("inferenceShadowModeEnabled"), false);
+    runtimeSettings[QStringLiteral("queryRouterEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("queryRouterEnabled"), true);
+    runtimeSettings[QStringLiteral("queryRouterMinConfidence")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("queryRouterMinConfidence"), 0.45), 0.0, 1.0);
+    runtimeSettings[QStringLiteral("fastEmbeddingEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("fastEmbeddingEnabled"), true);
+    runtimeSettings[QStringLiteral("dualEmbeddingFusionEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    runtimeSettings[QStringLiteral("strongEmbeddingTopK")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("strongEmbeddingTopK"), 40));
+    runtimeSettings[QStringLiteral("fastEmbeddingTopK")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("fastEmbeddingTopK"), 60));
+    runtimeSettings[QStringLiteral("rerankerCascadeEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("rerankerCascadeEnabled"), true);
+    runtimeSettings[QStringLiteral("rerankerStage1Max")] = std::max(
+        4, readIntRuntimeSetting(QStringLiteral("rerankerStage1Max"), 40));
+    runtimeSettings[QStringLiteral("rerankerStage2Max")] = std::max(
+        4, readIntRuntimeSetting(QStringLiteral("rerankerStage2Max"), 12));
+    runtimeSettings[QStringLiteral("qaSnippetEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("qaSnippetEnabled"), true);
+    runtimeSettings[QStringLiteral("personalizedLtrEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    runtimeSettings[QStringLiteral("behaviorStreamEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("behaviorStreamEnabled"), false);
+    runtimeSettings[QStringLiteral("learningEnabled")] =
+        readBoolRuntimeSetting(QStringLiteral("learningEnabled"), false);
+    runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
+        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
+    runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(
+        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 120));
+    const int maxFileSizeBytes = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("max_file_size"), 50 * 1024 * 1024));
+    runtimeSettings[QStringLiteral("maxFileSizeBytes")] = maxFileSizeBytes;
+    runtimeSettings[QStringLiteral("maxFileSizeMB")] =
+        static_cast<double>(maxFileSizeBytes) / (1024.0 * 1024.0);
+    runtimeSettings[QStringLiteral("extractionTimeoutMs")] = std::max(
+        1000, readIntRuntimeSetting(QStringLiteral("extraction_timeout_ms"), 30000));
+    runtimeSettings[QStringLiteral("bm25WeightName")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightName"), 10.0));
+    runtimeSettings[QStringLiteral("bm25WeightPath")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightPath"), 5.0));
+    runtimeSettings[QStringLiteral("bm25WeightContent")] = std::max(
+        0.0, readDoubleRuntimeSetting(QStringLiteral("bm25WeightContent"), 1.0));
+    runtimeSettings[QStringLiteral("autoVectorMigration")] =
+        readBoolRuntimeSetting(QStringLiteral("autoVectorMigration"), true);
+    runtimeSettings[QStringLiteral("vectorMigrationAssistanceEnabled")] =
+        runtimeSettings.value(QStringLiteral("autoVectorMigration")).toBool(true);
+    runtimeSettings[QStringLiteral("unsupportedRuntimeModesAllowed")] =
+        runtime_mode_policy::allowUnsupportedRuntimeModes();
+    runtimeSettings[QStringLiteral("pipelineActorModeRequested")] =
+        requestedPipelineActorMode;
+    runtimeSettings[QStringLiteral("pipelineActorModeEffective")] =
+        effectivePipelineActorMode;
+    runtimeSettings[QStringLiteral("pipelineActorModeCoerced")] =
+        pipelineActorModeCoerced;
+    runtimeSettings[QStringLiteral("healthSourceModeRequested")] =
+        requestedHealthSourceMode;
+    runtimeSettings[QStringLiteral("healthSourceModeEffective")] =
+        effectiveHealthSourceMode;
+    runtimeSettings[QStringLiteral("healthSourceModeCoerced")] =
+        healthSourceModeCoerced;
+    runtimeSettings[QStringLiteral("controlPlaneModeRequested")] =
+        requestedControlPlaneMode;
+    runtimeSettings[QStringLiteral("controlPlaneModeEffective")] =
+        effectiveControlPlaneMode;
+    runtimeSettings[QStringLiteral("controlPlaneModeCoerced")] =
+        controlPlaneModeCoerced;
+    runtimeSettings[QStringLiteral("onlineRankerRolloutMode")] = readStringRuntimeSetting(
+        QStringLiteral("onlineRankerRolloutMode"),
+        QStringLiteral("instrumentation_only")).toLower();
+    return runtimeSettings;
+}
+
+QJsonArray QueryService::buildModelManifestSnapshot(const QString& modelsDirResolved,
+                                                    const RuntimeMirror& runtimeMirror,
+                                                    const QJsonObject& runtimeSettings,
+                                                    const QJsonObject& inferenceHealth) const
+{
+    QJsonArray modelManifest;
+    if (modelsDirResolved.trimmed().isEmpty()) {
+        return modelManifest;
+    }
+
+    ModelRegistry registry(modelsDirResolved);
+    const auto& manifest = registry.manifest();
+    if (manifest.models.empty()) {
+        return modelManifest;
+    }
+
+    std::vector<QString> roles;
+    roles.reserve(manifest.models.size());
+    for (const auto& pair : manifest.models) {
+        roles.push_back(QString::fromStdString(pair.first));
+    }
+    std::sort(roles.begin(), roles.end(),
+              [](const QString& a, const QString& b) {
+                  return a.toLower() < b.toLower();
+              });
+
+    const auto modelIdMatches = [](const QString& runtimeModelId,
+                                   const QString& entryModelId,
+                                   const QString& entryName) {
+        return !runtimeModelId.isEmpty()
+            && (runtimeModelId == entryModelId || runtimeModelId == entryName);
+    };
+
+    const QJsonObject inferenceRoleStatusByModel =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    const bool inferenceEnabled =
+        runtimeSettings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true);
+    const bool inferenceEmbedOffload =
+        runtimeSettings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true);
+    const bool inferenceRerankOffload =
+        runtimeSettings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true);
+    const bool inferenceQaOffload =
+        runtimeSettings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true);
+
+    for (const QString& role : roles) {
+        const auto it = manifest.models.find(role.toStdString());
+        if (it == manifest.models.end()) {
+            continue;
+        }
+        const ModelManifestEntry& entry = it->second;
+
+        const QString modelPath = modelsDirResolved + QStringLiteral("/") + entry.file;
+        const QFileInfo modelInfo(modelPath);
+        const QString vocabPath = entry.vocab.isEmpty()
+            ? QString()
+            : (modelsDirResolved + QStringLiteral("/") + entry.vocab);
+        const QFileInfo vocabInfo(vocabPath);
+
+        bool runtimeActive = false;
+        QString runtimeState = QStringLiteral("inactive");
+        QString runtimeReason;
+        const QString inferenceRoleState =
+            inferenceRoleStatusByModel.value(role).toString();
+
+        if (role == QLatin1String("bi-encoder")) {
+            if (inferenceEnabled && inferenceEmbedOffload && !inferenceRoleState.isEmpty()) {
+                runtimeActive = inferenceRoleState == QLatin1String("ready");
+                runtimeState = runtimeActive ? QStringLiteral("active") : inferenceRoleState;
+            } else {
+                runtimeActive = runtimeMirror.embeddingManagerAvailable
+                    && modelIdMatches(runtimeMirror.embeddingManagerActiveModelId,
+                                      entry.modelId, entry.name);
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : (runtimeMirror.embeddingManagerAvailable
+                                                    ? QStringLiteral("available_not_selected")
+                                                    : QStringLiteral("unavailable"));
+            }
+        } else if (role == QLatin1String("bi-encoder-fast")) {
+            if (inferenceEnabled && inferenceEmbedOffload && !inferenceRoleState.isEmpty()) {
+                runtimeActive = inferenceRoleState == QLatin1String("ready");
+                runtimeState = runtimeActive ? QStringLiteral("active") : inferenceRoleState;
+            } else {
+                runtimeActive = runtimeMirror.fastEmbeddingManagerAvailable
+                    && modelIdMatches(runtimeMirror.fastEmbeddingManagerActiveModelId,
+                                      entry.modelId, entry.name);
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : (runtimeMirror.fastEmbeddingManagerAvailable
+                                                    ? QStringLiteral("available_not_selected")
+                                                    : QStringLiteral("unavailable"));
+            }
+        } else if (role == QLatin1String("cross-encoder-fast")) {
+            if (inferenceEnabled && inferenceRerankOffload && !inferenceRoleState.isEmpty()) {
+                runtimeActive = inferenceRoleState == QLatin1String("ready");
+                runtimeState = runtimeActive ? QStringLiteral("active") : inferenceRoleState;
+            } else {
+                runtimeActive = runtimeMirror.fastCrossEncoderAvailable;
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            }
+        } else if (role == QLatin1String("cross-encoder")) {
+            if (inferenceEnabled && inferenceRerankOffload && !inferenceRoleState.isEmpty()) {
+                runtimeActive = inferenceRoleState == QLatin1String("ready");
+                runtimeState = runtimeActive ? QStringLiteral("active") : inferenceRoleState;
+            } else {
+                runtimeActive = runtimeMirror.crossEncoderAvailable;
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            }
+        } else if (role == QLatin1String("qa-extractive")) {
+            if (inferenceEnabled && inferenceQaOffload && !inferenceRoleState.isEmpty()) {
+                runtimeActive = inferenceRoleState == QLatin1String("ready");
+                runtimeState = runtimeActive ? QStringLiteral("active") : inferenceRoleState;
+            } else {
+                runtimeActive = runtimeMirror.qaExtractiveAvailable;
+                runtimeState = runtimeActive ? QStringLiteral("active")
+                                             : QStringLiteral("unavailable");
+            }
+        } else {
+            runtimeState = QStringLiteral("declared_only");
+        }
+
+        QJsonObject model;
+        model[QStringLiteral("role")] = role;
+        model[QStringLiteral("name")] = entry.name;
+        model[QStringLiteral("task")] = entry.task;
+        model[QStringLiteral("latencyTier")] = entry.latencyTier;
+        model[QStringLiteral("modelId")] = entry.modelId;
+        model[QStringLiteral("generationId")] = entry.generationId;
+        model[QStringLiteral("fallbackRole")] = entry.fallbackRole;
+        model[QStringLiteral("file")] = entry.file;
+        model[QStringLiteral("vocab")] = entry.vocab;
+        model[QStringLiteral("dimensions")] = entry.dimensions;
+        model[QStringLiteral("maxSeqLength")] = entry.maxSeqLength;
+        model[QStringLiteral("tokenizer")] = entry.tokenizer;
+        model[QStringLiteral("queryPrefix")] = entry.queryPrefix;
+        model[QStringLiteral("extractionStrategy")] = entry.extractionStrategy;
+        model[QStringLiteral("poolingStrategy")] = entry.poolingStrategy;
+        model[QStringLiteral("semanticAggregationMode")] = entry.semanticAggregationMode;
+        model[QStringLiteral("outputTransform")] = entry.outputTransform;
+        model[QStringLiteral("modelPath")] = modelPath;
+        model[QStringLiteral("modelExists")] = modelInfo.exists();
+        model[QStringLiteral("modelReadable")] = modelInfo.isReadable();
+        model[QStringLiteral("modelSizeBytes")] = modelInfo.exists() ? modelInfo.size() : 0;
+        model[QStringLiteral("vocabPath")] = vocabPath;
+        model[QStringLiteral("vocabExists")] = entry.vocab.isEmpty() ? false : vocabInfo.exists();
+        model[QStringLiteral("vocabReadable")] =
+            entry.vocab.isEmpty() ? false : vocabInfo.isReadable();
+        model[QStringLiteral("runtimeActive")] = runtimeActive;
+        model[QStringLiteral("runtimeState")] = runtimeState;
+        model[QStringLiteral("runtimeReason")] = runtimeReason;
+        model[QStringLiteral("providerPreferred")] =
+            entry.providerPolicy.preferredProvider;
+        model[QStringLiteral("providerPreferCoreMl")] =
+            entry.providerPolicy.preferCoreMl;
+        model[QStringLiteral("providerAllowCpuFallback")] =
+            entry.providerPolicy.allowCpuFallback;
+        model[QStringLiteral("providerDisableCoreMlEnvVar")] =
+            entry.providerPolicy.disableCoreMlEnvVar;
+
+        QJsonArray inputs;
+        for (const QString& input : entry.inputs) {
+            inputs.append(input);
+        }
+        model[QStringLiteral("inputs")] = inputs;
+
+        QJsonArray outputs;
+        for (const QString& output : entry.outputs) {
+            outputs.append(output);
+        }
+        model[QStringLiteral("outputs")] = outputs;
+
+        modelManifest.append(model);
+    }
+
+    return modelManifest;
+}
+
+QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics()
+{
+    if (!ensureHealthDiagnosticsOpen()) {
+        return QJsonObject();
+    }
+
+    const RuntimeMirror runtimeMirror = runtimeMirrorSnapshot();
+    IndexHealth health = readIndexHealthFromSqlite(m_healthDiagnosticsDb);
+    const int totalEmbeddedVectors = countMappingsForGenerationFromSqlite(
+        m_healthDiagnosticsDb, runtimeMirror.activeVectorGeneration);
+    const qint64 vectorIndexSize =
+        QFileInfo(vectorIndexPathForGeneration(runtimeMirror.activeVectorGeneration)).size();
+    const double contentCoveragePct = health.totalIndexedItems > 0
+        ? 100.0 * static_cast<double>(health.totalIndexedItems - health.itemsWithoutContent)
+              / static_cast<double>(health.totalIndexedItems)
+        : 100.0;
+    const double semanticCoveragePct = health.totalIndexedItems > 0
+        ? 100.0 * static_cast<double>(totalEmbeddedVectors)
+              / static_cast<double>(health.totalIndexedItems)
+        : 100.0;
+
+    QString lastScanTimeIso;
+    if (health.lastIndexTime > 0.0) {
+        lastScanTimeIso = QDateTime::fromSecsSinceEpoch(
+            static_cast<qint64>(health.lastIndexTime)).toUTC().toString(Qt::ISODate);
+    }
+
+    QJsonObject memoryByService;
+    qint64 aggregateRssKb = 0;
+    for (const QString& serviceName : {QStringLiteral("query"),
+                                       QStringLiteral("indexer"),
+                                       QStringLiteral("extractor"),
+                                       QStringLiteral("inference")}) {
+        const QJsonObject serviceStats = processStatsForService(serviceName);
+        memoryByService[serviceName] = serviceStats;
+        if (serviceStats.value(QStringLiteral("available")).toBool(false)) {
+            aggregateRssKb += serviceStats.value(QStringLiteral("rssKb")).toInteger();
+        }
+    }
+    const double aggregateRssMb = static_cast<double>(aggregateRssKb) / 1024.0;
+
+    VectorRebuildState rebuildStateCopy;
+    QString migrationState = runtimeMirror.vectorMigrationState;
+    double migrationProgressPct = runtimeMirror.vectorMigrationProgressPct;
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        rebuildStateCopy = m_vectorRebuildState;
+        migrationState = m_vectorMigrationState;
+        migrationProgressPct = m_vectorMigrationProgressPct;
+    }
+
+    QStringList missingRoles;
+    bool requiredModelInventoryReady = false;
+    if (!runtimeMirror.modelsDirResolved.isEmpty()) {
+        ModelRegistry manifestRegistry(runtimeMirror.modelsDirResolved);
+        requiredModelInventoryReady =
+            manifestRegistry.hasRequiredProductionRoles(&missingRoles);
+    } else {
+        missingRoles = ModelRegistry::requiredProductionRoles();
+    }
+    const QString requiredModelInventoryReason = requiredModelInventoryReady
+        ? QStringLiteral("ready")
+        : QStringLiteral("required_models_unavailable");
+
+    const bool vectorMigrationRequired =
+        !runtimeMirror.targetVectorGeneration.isEmpty()
+        && runtimeMirror.activeVectorGeneration != runtimeMirror.targetVectorGeneration;
+    const QString vectorGenerationState = vectorMigrationRequired
+        ? QStringLiteral("migration_required")
+        : QStringLiteral("ready");
+    const QString vectorMigrationReason = vectorMigrationRequired
+        ? QStringLiteral("target_generation_not_active")
+        : QString();
+
+    QString overallStatus = QStringLiteral("healthy");
+    QString healthStatusReason = QStringLiteral("healthy");
+    if (rebuildStateCopy.status == VectorRebuildState::Status::Running
+        || health.totalIndexedItems == 0) {
+        overallStatus = QStringLiteral("rebuilding");
+        healthStatusReason = QStringLiteral("rebuilding");
+    } else if (!requiredModelInventoryReady) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = requiredModelInventoryReason;
+    } else if (health.criticalFailures > 0) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("degraded_critical_failures");
+    }
+
+    QJsonObject indexHealth;
+    indexHealth[QStringLiteral("overallStatus")] = overallStatus;
+    indexHealth[QStringLiteral("healthStatusReason")] = healthStatusReason;
+    indexHealth[QStringLiteral("isHealthy")] = health.isHealthy;
+    indexHealth[QStringLiteral("totalIndexedItems")] = static_cast<qint64>(health.totalIndexedItems);
+    indexHealth[QStringLiteral("totalChunks")] = static_cast<qint64>(health.totalChunks);
+    indexHealth[QStringLiteral("totalEmbeddedVectors")] = totalEmbeddedVectors;
+    indexHealth[QStringLiteral("totalFailures")] = static_cast<qint64>(health.totalFailures);
+    indexHealth[QStringLiteral("criticalFailures")] = static_cast<qint64>(health.criticalFailures);
+    indexHealth[QStringLiteral("expectedGapFailures")] = static_cast<qint64>(health.expectedGapFailures);
+    indexHealth[QStringLiteral("lastIndexTime")] = health.lastIndexTime;
+    indexHealth[QStringLiteral("lastScanTime")] = lastScanTimeIso;
+    indexHealth[QStringLiteral("indexAge")] = health.indexAge;
+    indexHealth[QStringLiteral("ftsIndexSize")] = static_cast<qint64>(health.ftsIndexSize);
+    indexHealth[QStringLiteral("vectorIndexSize")] = vectorIndexSize;
+    indexHealth[QStringLiteral("itemsWithoutContent")] = static_cast<qint64>(health.itemsWithoutContent);
+    indexHealth[QStringLiteral("queryDeferredResponsesEnabled")] = true;
+    indexHealth[QStringLiteral("queryHealthSnapshotState")] = QStringLiteral("fresh");
+    QJsonObject queryExecutionLanes;
+    queryExecutionLanes[QStringLiteral("default")] = QStringLiteral("serial_worker");
+    queryExecutionLanes[QStringLiteral("health")] = QStringLiteral("serial_worker");
+    indexHealth[QStringLiteral("queryExecutionLanes")] = queryExecutionLanes;
+    indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+    indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
+    indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
+    indexHealth[QStringLiteral("queryRewriteEnabled")] = true;
+    indexHealth[QStringLiteral("m2ModulesInitialized")] = runtimeMirror.m2Initialized;
+    indexHealth[QStringLiteral("memoryAggregateRssMb")] = aggregateRssMb;
+    indexHealth[QStringLiteral("memoryByService")] = memoryByService;
+    indexHealth[QStringLiteral("vectorMigrationState")] = migrationState;
+    indexHealth[QStringLiteral("vectorMigrationProgressPct")] = migrationProgressPct;
+    indexHealth[QStringLiteral("vectorGenerationActive")] =
+        runtimeMirror.activeVectorGeneration;
+    indexHealth[QStringLiteral("vectorGenerationTarget")] =
+        runtimeMirror.targetVectorGeneration;
+    indexHealth[QStringLiteral("vectorGenerationState")] = vectorGenerationState;
+    indexHealth[QStringLiteral("vectorMigrationRequired")] = vectorMigrationRequired;
+    indexHealth[QStringLiteral("vectorMigrationReason")] = vectorMigrationReason;
+    indexHealth[QStringLiteral("activeVectorModelId")] = runtimeMirror.activeVectorModelId;
+    indexHealth[QStringLiteral("activeVectorProvider")] = runtimeMirror.activeVectorProvider;
+    indexHealth[QStringLiteral("activeVectorDimensions")] = runtimeMirror.activeVectorDimensions;
+    indexHealth[QStringLiteral("requiredModelInventoryReady")] = requiredModelInventoryReady;
+    indexHealth[QStringLiteral("requiredModelInventoryReason")] = requiredModelInventoryReason;
+    indexHealth[QStringLiteral("requiredModelInventoryMissingRoles")] =
+        QJsonArray::fromStringList(missingRoles);
+    indexHealth[QStringLiteral("recentErrors")] = loadRecentErrorsFromSqlite(m_healthDiagnosticsDb);
+    indexHealth[QStringLiteral("vectorRebuildStatus")] =
+        vectorRebuildStatusToString(rebuildStateCopy.status);
+    indexHealth[QStringLiteral("vectorRebuildRunId")] =
+        static_cast<qint64>(rebuildStateCopy.runId);
+    indexHealth[QStringLiteral("vectorRebuildStartedAt")] = rebuildStateCopy.startedAt;
+    indexHealth[QStringLiteral("vectorRebuildFinishedAt")] = rebuildStateCopy.finishedAt;
+    indexHealth[QStringLiteral("vectorRebuildTotalCandidates")] = rebuildStateCopy.totalCandidates;
+    indexHealth[QStringLiteral("vectorRebuildProcessed")] = rebuildStateCopy.processed;
+    indexHealth[QStringLiteral("vectorRebuildEmbedded")] = rebuildStateCopy.embedded;
+    indexHealth[QStringLiteral("vectorRebuildSkipped")] = rebuildStateCopy.skipped;
+    indexHealth[QStringLiteral("vectorRebuildFailed")] = rebuildStateCopy.failed;
+    indexHealth[QStringLiteral("vectorRebuildLastError")] = rebuildStateCopy.lastError;
+    indexHealth[QStringLiteral("vectorRebuildScopeRoots")] =
+        QJsonArray::fromStringList(rebuildStateCopy.scopeRoots);
+    indexHealth[QStringLiteral("vectorRebuildScopeCandidates")] =
+        rebuildStateCopy.scopeCandidates;
+    const double progressPct = rebuildStateCopy.totalCandidates > 0
+        ? (100.0 * static_cast<double>(rebuildStateCopy.processed)
+           / static_cast<double>(rebuildStateCopy.totalCandidates))
+        : 0.0;
+    indexHealth[QStringLiteral("vectorRebuildProgressPct")] = progressPct;
+
+    const auto cacheStats = m_queryCache.stats();
+    QJsonObject cacheStatsJson;
+    cacheStatsJson[QStringLiteral("hits")] = static_cast<qint64>(cacheStats.hits);
+    cacheStatsJson[QStringLiteral("misses")] = static_cast<qint64>(cacheStats.misses);
+    cacheStatsJson[QStringLiteral("evictions")] = static_cast<qint64>(cacheStats.evictions);
+    cacheStatsJson[QStringLiteral("currentSize")] = cacheStats.currentSize;
+    indexHealth[QStringLiteral("queryCache")] = cacheStatsJson;
+
+    const QJsonObject queryStats = queryStatsSnapshot();
+    indexHealth[QStringLiteral("searchCount")] =
+        queryStats.value(QStringLiteral("searchCount")).toInteger();
+    indexHealth[QStringLiteral("rewriteAppliedCount")] =
+        queryStats.value(QStringLiteral("rewriteAppliedCount")).toInteger();
+    indexHealth[QStringLiteral("semanticOnlyAdmittedCount")] =
+        queryStats.value(QStringLiteral("semanticOnlyAdmittedCount")).toInteger();
+    indexHealth[QStringLiteral("semanticOnlySuppressedCount")] =
+        queryStats.value(QStringLiteral("semanticOnlySuppressedCount")).toInteger();
+
+    indexHealth[QStringLiteral("runtimeSettings")] =
+        buildRuntimeSettingsSnapshot(m_healthDiagnosticsDb);
+    indexHealth[QStringLiteral("modelManifest")] = buildModelManifestSnapshot(
+        runtimeMirror.modelsDirResolved,
+        runtimeMirror,
+        indexHealth.value(QStringLiteral("runtimeSettings")).toObject(),
+        inferenceHealthSnapshot());
+
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QJsonArray environmentKnown;
+    const auto appendKnownEnv = [&](const QString& key,
+                                    const QString& description,
+                                    const QString& fallbackValue,
+                                    bool parseAsBool) {
+        const bool isSet = env.contains(key);
+        const QString rawValue = env.value(key);
+        QJsonObject row;
+        row[QStringLiteral("key")] = key;
+        row[QStringLiteral("description")] = description;
+        row[QStringLiteral("isSet")] = isSet;
+        row[QStringLiteral("value")] = rawValue;
+        row[QStringLiteral("fallback")] = fallbackValue;
+        if (parseAsBool) {
+            const bool effective = isSet ? envFlagEnabled(rawValue) : envFlagEnabled(fallbackValue);
+            row[QStringLiteral("effectiveBool")] = effective;
+            row[QStringLiteral("effectiveValue")] = effective
+                ? QStringLiteral("true")
+                : QStringLiteral("false");
+        } else {
+            row[QStringLiteral("effectiveValue")] = isSet ? rawValue : fallbackValue;
+        }
+        environmentKnown.append(row);
+    };
+
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR"),
+                   QStringLiteral("Override BetterSpotlight data directory."),
+                   m_dataDir,
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"),
+                   QStringLiteral("Override models directory (manifest + model artifacts)."),
+                   runtimeMirror.modelsDirResolved,
+                   false);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_DISABLE_COREML"),
+                   QStringLiteral("Disable CoreML execution provider and force CPU path."),
+                   QStringLiteral("0"),
+                   true);
+    appendKnownEnv(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"),
+                   QStringLiteral("Override IPC socket directory."),
+                   QString(),
+                   false);
+    QJsonArray environmentAll;
+    QStringList envKeys = env.keys();
+    envKeys.erase(std::remove_if(envKeys.begin(), envKeys.end(),
+                                 [](const QString& key) {
+                                     return !key.startsWith(QStringLiteral("BETTERSPOTLIGHT_"));
+                                 }),
+                  envKeys.end());
+    envKeys.sort(Qt::CaseInsensitive);
+    for (const QString& key : envKeys) {
+        QJsonObject row;
+        row[QStringLiteral("key")] = key;
+        row[QStringLiteral("value")] = env.value(key);
+        environmentAll.append(row);
+    }
+    indexHealth[QStringLiteral("environmentKnown")] = environmentKnown;
+    indexHealth[QStringLiteral("environmentAll")] = environmentAll;
+
+    indexHealth[QStringLiteral("bsignorePath")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("path")).toString();
+    indexHealth[QStringLiteral("bsignoreFileExists")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("fileExists")).toBool(false);
+    indexHealth[QStringLiteral("bsignoreLoaded")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("loaded")).toBool(false);
+    indexHealth[QStringLiteral("bsignorePatternCount")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("patternCount")).toInt(0);
+    indexHealth[QStringLiteral("bsignoreLastLoadedAtMs")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("lastLoadedAtMs")).toInteger();
+    indexHealth[QStringLiteral("bsignoreLastLoadedAt")] =
+        runtimeMirror.bsignoreStatus.value(QStringLiteral("lastLoadedAt")).toString();
+
+    if (m_learningEngine) {
+        indexHealth[QStringLiteral("learningHealth")] = learningHealthSnapshot();
+    }
+
+    return indexHealth;
+}
+
+void QueryService::applyVectorRebuildCutover(const VectorRebuildCutoverPayload& payload)
+{
+    if (m_shuttingDown.load() || !ensureM2ModulesInitialized() || !m_vectorStore || !m_store) {
+        return;
+    }
+
+    auto failCutover = [&](const QString& error) {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId != payload.runId) {
+            return;
+        }
+        m_vectorRebuildState.status = VectorRebuildState::Status::Failed;
+        m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        m_vectorRebuildState.lastError = error;
+        m_vectorMigrationState = QStringLiteral("failed");
+        refreshRuntimeMirror();
+    };
+
+    if (m_vectorRebuildState.runId != payload.runId
+        || m_vectorRebuildState.status != VectorRebuildState::Status::Running) {
+        return;
+    }
+
+    if (m_vectorStore->countMappingsForGeneration(payload.targetGeneration.toStdString())
+        != payload.expectedPrimaryMappings) {
+        failCutover(QStringLiteral("Primary vector mappings failed validation"));
+        return;
+    }
+    if (payload.hasFastIndex
+        && m_vectorStore->countMappingsForGeneration(payload.fastGeneration.toStdString())
+               != payload.expectedFastMappings) {
+        failCutover(QStringLiteral("Fast vector mappings failed validation"));
+        return;
+    }
+
+    VectorIndex::IndexMetadata primaryMeta;
+    primaryMeta.dimensions = payload.dimensions;
+    primaryMeta.modelId = payload.modelId.toStdString();
+    primaryMeta.generationId = payload.targetGeneration.toStdString();
+    primaryMeta.provider = payload.provider.toStdString();
+    auto primaryIndex = std::make_unique<VectorIndex>(primaryMeta);
+    if (!primaryIndex->load(payload.tempIndexPath.toStdString(),
+                            payload.tempMetaPath.toStdString())) {
+        failCutover(QStringLiteral("Failed to load staged vector index"));
+        return;
+    }
+
+    auto fastIndex = std::unique_ptr<VectorIndex>{};
+    if (payload.hasFastIndex) {
+        VectorIndex::IndexMetadata fastMeta;
+        fastMeta.dimensions = payload.fastDimensions;
+        fastMeta.modelId = payload.fastModelId.toStdString();
+        fastMeta.generationId = payload.fastGeneration.toStdString();
+        fastMeta.provider = payload.fastProvider.toStdString();
+        fastIndex = std::make_unique<VectorIndex>(fastMeta);
+        if (!fastIndex->load(payload.tempFastIndexPath.toStdString(),
+                             payload.tempFastMetaPath.toStdString())) {
+            failCutover(QStringLiteral("Failed to load staged fast vector index"));
+            return;
+        }
+    }
+
+    if (!m_store->setSetting(QStringLiteral("nextHnswLabel"),
+                             QString::number(primaryIndex->nextLabel()))
+        || !m_store->setSetting(QStringLiteral("hnswDeletedCount"), QStringLiteral("0"))
+        || !m_store->setSetting(QStringLiteral("activeVectorGeneration"),
+                                payload.targetGeneration)
+        || !m_store->setSetting(QStringLiteral("vectorMigrationState"),
+                                QStringLiteral("cutover-complete"))
+        || !m_store->setSetting(QStringLiteral("vectorMigrationProgressPct"),
+                                QStringLiteral("100"))) {
+        failCutover(QStringLiteral("Failed to persist vector cutover settings"));
+        return;
+    }
+
+    VectorStore::GenerationState activeState;
+    activeState.generationId = payload.targetGeneration.toStdString();
+    activeState.modelId = payload.modelId.toStdString();
+    activeState.dimensions = payload.dimensions;
+    activeState.provider = payload.provider.toStdString();
+    activeState.state = "active";
+    activeState.progressPct = 100.0;
+    activeState.active = true;
+    if (!m_vectorStore->upsertGenerationState(activeState)) {
+        failCutover(QStringLiteral("Failed to persist active vector generation"));
+        return;
+    }
+    if (payload.hasFastIndex) {
+        VectorStore::GenerationState fastState;
+        fastState.generationId = payload.fastGeneration.toStdString();
+        fastState.modelId = payload.fastModelId.toStdString();
+        fastState.dimensions = payload.fastDimensions;
+        fastState.provider = payload.fastProvider.toStdString();
+        fastState.state = "active";
+        fastState.progressPct = 100.0;
+        fastState.active = false;
+        if (!m_vectorStore->upsertGenerationState(fastState)) {
+            failCutover(QStringLiteral("Failed to persist fast vector generation"));
+            return;
+        }
+    }
+
+    QString persistError;
+    auto persistFile = [&](const QString& tmpPath, const QString& finalPath) {
+        if (!persistError.isEmpty()) {
+            return;
+        }
+        if (QFile::exists(finalPath) && !QFile::remove(finalPath)) {
+            persistError = QStringLiteral("Failed to replace %1").arg(finalPath);
+            return;
+        }
+        if (!QFile::rename(tmpPath, finalPath)) {
+            persistError = QStringLiteral("Failed to persist %1").arg(finalPath);
+        }
+    };
+    persistFile(payload.tempIndexPath, payload.targetIndexPath);
+    persistFile(payload.tempMetaPath, payload.targetMetaPath);
+    if (payload.hasFastIndex) {
+        persistFile(payload.tempFastIndexPath, payload.fastIndexPath);
+        persistFile(payload.tempFastMetaPath, payload.fastMetaPath);
+    }
+    if (!persistError.isEmpty()) {
+        failCutover(persistError);
+        return;
+    }
+
+    {
+        std::unique_lock<std::shared_mutex> lock(m_vectorIndexMutex);
+        m_activeVectorGeneration = payload.targetGeneration;
+        m_activeVectorModelId = payload.modelId;
+        m_activeVectorProvider = payload.provider;
+        m_activeVectorDimensions = payload.dimensions;
+        m_vectorMigrationState = QStringLiteral("cutover-complete");
+        m_vectorMigrationProgressPct = 100.0;
+        m_vectorIndexPath = payload.targetIndexPath;
+        m_vectorMetaPath = payload.targetMetaPath;
+        m_vectorIndex = std::move(primaryIndex);
+        if (payload.hasFastIndex) {
+            m_fastVectorGeneration = payload.fastGeneration;
+            m_fastVectorIndexPath = payload.fastIndexPath;
+            m_fastVectorMetaPath = payload.fastMetaPath;
+            m_fastVectorIndex = std::move(fastIndex);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_vectorRebuildMutex);
+        if (m_vectorRebuildState.runId == payload.runId) {
+            m_vectorRebuildState.status = VectorRebuildState::Status::Succeeded;
+            m_vectorRebuildState.totalCandidates = payload.totalCandidates;
+            m_vectorRebuildState.processed = payload.processed;
+            m_vectorRebuildState.embedded = payload.embedded;
+            m_vectorRebuildState.skipped = payload.skipped;
+            m_vectorRebuildState.failed = payload.failed;
+            m_vectorRebuildState.finishedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+            m_vectorRebuildState.lastError.clear();
+        }
+    }
+    refreshRuntimeMirror();
 }
 
 void QueryService::initM2Modules()
@@ -1458,6 +2768,7 @@ void QueryService::initM2Modules()
     } else {
         LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
     }
+    refreshRuntimeMirror();
 }
 
 void QueryService::initBsignoreWatch()
@@ -1510,6 +2821,7 @@ void QueryService::reloadBsignore()
             m_bsignoreWatcher->addPath(m_bsignorePath);
         }
     }
+    refreshRuntimeMirror();
 }
 
 bool QueryService::isExcludedByBsignore(const QString& absolutePath) const
@@ -4302,6 +5614,249 @@ QJsonObject QueryService::handleGetQueryHealthV3(uint64_t id)
 
 QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndexerQueueProbe)
 {
+    {
+    if (!ensureHealthDiagnosticsOpen()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+
+    maybeRefreshLocalHealthSnapshot();
+    schedulePeerProbeRefresh(includeIndexerQueueProbe);
+    if (m_localHealthSnapshotCache.indexHealth.isEmpty()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Health snapshot is unavailable"));
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QJsonObject cachedIndexHealth = m_localHealthSnapshotCache.indexHealth;
+    const QString localState =
+        (m_localHealthSnapshotCache.state == QLatin1String("fresh")
+         && (nowMs - m_localHealthSnapshotCache.snapshotTimeMs) <= kLocalHealthSnapshotTtlMs)
+            ? QStringLiteral("fresh")
+            : QStringLiteral("stale");
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotState")] = localState;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] =
+        m_localHealthSnapshotCache.snapshotTimeMs;
+    cachedIndexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
+        m_localHealthSnapshotCache.snapshotTimeMs > 0
+            ? (nowMs - m_localHealthSnapshotCache.snapshotTimeMs)
+            : -1;
+
+    PeerProbeCache indexerCache;
+    PeerProbeCache inferenceCache;
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        indexerCache = m_indexerPeerCache;
+        inferenceCache = m_inferencePeerCache;
+    }
+
+    QJsonObject peerProbeStateByService;
+    peerProbeStateByService[QStringLiteral("indexer")] = indexerCache.state;
+    peerProbeStateByService[QStringLiteral("inference")] = inferenceCache.state;
+    QJsonObject peerProbeTimeMsByService;
+    peerProbeTimeMsByService[QStringLiteral("indexer")] = indexerCache.snapshotTimeMs;
+    peerProbeTimeMsByService[QStringLiteral("inference")] = inferenceCache.snapshotTimeMs;
+    cachedIndexHealth[QStringLiteral("peerProbeStateByService")] = peerProbeStateByService;
+    cachedIndexHealth[QStringLiteral("peerProbeTimeMsByService")] = peerProbeTimeMsByService;
+
+    int queuePending = 0;
+    int queueInProgress = 0;
+    int queueFailed = 0;
+    int queueDropped = 0;
+    int queueScanned = 0;
+    int queueTotal = 0;
+    double queueProgressPct = 0.0;
+    bool queuePaused = false;
+    int queuePreparing = 0;
+    int queueWriting = 0;
+    bool queueRebuildRunning = false;
+    QString queueRebuildStatus = QStringLiteral("unknown");
+    QString queueRebuildReason;
+    int queueCoalesced = 0;
+    int queueStaleDropped = 0;
+    int queuePrepWorkers = 0;
+    int queueWriterBatchDepth = 0;
+    QString queueActorMode = QStringLiteral("actor_primary");
+    QJsonObject queueBulkhead;
+    QJsonArray queueRoots;
+    QString queueSource = indexerCache.payload.isEmpty()
+        ? QStringLiteral("unavailable")
+        : QStringLiteral("indexer_rpc");
+    if (!indexerCache.payload.isEmpty()) {
+        queuePending = indexerCache.payload.value(QStringLiteral("pending")).toInt();
+        queueInProgress = indexerCache.payload.value(QStringLiteral("processing")).toInt();
+        queueFailed = indexerCache.payload.value(QStringLiteral("failed")).toInt();
+        queueDropped = indexerCache.payload.value(QStringLiteral("dropped")).toInt();
+        queuePaused = indexerCache.payload.value(QStringLiteral("paused")).toBool(false);
+        queuePreparing = indexerCache.payload.value(QStringLiteral("preparing")).toInt();
+        queueWriting = indexerCache.payload.value(QStringLiteral("writing")).toInt();
+        queueRebuildRunning =
+            indexerCache.payload.value(QStringLiteral("rebuildRunning")).toBool(false);
+        queueRebuildStatus =
+            indexerCache.payload.value(QStringLiteral("rebuildStatus")).toString(queueRebuildStatus);
+        queueRebuildReason =
+            indexerCache.payload.value(QStringLiteral("rebuildReason")).toString();
+        const QJsonObject lastProgress =
+            indexerCache.payload.value(QStringLiteral("lastProgressReport")).toObject();
+        queueScanned = lastProgress.value(QStringLiteral("scanned")).toInt();
+        queueTotal = lastProgress.value(QStringLiteral("total")).toInt();
+        queueProgressPct = queueTotal > 0
+            ? (100.0 * static_cast<double>(queueScanned) / static_cast<double>(queueTotal))
+            : 0.0;
+        queueCoalesced = indexerCache.payload.value(QStringLiteral("coalesced")).toInt();
+        queueStaleDropped = indexerCache.payload.value(QStringLiteral("staleDropped")).toInt();
+        queuePrepWorkers = indexerCache.payload.value(QStringLiteral("prepWorkers")).toInt();
+        queueWriterBatchDepth =
+            indexerCache.payload.value(QStringLiteral("writerBatchDepth")).toInt();
+        queueActorMode =
+            indexerCache.payload.value(QStringLiteral("actorMode")).toString(queueActorMode);
+        queueBulkhead = indexerCache.payload.value(QStringLiteral("bulkhead")).toObject();
+        queueRoots = indexerCache.payload.value(QStringLiteral("roots")).toArray();
+    }
+
+    cachedIndexHealth[QStringLiteral("queuePending")] = queuePending;
+    cachedIndexHealth[QStringLiteral("queueInProgress")] = queueInProgress;
+    cachedIndexHealth[QStringLiteral("queueFailed")] = queueFailed;
+    cachedIndexHealth[QStringLiteral("queueDropped")] = queueDropped;
+    cachedIndexHealth[QStringLiteral("queueScanned")] = queueScanned;
+    cachedIndexHealth[QStringLiteral("queueTotal")] = queueTotal;
+    cachedIndexHealth[QStringLiteral("queueProgressPct")] = queueProgressPct;
+    cachedIndexHealth[QStringLiteral("queuePaused")] = queuePaused;
+    cachedIndexHealth[QStringLiteral("queuePreparing")] = queuePreparing;
+    cachedIndexHealth[QStringLiteral("queueWriting")] = queueWriting;
+    cachedIndexHealth[QStringLiteral("queueRebuildRunning")] = queueRebuildRunning;
+    cachedIndexHealth[QStringLiteral("queueRebuildStatus")] = queueRebuildStatus;
+    cachedIndexHealth[QStringLiteral("queueRebuildReason")] = queueRebuildReason;
+    cachedIndexHealth[QStringLiteral("queueCoalesced")] = queueCoalesced;
+    cachedIndexHealth[QStringLiteral("queueStaleDropped")] = queueStaleDropped;
+    cachedIndexHealth[QStringLiteral("queuePrepWorkers")] = queuePrepWorkers;
+    cachedIndexHealth[QStringLiteral("queueWriterBatchDepth")] = queueWriterBatchDepth;
+    cachedIndexHealth[QStringLiteral("pipelineActorMode")] = queueActorMode;
+    cachedIndexHealth[QStringLiteral("pipelineBulkhead")] = queueBulkhead;
+    cachedIndexHealth[QStringLiteral("indexRoots")] = queueRoots;
+    cachedIndexHealth[QStringLiteral("queueSource")] = queueSource;
+    cachedIndexHealth[QStringLiteral("peerDataState")] = indexerCache.state;
+
+    const QJsonObject cachedInferenceHealth = inferenceHealthSnapshot();
+    cachedIndexHealth[QStringLiteral("inferenceServiceConnected")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRoleAdmissionByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleAdmissionByModel")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceQueueDepthByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTimeoutCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTimeoutCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceFallbackCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceFallbackCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceTimeoutCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceTimeoutCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceFailureCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceFailureCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceServiceRestartCountByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceRestartCountByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorStateByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorStateByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceBackoffMsByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceBackoffMsByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRestartBudgetExhaustedByRole")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTransportConnectedByLane")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+    cachedIndexHealth[QStringLiteral("inferenceTransportLaneIsolationEnabled")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeRequested")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeEffective")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString();
+    cachedIndexHealth[QStringLiteral("inferenceSupervisorModeCoerced")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
+    cachedIndexHealth[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
+        cachedInferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
+
+    QString overallStatus = cachedIndexHealth.value(QStringLiteral("overallStatus")).toString();
+    QString healthStatusReason =
+        cachedIndexHealth.value(QStringLiteral("healthStatusReason")).toString();
+    if (queueRebuildStatus == QLatin1String("aborted")
+        || queueRebuildStatus == QLatin1String("failed")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_rebuild_failed");
+    } else if (includeIndexerQueueProbe && indexerCache.state == QLatin1String("unavailable")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_unavailable");
+    } else if (includeIndexerQueueProbe && indexerCache.state == QLatin1String("stale")) {
+        overallStatus = QStringLiteral("degraded");
+        healthStatusReason = QStringLiteral("indexer_peer_stale");
+    }
+    cachedIndexHealth[QStringLiteral("overallStatus")] = overallStatus;
+    cachedIndexHealth[QStringLiteral("healthStatusReason")] = healthStatusReason;
+
+    const double contentCoveragePct =
+        cachedIndexHealth.value(QStringLiteral("contentCoveragePct")).toDouble(100.0);
+    const bool lowCoverage = contentCoveragePct < 50.0;
+    const bool highBacklog = queuePending > 2000;
+    bool includesHomeRoot = false;
+    const QString homePath = QDir::homePath();
+    for (const QJsonValue& rootValue : queueRoots) {
+        if (rootValue.toString() == homePath) {
+            includesHomeRoot = true;
+            break;
+        }
+    }
+    const bool highRootFanout = queueRoots.size() > 32;
+    if (includesHomeRoot && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("curated_roots_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots include the full home directory while coverage is low or backlog is high.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Prefer curated roots (Documents/Projects/Downloads) to reduce lexical noise and improve extraction coverage.");
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        cachedIndexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    } else if (highRootFanout && (lowCoverage || highBacklog)) {
+        QJsonObject advisory;
+        advisory[QStringLiteral("code")] = QStringLiteral("root_fanout_recommended");
+        advisory[QStringLiteral("severity")] = QStringLiteral("info");
+        advisory[QStringLiteral("message")] =
+            QStringLiteral("Index roots fan out across many directories while backlog is high or coverage is low.");
+        advisory[QStringLiteral("recommendation")] =
+            QStringLiteral("Reduce roots to high-signal folders (for example Documents/Desktop/Downloads) to improve quality and indexing throughput.");
+        advisory[QStringLiteral("rootCount")] = queueRoots.size();
+        advisory[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
+        advisory[QStringLiteral("queuePending")] = queuePending;
+        cachedIndexHealth[QStringLiteral("retrievalAdvisory")] = advisory;
+    }
+
+    cachedIndexHealth[QStringLiteral("snapshotId")] = QStringLiteral("%1:%2")
+        .arg(qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID"),
+             QString::number(nowMs));
+    cachedIndexHealth[QStringLiteral("snapshotTimeMs")] = nowMs;
+    cachedIndexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    cachedIndexHealth[QStringLiteral("instanceId")] =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+    cachedIndexHealth[QStringLiteral("snapshotVersion")] = 2;
+
+    QJsonObject serviceHealth;
+    serviceHealth[QStringLiteral("indexerRunning")] = !indexerCache.payload.isEmpty();
+    serviceHealth[QStringLiteral("extractorRunning")] = true;
+    serviceHealth[QStringLiteral("queryServiceRunning")] = true;
+    serviceHealth[QStringLiteral("inferenceServiceRunning")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    serviceHealth[QStringLiteral("uptime")] = 0;
+
+    QJsonObject fastResult;
+    fastResult[QStringLiteral("indexHealth")] = cachedIndexHealth;
+    fastResult[QStringLiteral("serviceHealth")] = serviceHealth;
+    fastResult[QStringLiteral("issues")] = QJsonArray();
+    fastResult[QStringLiteral("snapshotVersion")] = 2;
+    return IpcMessage::makeResponse(id, fastResult);
+    }
+
     if (!ensureStoreOpen()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
@@ -5522,11 +7077,6 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
 
 QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject& params)
 {
-    if (!ensureStoreOpen()) {
-        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
-                                     QStringLiteral("Database is not available"));
-    }
-
     int limit = params.value(QStringLiteral("limit")).toInt(50);
     int offset = params.value(QStringLiteral("offset")).toInt(0);
     if (limit < 1) {
@@ -5536,6 +7086,46 @@ QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject&
     }
     if (offset < 0) {
         offset = 0;
+    }
+
+    {
+    if (!ensureHealthDiagnosticsOpen()) {
+        return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
+                                     QStringLiteral("Database is not available"));
+    }
+
+    const QJsonObject summaryResponse = handleGetHealth(id);
+    if (summaryResponse.value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        return summaryResponse;
+    }
+    const QJsonObject summaryResult = summaryResponse.value(QStringLiteral("result")).toObject();
+    const FailureDetailsPage failurePage =
+        loadFailureDetailsPageFromSqlite(m_healthDiagnosticsDb, limit, offset);
+
+    QJsonObject processStats;
+    processStats[QStringLiteral("query")] = processStatsForService(QStringLiteral("query"));
+    processStats[QStringLiteral("indexer")] = processStatsForService(QStringLiteral("indexer"));
+    processStats[QStringLiteral("extractor")] = processStatsForService(QStringLiteral("extractor"));
+
+    QJsonObject details;
+    details[QStringLiteral("failures")] = failurePage.failures;
+    details[QStringLiteral("failuresLimit")] = limit;
+    details[QStringLiteral("failuresOffset")] = offset;
+    details[QStringLiteral("criticalFailureRows")] = failurePage.criticalRows;
+    details[QStringLiteral("expectedGapFailureRows")] = failurePage.expectedGapRows;
+    details[QStringLiteral("processStats")] = processStats;
+    details[QStringLiteral("queryStats")] = queryStatsSnapshot();
+    details[QStringLiteral("bsignore")] = runtimeMirrorSnapshot().bsignoreStatus;
+
+    QJsonObject fastResult;
+    fastResult[QStringLiteral("indexHealth")] =
+        summaryResult.value(QStringLiteral("indexHealth")).toObject();
+    fastResult[QStringLiteral("serviceHealth")] =
+        summaryResult.value(QStringLiteral("serviceHealth")).toObject();
+    fastResult[QStringLiteral("issues")] =
+        summaryResult.value(QStringLiteral("issues")).toArray();
+    fastResult[QStringLiteral("details")] = details;
+    return IpcMessage::makeResponse(id, fastResult);
     }
 
     const QJsonObject summaryResponse = handleGetHealth(id);
