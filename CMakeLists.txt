@@ -144,5 +144,22 @@ add_subdirectory(src/services/query)
 add_subdirectory(src/services/inference)
 add_subdirectory(src/app)
 
+add_custom_target(betterspotlight-dev-runtime
+    DEPENDS
+        betterspotlight
+        betterspotlight-indexer
+        betterspotlight-extractor
+        betterspotlight-query
+        betterspotlight-inference
+)
+
 enable_testing()
 add_subdirectory(Tests)
+
+if(TARGET betterspotlight-default-verification-tests)
+    add_custom_target(betterspotlight-default-verification
+        DEPENDS
+            betterspotlight-dev-runtime
+            betterspotlight-default-verification-tests
+    )
+endif()

@@ -4,9 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
 BUILD_LAUNCH_SCRIPT="${ROOT_DIR}/scripts/dev/build_launch.sh"
-TARGETS_SCRIPT="${ROOT_DIR}/scripts/dev/test_targets.sh"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
-BUILD_DIR_DEFAULT="${ROOT_DIR}/build-dev-verify"
+BUILD_DIR_DEFAULT="${ROOT_DIR}/build-stabilize"
 
 BUILD_DIR="${BS_DEV_VERIFY_BUILD_DIR:-${BUILD_DIR_DEFAULT}}"
 BUILD_TYPE="${BS_DEV_VERIFY_BUILD_TYPE:-Release}"
@@ -17,10 +16,11 @@ usage() {
     cat <<'EOF'
 Usage: scripts/dev/verify_pipeline.sh [--build-dir PATH] [--build-type TYPE] [--no-clean] [--skip-launch]
 
-Runs the stabilization verification flow for BetterSpotlight:
+Runs the full default verification flow for BetterSpotlight:
 1. validates the dev environment,
-2. configures/builds app, helpers, and pipeline/indexer/inference tests,
-3. runs the focused stabilization test suite,
+2. configures/builds the runtime plus the full declared verification test inventory,
+3. checks that every declared CTest executable was actually materialized,
+4. runs the default pass/fail verification labels (unit, integration, service_ipc, docs_lint, relevance),
 4. performs a startup smoke check by launching the app and helpers unless --skip-launch is used.
 EOF
 }
@@ -66,10 +66,6 @@ done
 
 [[ -x "${SETUP_SCRIPT}" ]] || fail "setup script is missing or not executable: ${SETUP_SCRIPT}"
 [[ -x "${BUILD_LAUNCH_SCRIPT}" ]] || fail "build launch script is missing or not executable: ${BUILD_LAUNCH_SCRIPT}"
-[[ -f "${TARGETS_SCRIPT}" ]] || fail "targets script is missing: ${TARGETS_SCRIPT}"
-
-# shellcheck disable=SC1090
-source "${TARGETS_SCRIPT}"
 
 "${SETUP_SCRIPT}" --write-env-file "${ENV_FILE}"
 # shellcheck disable=SC1090
@@ -99,16 +95,48 @@ CMAKE_ARGS=(
 log "Configuring ${BUILD_DIR} (${BUILD_TYPE})..."
 "${ROOT_DIR}/scripts/ci/configure.sh" "${BUILD_DIR}" "${BUILD_TYPE}" "${CMAKE_ARGS[@]}"
 
-mapfile -t APP_TARGETS < <(bs_dev_app_targets)
-mapfile -t TEST_TARGETS < <(bs_dev_extended_reliability_test_targets)
-BUILD_TARGETS=("${APP_TARGETS[@]}" "${TEST_TARGETS[@]}")
+log "Building full default verification target..."
+"${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target betterspotlight-default-verification
 
-log "Building stabilization targets..."
-"${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
+log "Checking CTest inventory for missing executables..."
+python3 - "${BUILD_DIR}" <<'PY'
+import json
+import os
+import subprocess
+import sys
 
-TEST_REGEX="$(bs_dev_targets_regex extended)"
-log "Running extended reliability tests..."
-ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 300 -R "${TEST_REGEX}"
+build_dir = sys.argv[1]
+raw = subprocess.check_output(
+    ["ctest", "--test-dir", build_dir, "--show-only=json-v1"],
+    text=True,
+)
+report = json.loads(raw)
+missing = []
+for test in report.get("tests", []):
+    command = test.get("command") or []
+    if not command:
+        missing.append(f"{test.get('name', '<unnamed>')}: missing command")
+        continue
+    executable = command[0]
+    if os.path.isabs(executable) and not os.path.exists(executable):
+        missing.append(f"{test.get('name', '<unnamed>')}: {executable}")
+
+if missing:
+    sys.stderr.write("Default verification inventory mismatch; declared tests are missing executables:\n")
+    for line in missing:
+        sys.stderr.write(f"  - {line}\n")
+    sys.exit(1)
+PY
+
+DEFAULT_LABEL_REGEX='^(unit|integration|service_ipc|docs_lint|relevance)$'
+EXCLUDE_LABEL_REGEX='^relevance_stress$'
+log "Running default verification labels..."
+ctest \
+    --test-dir "${BUILD_DIR}" \
+    --output-on-failure \
+    --timeout 300 \
+    -L "${DEFAULT_LABEL_REGEX}" \
+    -LE "${EXCLUDE_LABEL_REGEX}"
 
 if [[ "${SKIP_LAUNCH}" -eq 0 ]]; then
     log "Running startup smoke check..."
@@ -119,4 +147,4 @@ if [[ "${SKIP_LAUNCH}" -eq 0 ]]; then
         --with-tests
 fi
 
-log "Stabilization verification complete."
+log "Default verification complete."

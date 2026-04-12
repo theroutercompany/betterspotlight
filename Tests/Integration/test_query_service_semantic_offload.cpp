@@ -8,6 +8,7 @@
 #include "core/vector/vector_index.h"
 #include "core/vector/vector_store.h"
 #include "ipc_test_utils.h"
+#include "threaded_socket_server.h"
 
 #include <QDir>
 #include <QFile>
@@ -174,9 +175,9 @@ void TestQueryServiceSemanticOffload::testSemanticAndRerankOffloadBranches()
     QVERIFY(idWrongType.has_value());
     QVERIFY(idTiny.has_value());
 
-    constexpr int kDims = 384;
-    const std::string generationId = "v1";
-    const std::string modelId = "fake-semantic-model";
+    constexpr int kDims = 1024;
+    const std::string generationId = "v2";
+    const std::string modelId = "bge-large-en-v1.5";
 
     bs::VectorIndex::IndexMetadata meta;
     meta.dimensions = kDims;
@@ -209,11 +210,11 @@ void TestQueryServiceSemanticOffload::testSemanticAndRerankOffloadBranches()
     activeState.active = true;
     QVERIFY(vectorStore.upsertGenerationState(activeState));
 
-    const QString indexPath = QDir(dataDir).filePath(QStringLiteral("vectors-v1.hnsw"));
-    const QString metaPath = QDir(dataDir).filePath(QStringLiteral("vectors-v1.meta"));
+    const QString indexPath = QDir(dataDir).filePath(QStringLiteral("vectors-v2.hnsw"));
+    const QString metaPath = QDir(dataDir).filePath(QStringLiteral("vectors-v2.meta"));
     QVERIFY(index.save(indexPath.toStdString(), metaPath.toStdString()));
 
-    QVERIFY(store.setSetting(QStringLiteral("activeVectorGeneration"), QStringLiteral("v1")));
+    QVERIFY(store.setSetting(QStringLiteral("activeVectorGeneration"), QStringLiteral("v2")));
     QVERIFY(store.setSetting(QStringLiteral("embeddingEnabled"), QStringLiteral("1")));
     QVERIFY(store.setSetting(QStringLiteral("inferenceServiceEnabled"), QStringLiteral("1")));
     QVERIFY(store.setSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), QStringLiteral("1")));
@@ -266,8 +267,8 @@ void TestQueryServiceSemanticOffload::testSemanticAndRerankOffloadBranches()
     QVERIFY2(bs::test::waitForSocketConnection(queryClient, querySocketPath, 5000),
              "Failed to connect query client to socket");
 
-    bs::SocketServer fakeInference;
-    fakeInference.setRequestHandler([&](const QJsonObject& request) {
+    bs::test::ThreadedSocketServer fakeInference;
+    QVERIFY2(fakeInference.start(inferenceSocketPath, [&](const QJsonObject& request) {
         const QString method = request.value(QStringLiteral("method")).toString();
         const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
         const QJsonObject params = request.value(QStringLiteral("params")).toObject();
@@ -342,8 +343,7 @@ void TestQueryServiceSemanticOffload::testSemanticAndRerankOffloadBranches()
 
         return bs::IpcMessage::makeError(
             id, bs::IpcErrorCode::NotFound, QStringLiteral("unsupported"));
-    });
-    QVERIFY2(fakeInference.listen(inferenceSocketPath), "Failed to listen fake inference socket");
+    }), "Failed to listen fake inference socket");
 
     QJsonObject filters;
     QJsonArray includePaths;

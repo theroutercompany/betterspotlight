@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
-TARGETS_SCRIPT="${ROOT_DIR}/scripts/dev/test_targets.sh"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
 RUNTIME_ROOT_DIR="${ROOT_DIR}/.build/dev-runtime"
 BUILD_DIR_DEFAULT="${ROOT_DIR}/build-dev"
@@ -21,7 +20,7 @@ Usage: scripts/dev/build_launch.sh [--build-dir PATH] [--build-type TYPE] [--no-
 Validates the local dev environment, performs a fresh BetterSpotlight dev build,
 starts the helper services against an isolated runtime directory, and launches
 the app binary with the required Qt/runtime environment. Use --with-tests to
-also build the pipeline/indexer/inference stabilization test targets.
+also build the repo's full default verification target.
 EOF
 }
 
@@ -238,10 +237,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -x "${SETUP_SCRIPT}" ]] || fail "setup script is missing or not executable: ${SETUP_SCRIPT}"
-[[ -f "${TARGETS_SCRIPT}" ]] || fail "targets script is missing: ${TARGETS_SCRIPT}"
-
-# shellcheck disable=SC1090
-source "${TARGETS_SCRIPT}"
 
 "${SETUP_SCRIPT}" --write-env-file "${ENV_FILE}"
 # shellcheck disable=SC1090
@@ -276,10 +271,10 @@ log "Configuring ${BUILD_DIR} (${BUILD_TYPE})..."
 "${ROOT_DIR}/scripts/ci/configure.sh" "${BUILD_DIR}" "${BUILD_TYPE}" "${CMAKE_ARGS[@]}"
 
 log "Building fresh BetterSpotlight dev targets..."
-mapfile -t BUILD_TARGETS < <(bs_dev_app_targets)
 if [[ "${BUILD_PIPELINE_TESTS}" -eq 1 ]]; then
-    mapfile -t PIPELINE_TEST_TARGETS < <(bs_dev_stabilization_test_targets)
-    BUILD_TARGETS+=("${PIPELINE_TEST_TARGETS[@]}")
+    BUILD_TARGETS=(betterspotlight-default-verification)
+else
+    BUILD_TARGETS=(betterspotlight-dev-runtime)
 fi
 "${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
 

@@ -6,6 +6,7 @@ file(MAKE_DIRECTORY "${BS_TEST_REPORT_DIR}")
 add_library(betterspotlight-test-support STATIC
     Support/service_process_harness.cpp
     Support/ipc_test_utils.cpp
+    Support/relevance_harness.cpp
 )
 target_include_directories(betterspotlight-test-support PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -29,6 +30,7 @@ function(bs_add_test name source)
         ${source}
         ${BS_SOURCES}
     )
+    set_property(GLOBAL APPEND PROPERTY BS_ALL_TEST_TARGETS ${name})
     target_link_libraries(${name} PRIVATE
         betterspotlight-core
         betterspotlight-test-support
@@ -252,7 +254,9 @@ bs_add_relevance_test(test-query-service-relevance-fixture Integration/test_quer
 )
 
 bs_add_relevance_test(test-ui-sim-query-suite Integration/test_ui_sim_query_suite.cpp
-    COMPILE_DEFINITIONS BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
+    COMPILE_DEFINITIONS
+        BS_RELEVANCE_SUITE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/relevance/ui_sim_query_suite.json"
+        BS_UI_SIM_QUERY_CORPUS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Fixtures/ui_sim_query_suite_v1/corpus.json"
     ENV
         BS_RELEVANCE_GATE_MODE=enforce
         BS_RELEVANCE_REQUIRE_SEMANTIC=1
@@ -313,3 +317,11 @@ bs_add_test(test-settings-controller-platform Unit/test_settings_controller_plat
         ${CMAKE_SOURCE_DIR}/src/app/platform_integration.cpp
     COMPILE_OPTIONS -Wno-keyword-macro
 )
+
+get_property(BS_ALL_TEST_TARGETS GLOBAL PROPERTY BS_ALL_TEST_TARGETS)
+if(BS_ALL_TEST_TARGETS)
+    list(REMOVE_DUPLICATES BS_ALL_TEST_TARGETS)
+    add_custom_target(betterspotlight-default-verification-tests
+        DEPENDS ${BS_ALL_TEST_TARGETS}
+    )
+endif()

@@ -6,6 +6,7 @@
 #include "core/shared/ipc_messages.h"
 #include "ipc_test_utils.h"
 #include "service_process_harness.h"
+#include "threaded_socket_server.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -197,8 +198,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
 
     QJsonArray queueRoots;
     int queuePending = 3000;
-    bs::SocketServer fakeIndexer;
-    fakeIndexer.setRequestHandler([&](const QJsonObject& request) {
+    bs::test::ThreadedSocketServer fakeIndexer;
+    QVERIFY2(fakeIndexer.start(indexerSocketPath, [&](const QJsonObject& request) {
         const QString method = request.value(QStringLiteral("method")).toString();
         const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
         if (method == QLatin1String("getQueueStatus")) {
@@ -224,11 +225,10 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         }
         return bs::IpcMessage::makeError(
             id, bs::IpcErrorCode::NotFound, QStringLiteral("unsupported"));
-    });
-    QVERIFY2(fakeIndexer.listen(indexerSocketPath), "Failed to start fake indexer socket");
+    }), "Failed to start fake indexer socket");
 
-    bs::SocketServer fakeInference;
-    fakeInference.setRequestHandler([&](const QJsonObject& request) {
+    bs::test::ThreadedSocketServer fakeInference;
+    QVERIFY2(fakeInference.start(inferenceSocketPath, [&](const QJsonObject& request) {
         const QString method = request.value(QStringLiteral("method")).toString();
         const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
         if (method == QLatin1String("get_inference_health")) {
@@ -253,8 +253,7 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         }
         return bs::IpcMessage::makeError(
             id, bs::IpcErrorCode::NotFound, QStringLiteral("unsupported"));
-    });
-    QVERIFY2(fakeInference.listen(inferenceSocketPath), "Failed to start fake inference socket");
+    }), "Failed to start fake inference socket");
 
     {
         QJsonObject params;

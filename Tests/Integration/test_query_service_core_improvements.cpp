@@ -6,6 +6,7 @@
 #include "core/ipc/socket_server.h"
 #include "core/index/sqlite_store.h"
 #include "core/shared/chunk.h"
+#include "threaded_socket_server.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -225,8 +226,8 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
     }
 
     // Start fake indexer and verify queue parity fields.
-    bs::SocketServer fakeIndexer;
-    fakeIndexer.setRequestHandler([&tempHome](const QJsonObject& request) {
+    bs::test::ThreadedSocketServer fakeIndexer;
+    QVERIFY2(fakeIndexer.start(indexerSocket, [&tempHome](const QJsonObject& request) {
         const QString method = request.value(QStringLiteral("method")).toString();
         const uint64_t id = static_cast<uint64_t>(request.value(QStringLiteral("id")).toInteger());
         if (method == QLatin1String("getQueueStatus")) {
@@ -254,8 +255,7 @@ void TestQueryServiceCoreImprovements::testCoreBehaviorViaIpc()
         }
         return bs::IpcMessage::makeError(
             id, bs::IpcErrorCode::NotFound, QStringLiteral("Unsupported method"));
-    });
-    QVERIFY2(fakeIndexer.listen(indexerSocket), "Failed to start fake indexer socket server");
+    }), "Failed to start fake indexer socket server");
 
     {
         const QJsonObject response = sendOrFail(queryClient, QStringLiteral("getHealth"));

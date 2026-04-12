@@ -1104,8 +1104,8 @@ void TestLearningEngine::testRepeatedIdleStyleCyclesKeepBoundedState()
 
     const QJsonObject health = engine.healthSnapshot();
     QVERIFY(health.value(QStringLiteral("cyclesRun")).toInt(0) >= 10);
-    QCOMPARE(health.value(QStringLiteral("replayCapacity")).toInt(), 64);
-    QVERIFY(health.value(QStringLiteral("replaySize")).toInt(0) <= 64);
+    QCOMPARE(health.value(QStringLiteral("replayCapacity")).toInt(), 256);
+    QVERIFY(health.value(QStringLiteral("replaySize")).toInt(0) <= 256);
     QCOMPARE(health.value(QStringLiteral("recentLearningCyclesLimit")).toInt(), 5);
 
     const QJsonArray recent = health.value(QStringLiteral("recentLearningCycles")).toArray();
@@ -1132,11 +1132,11 @@ void TestLearningEngine::testRepeatedIdleStyleCyclesKeepBoundedState()
     const int distinctSlots = sqlite3_column_int(stmt, 1);
     const int minSlot = sqlite3_column_int(stmt, 2);
     const int maxSlot = sqlite3_column_int(stmt, 3);
-    QVERIFY(replayCount <= 64);
+    QVERIFY(replayCount <= 256);
     QCOMPARE(distinctSlots, replayCount);
     if (replayCount > 0) {
         QVERIFY(minSlot >= 0);
-        QVERIFY(maxSlot < 64);
+        QVERIFY(maxSlot < 256);
     }
     sqlite3_finalize(stmt);
 }
@@ -1384,8 +1384,8 @@ void TestLearningEngine::testTriggerLearningCycleRejectsCandidateNotBetter()
                   QStringLiteral("onlineRankerMinExamples"),
                   QStringLiteral("40"));
 
-    // Balanced labels with near-constant features produce little to no incremental gain
-    // after the first promotion, so a subsequent candidate should be rejected.
+    // Balanced labels with near-constant features should not beat the current
+    // active model, including the tracked bootstrap seed.
     for (int i = 0; i < 120; ++i) {
         const int label = (i % 2 == 0) ? 1 : 0;
         insertTrainingRow(store.rawDb(),
@@ -1398,9 +1398,11 @@ void TestLearningEngine::testTriggerLearningCycleRejectsCandidateNotBetter()
 
     QString firstReason;
     const bool firstPromoted = engine.triggerLearningCycle(true, &firstReason);
-    QVERIFY2(firstPromoted, qPrintable(firstReason));
     const QString firstVersion = engine.modelVersion();
     QVERIFY(!firstVersion.isEmpty());
+    if (!firstPromoted) {
+        QCOMPARE(firstReason, QStringLiteral("candidate_not_better_than_active"));
+    }
 
     for (int i = 0; i < 120; ++i) {
         const int label = (i % 2 == 0) ? 1 : 0;

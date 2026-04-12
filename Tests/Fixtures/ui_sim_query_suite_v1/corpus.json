@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "description": "Hermetic corpus for the UI simulation relevance suite. Each document is repo-owned and seeded into a temporary BetterSpotlight home during the relevance gate.",
+  "documents": [
+    {
+      "relativePath": "ui-sim/notes/is there any traces of using embedding model to im.md",
+      "content": "Embedding model traces integration note.\n\nThis memo asks whether there are any traces of using embedding model to im in the product and keeps a short troubleshooting log for img src https r2cdn perplexity pplx snippets. The note talks about embedding model traces integration, historical traces, and a noisy variant written as embedding modelll trcaes."
+    },
+    {
+      "relativePath": "ui-sim/travel/2022 Summer Travel Cost - Accommodation.pdf",
+      "content": "2022 Summer Travel Cost Accommodation ledger.\n\nPage Check in date Check out date room rate taxes and hotel receipt details for a summer trip accommodation expenses review. This document is the accommodation section of the 2022 summer travel cost report and focuses on lodging charges rather than flights or meals."
+    },
+    {
+      "relativePath": "ui-sim/writing/Breaking the Sound Barrier.docx",
+      "content": "Breaking the Sound Barrier article draft.\n\nA prose draft titled Breaking the Sound Barrier that explains sonic booms, supersonic flight, and the historical race to fly faster than sound. It is the main article draft, not the transformation appendix or the audit log."
+    },
+    {
+      "relativePath": "ui-sim/writing/Breaking the Sound Barrier Transformation.pdf",
+      "content": "Breaking the Sound Barrier Transformation appendix.\n\nA companion PDF named Breaking the Sound Barrier Transformation that describes the transformation plan, revision steps, and transformation notes for the sound barrier draft."
+    },
+    {
+      "relativePath": "ui-sim/finance/credit report.pdf",
+      "content": "Credit report summary.\n\nA standard credit report with score history, bureau details, and account notes. This file is the generic credit report document and does not describe the May 9th screenshot capture."
+    },
+    {
+      "relativePath": "ui-sim/engineering/How do senior engineers spot human written code fr.pdf",
+      "content": "How do senior engineers spot human written code from generated code.\n\nPage How senior engineers spot human authorship through review cues, code smell analysis, and human written code spotting by senior engineers. The paper focuses on distinguishing human written code from machine generated output."
+    },
+    {
+      "relativePath": "ui-sim/legal/Notice of Articles Explained.pdf",
+      "content": "Notice of Articles Explained guide.\n\nPage Notice Articles Explained Notice Articles and a plain-language explanation of the notice of articles filing, incorporation details, and the role of articles in corporate registration."
+    },
+    {
+      "relativePath": "ui-sim/reports/Print Report - OnWaterlooRegionalPs.pdf",
+      "content": "Print Report OnWaterlooRegionalPs.\n\nPage Print Report OnWaterlooRegionalPs Waterloo Regional school report with school metrics, enrollment, and district reporting. This is the ON WATERLOO REGIONAL PS REPORT referenced by internal reporting notes."
+    },
+    {
+      "relativePath": "ui-sim/payments/known issues with coinbase commerce payments as a.pdf",
+      "content": "Known issues with Coinbase Commerce payments as a merchant.\n\nPage known issues with coinbase commerce, failed webhook confirmation, payment issues, and Coinbase Commerce payment issues seen during checkout reconciliation."
+    },
+    {
+      "relativePath": "ui-sim/legal/how do you register as a non profit then in ontari.pdf",
+      "content": "How do you register as a non profit then in Ontario.\n\nPage how you register non profit organizations in Ontario, including incorporation steps, notice of articles requirements, and the sequence after forming a non profit corporation."
+    },
+    {
+      "relativePath": "ui-sim/analysis/Feature-TraditionalAIAgentApproach-SteinbergersOpenClawApproach.csv",
+      "content": "Feature comparison Traditional AI Agent Approach versus Steinberger's OpenClaw Approach.\n\nA CSV-style comparison of Feature TraditionalAIAgentApproach SteinbergersOpenClawApproach dimensions, capability tradeoffs, and implementation notes."
+    },
+    {
+      "relativePath": "ui-sim/coverage/coverage.txt",
+      "content": "coverage summary\n\nCoverage report for the current reliability pass with pass rate, branch totals, line coverage, and coverage deltas."
+    },
+    {
+      "relativePath": "ui-sim/legal/how to register as a charity organization in ontar.pdf",
+      "content": "How to register as a charity organization in Ontario.\n\nA guide about charity organization registration Ontario, charitable status requirements, CRA paperwork, and the difference between a charity and a non profit organization."
+    },
+    {
+      "relativePath": "ui-sim/screens/CleanShot 2026-02-07 at 22.56.45@2x.png",
+      "content": "CleanShot screenshot of a credit report dated May 9th.\n\nThe screenshot captures a credit report view with a visible May 9th date and supporting account details. It is a screenshot artifact, not the underlying credit report PDF."
+    },
+    {
+      "relativePath": "ui-sim/logs/audit.jsonl",
+      "content": "audit trail for the breaking the sound barrier document.\n\nJSONL audit entries record review events, approvals, and document tracking for the Breaking the Sound Barrier document and the associated editorial workflow."
+    }
+  ]
+}
