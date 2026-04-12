@@ -46,6 +46,12 @@ protected:
     QJsonObject handleRequest(const QJsonObject& request) override;
 
 private:
+    enum class InferenceLane {
+        Live,
+        Health,
+        Rebuild,
+    };
+
     // ── M1 handlers ──
     QJsonObject handleSearch(uint64_t id, const QJsonObject& params);
     QJsonObject handleGetAnswerSnippet(uint64_t id, const QJsonObject& params);
@@ -154,8 +160,9 @@ private:
     bool ensureStoreOpen();
     bool ensureM2ModulesInitialized();
     bool ensureTypoLexiconReady();
-    bool ensureInferenceClientConnected();
-    std::optional<QJsonObject> sendInferenceRequest(const QString& method,
+    bool ensureInferenceClientConnected(InferenceLane lane);
+    std::optional<QJsonObject> sendInferenceRequest(InferenceLane lane,
+                                                    const QString& method,
                                                     const QJsonObject& params,
                                                     int timeoutMs,
                                                     const QString& roleForMetrics,
@@ -163,7 +170,9 @@ private:
                                                     const QString& cancelToken = QString());
     void recordInferenceTimeout(const QString& role);
     void recordInferenceFallback(const QString& role);
-    void recordInferenceConnected(bool connected);
+    void recordInferenceConnected(InferenceLane lane, bool connected);
+    void disconnectInferenceLane(InferenceLane lane);
+    static QString inferenceLaneName(InferenceLane lane);
     QJsonObject inferenceHealthSnapshot();
     void noteLearningSchedulerOutcome(bool promoted, const QString& reason);
     QJsonObject learningSchedulerSnapshot() const;
@@ -194,8 +203,12 @@ private:
     std::atomic<uint64_t> m_semanticOnlyAdmittedCount{0};
     std::atomic<uint64_t> m_semanticOnlySuppressedCount{0};
 
-    std::unique_ptr<SocketClient> m_inferenceClient;
-    mutable std::mutex m_inferenceRpcMutex;
+    std::unique_ptr<SocketClient> m_inferenceLiveClient;
+    std::unique_ptr<SocketClient> m_inferenceHealthClient;
+    std::unique_ptr<SocketClient> m_inferenceRebuildClient;
+    mutable std::mutex m_inferenceRpcMutexLive;
+    mutable std::mutex m_inferenceRpcMutexHealth;
+    mutable std::mutex m_inferenceRpcMutexRebuild;
     mutable std::mutex m_inferenceStatsMutex;
     mutable std::mutex m_learningSchedulerMutex;
     QTimer m_learningSchedulerTimer;
@@ -206,6 +219,9 @@ private:
     QString m_learningSchedulerLastReason;
     QHash<QString, qint64> m_learningSchedulerReasonCounts;
     bool m_inferenceServiceConnected = false;
+    bool m_inferenceLiveLaneConnected = false;
+    bool m_inferenceHealthLaneConnected = false;
+    bool m_inferenceRebuildLaneConnected = false;
     QHash<QString, qint64> m_inferenceTimeoutCountByRole;
     QHash<QString, qint64> m_inferenceFallbackCountByRole;
 

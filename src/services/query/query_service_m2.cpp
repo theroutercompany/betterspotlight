@@ -799,21 +799,8 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         readBoolSettingFromDb(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
     const bool inferenceEmbedOffloadActive =
         inferenceServiceEnabled && inferenceEmbedOffloadEnabled;
-    SocketClient inferenceClient;
-    bool inferenceConnected = false;
-    bool inferenceEmbedOffloadRunEnabled = false;
+    bool inferenceEmbedOffloadRunEnabled = inferenceEmbedOffloadActive;
     bool inferenceFallbackLogged = false;
-    if (inferenceEmbedOffloadActive) {
-        const QString inferenceSocketPath = ServiceBase::socketPath(QStringLiteral("inference"));
-        inferenceConnected = inferenceClient.connectToServer(inferenceSocketPath, 500);
-        if (!inferenceConnected) {
-            LOG_WARN(bsIpc,
-                     "Vector rebuild run %llu: inference offload unavailable, falling back to local embeddings",
-                     static_cast<unsigned long long>(runId));
-        } else {
-            inferenceEmbedOffloadRunEnabled = true;
-        }
-    }
 
     const bool fakeEmbeddings = testFakeEmbeddingsEnabled();
     const bool fakeFastEmbeddings = testFakeFastEmbeddingsEnabled();
@@ -924,7 +911,7 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             const std::vector<QString>& texts,
             int microBatchSize) -> std::vector<std::vector<float>> {
         std::vector<std::vector<float>> embeddings;
-        if (!inferenceConnected || texts.empty()) {
+        if (!inferenceEmbedOffloadRunEnabled || texts.empty()) {
             return embeddings;
         }
 
@@ -946,18 +933,19 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         params[QStringLiteral("deadlineMs")] =
             QDateTime::currentMSecsSinceEpoch() + 12000;
 
-        auto response = inferenceClient.sendRequest(QStringLiteral("embed_passages"), params, 12000);
-        if (!response.has_value()
-            || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        auto payload = sendInferenceRequest(
+            InferenceLane::Rebuild,
+            QStringLiteral("embed_passages"),
+            params,
+            12000,
+            role,
+            QStringLiteral("embed_passages_failed"));
+        if (!payload.has_value()
+            || payload->value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
             return {};
         }
 
-        const QJsonObject payload = response->value(QStringLiteral("result")).toObject();
-        if (payload.value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
-            return {};
-        }
-
-        const QJsonArray embeddingRows = payload.value(QStringLiteral("result"))
+        const QJsonArray embeddingRows = payload->value(QStringLiteral("result"))
             .toObject()
             .value(QStringLiteral("embeddings"))
             .toArray();

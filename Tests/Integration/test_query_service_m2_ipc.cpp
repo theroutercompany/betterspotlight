@@ -503,6 +503,8 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     bs::test::ServiceLaunchConfig inferenceLaunch;
     inferenceLaunch.homeDir = tempHome.path();
     inferenceLaunch.dataDir = dataDir;
+    inferenceLaunch.env.insert(QStringLiteral("BETTERSPOTLIGHT_INFERENCE_SUPERVISOR_MODE"),
+                               QStringLiteral("legacy"));
     inferenceLaunch.env.insert(
         QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
     inferenceLaunch.env.insert(
@@ -521,6 +523,13 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
             const QJsonObject healthResponse =
                 inferenceHarness.request(QStringLiteral("get_inference_health"), {}, 1500);
             if (bs::test::isResponse(healthResponse)) {
+                const QJsonObject inferenceHealth = bs::test::resultPayload(healthResponse);
+                QCOMPARE(inferenceHealth.value(QStringLiteral("requestedSupervisorMode")).toString(),
+                         QStringLiteral("legacy"));
+                QCOMPARE(inferenceHealth.value(QStringLiteral("effectiveSupervisorMode")).toString(),
+                         QStringLiteral("actor_primary"));
+                QVERIFY(inferenceHealth.value(QStringLiteral("supervisorModeCoerced")).toBool(false));
+                QVERIFY(inferenceHealth.value(QStringLiteral("placeholderWorkersEnabled")).toBool(false));
                 inferenceReady = true;
                 break;
             }
@@ -625,10 +634,15 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     noFakeParams[QStringLiteral("includePaths")] = noFakePaths;
     const QJsonObject unsupportedResponse =
         noFakeHarness.request(QStringLiteral("rebuild_vector_index"), noFakeParams, 8000);
-    QVERIFY(bs::test::isResponse(unsupportedResponse));
-    const QJsonObject unsupportedResult = bs::test::resultPayload(unsupportedResponse);
-    QVERIFY(unsupportedResult.value(QStringLiteral("started")).toBool(false)
-            || unsupportedResult.value(QStringLiteral("alreadyRunning")).toBool(false));
+    QVERIFY(bs::test::isResponse(unsupportedResponse) || bs::test::isError(unsupportedResponse));
+    if (bs::test::isResponse(unsupportedResponse)) {
+        const QJsonObject unsupportedResult = bs::test::resultPayload(unsupportedResponse);
+        QVERIFY(unsupportedResult.value(QStringLiteral("started")).toBool(false)
+                || unsupportedResult.value(QStringLiteral("alreadyRunning")).toBool(false));
+    } else {
+        QCOMPARE(bs::test::errorPayload(unsupportedResponse).value(QStringLiteral("code")).toInt(),
+                 static_cast<int>(bs::IpcErrorCode::Unsupported));
+    }
 
     const QJsonObject noFakeHealth =
         noFakeHarness.request(QStringLiteral("getHealth"), {}, 8000);

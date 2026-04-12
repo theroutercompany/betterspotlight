@@ -1,6 +1,7 @@
 #include "indexer_service.h"
 #include "core/ipc/message.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 
 #include <QDateTime>
 #include <QByteArray>
@@ -19,6 +20,14 @@
 namespace bs {
 
 namespace {
+
+QString effectivePipelineActorModeString()
+{
+    bool coerced = false;
+    return runtime_mode_policy::effectivePipelineActorMode(
+        qEnvironmentVariable("BETTERSPOTLIGHT_PIPELINE_ACTOR_MODE").trimmed().toLower(),
+        &coerced);
+}
 
 int readEnvInt(const char* key, int fallback, int minValue, int maxValue)
 {
@@ -444,7 +453,7 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         result[QStringLiteral("bsignoreLastLoadedAtMs")] =
             bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
         result[QStringLiteral("memory")] = memoryTelemetry();
-        result[QStringLiteral("actorMode")] = QStringLiteral("legacy");
+        result[QStringLiteral("actorMode")] = effectivePipelineActorModeString();
         result[QStringLiteral("bulkhead")] = QJsonObject();
         return IpcMessage::makeResponse(id, result);
     }
@@ -511,8 +520,8 @@ QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
         bsignore.value(QStringLiteral("lastLoadedAtMs")).toInteger();
     result[QStringLiteral("memory")] = memoryTelemetry();
     const QJsonObject telemetry = m_pipeline->telemetrySnapshot();
-    result[QStringLiteral("actorMode")] =
-        telemetry.value(QStringLiteral("actorMode")).toString(QStringLiteral("legacy"));
+    result[QStringLiteral("actorMode")] = telemetry.value(QStringLiteral("actorMode"))
+        .toString(effectivePipelineActorModeString());
     result[QStringLiteral("bulkhead")] = telemetry;
     return IpcMessage::makeResponse(id, result);
 }

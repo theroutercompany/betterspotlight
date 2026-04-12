@@ -31,6 +31,8 @@ void TestInferenceServiceIpc::testInferenceIpcContract()
     bs::test::ServiceLaunchConfig launch;
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_INFERENCE_SUPERVISOR_MODE"),
+                      QStringLiteral("legacy"));
     launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
     launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
     launch.startTimeoutMs = 20000;
@@ -163,9 +165,22 @@ void TestInferenceServiceIpc::testInferenceIpcContract()
         QVERIFY(result.contains(QStringLiteral("timeoutCountByRole")));
         QVERIFY(result.contains(QStringLiteral("failureCountByRole")));
         QVERIFY(result.contains(QStringLiteral("restartCountByRole")));
+        QCOMPARE(result.value(QStringLiteral("requestedSupervisorMode")).toString(),
+                 QStringLiteral("legacy"));
+        QCOMPARE(result.value(QStringLiteral("effectiveSupervisorMode")).toString(),
+                 QStringLiteral("actor_primary"));
+        QVERIFY(result.value(QStringLiteral("supervisorModeCoerced")).toBool(false));
+        QVERIFY(result.value(QStringLiteral("placeholderWorkersEnabled")).toBool(false));
         const QJsonObject queueDepthByRole = result.value(QStringLiteral("queueDepthByRole")).toObject();
         QVERIFY(queueDepthByRole.contains(QStringLiteral("bi-encoder")));
         QVERIFY(queueDepthByRole.contains(QStringLiteral("bi-encoder-rebuild")));
+        const QJsonObject roleStatusByModel = result.value(QStringLiteral("roleStatusByModel")).toObject();
+        QCOMPARE(roleStatusByModel.value(QStringLiteral("bi-encoder")).toString(),
+                 QStringLiteral("test_placeholder"));
+        const QJsonObject roleStateReasonByModel =
+            result.value(QStringLiteral("roleStateReasonByModel")).toObject();
+        QCOMPARE(roleStateReasonByModel.value(QStringLiteral("bi-encoder")).toString(),
+                 QStringLiteral("placeholder_worker"));
         const QJsonObject restartCountByRole = result.value(QStringLiteral("restartCountByRole")).toObject();
         QVERIFY(restartCountByRole.contains(QStringLiteral("bi-encoder")));
     }

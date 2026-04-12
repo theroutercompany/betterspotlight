@@ -758,36 +758,110 @@ bool QueryService::ensureTypoLexiconReady()
     return true;
 }
 
-bool QueryService::ensureInferenceClientConnected()
+QString QueryService::inferenceLaneName(InferenceLane lane)
 {
-    if (m_inferenceClient && m_inferenceClient->isConnected()) {
-        recordInferenceConnected(true);
+    switch (lane) {
+    case InferenceLane::Live:
+        return QStringLiteral("live");
+    case InferenceLane::Health:
+        return QStringLiteral("health");
+    case InferenceLane::Rebuild:
+        return QStringLiteral("rebuild");
+    }
+    return QStringLiteral("unknown");
+}
+
+bool QueryService::ensureInferenceClientConnected(InferenceLane lane)
+{
+    auto clientForLane = [&](InferenceLane selectedLane) -> std::unique_ptr<SocketClient>& {
+        switch (selectedLane) {
+        case InferenceLane::Live:
+            return m_inferenceLiveClient;
+        case InferenceLane::Health:
+            return m_inferenceHealthClient;
+        case InferenceLane::Rebuild:
+            return m_inferenceRebuildClient;
+        }
+        return m_inferenceLiveClient;
+    };
+
+    std::unique_ptr<SocketClient>& client = clientForLane(lane);
+    if (client && client->isConnected()) {
+        recordInferenceConnected(lane, true);
         return true;
     }
 
-    if (!m_inferenceClient) {
-        m_inferenceClient = std::make_unique<SocketClient>();
+    if (!client) {
+        client = std::make_unique<SocketClient>();
     }
 
     const QString inferenceSocketPath = ServiceBase::socketPath(QStringLiteral("inference"));
-    const bool connected = m_inferenceClient->connectToServer(inferenceSocketPath, 200);
-    recordInferenceConnected(connected);
+    const int timeoutMs = (lane == InferenceLane::Rebuild) ? 500 : 200;
+    const bool connected = client->connectToServer(inferenceSocketPath, timeoutMs);
+    recordInferenceConnected(lane, connected);
     if (!connected) {
-        LOG_WARN(bsIpc, "Inference client connect failed: %s",
+        LOG_WARN(bsIpc,
+                 "Inference %s lane connect failed: %s",
+                 qUtf8Printable(inferenceLaneName(lane)),
                  qUtf8Printable(inferenceSocketPath));
     }
     return connected;
 }
 
-std::optional<QJsonObject> QueryService::sendInferenceRequest(const QString& method,
+void QueryService::disconnectInferenceLane(InferenceLane lane)
+{
+    auto clientForLane = [&](InferenceLane selectedLane) -> std::unique_ptr<SocketClient>& {
+        switch (selectedLane) {
+        case InferenceLane::Live:
+            return m_inferenceLiveClient;
+        case InferenceLane::Health:
+            return m_inferenceHealthClient;
+        case InferenceLane::Rebuild:
+            return m_inferenceRebuildClient;
+        }
+        return m_inferenceLiveClient;
+    };
+
+    std::unique_ptr<SocketClient>& client = clientForLane(lane);
+    if (client) {
+        client->disconnect();
+    }
+    recordInferenceConnected(lane, false);
+}
+
+std::optional<QJsonObject> QueryService::sendInferenceRequest(InferenceLane lane,
+                                                              const QString& method,
                                                               const QJsonObject& params,
                                                               int timeoutMs,
                                                               const QString& roleForMetrics,
                                                               const QString& fallbackReasonKey,
                                                               const QString& cancelToken)
 {
-    std::lock_guard<std::mutex> lock(m_inferenceRpcMutex);
-    if (!ensureInferenceClientConnected() || !m_inferenceClient) {
+    auto mutexForLane = [&](InferenceLane selectedLane) -> std::mutex& {
+        switch (selectedLane) {
+        case InferenceLane::Live:
+            return m_inferenceRpcMutexLive;
+        case InferenceLane::Health:
+            return m_inferenceRpcMutexHealth;
+        case InferenceLane::Rebuild:
+            return m_inferenceRpcMutexRebuild;
+        }
+        return m_inferenceRpcMutexLive;
+    };
+    auto clientForLane = [&](InferenceLane selectedLane) -> std::unique_ptr<SocketClient>& {
+        switch (selectedLane) {
+        case InferenceLane::Live:
+            return m_inferenceLiveClient;
+        case InferenceLane::Health:
+            return m_inferenceHealthClient;
+        case InferenceLane::Rebuild:
+            return m_inferenceRebuildClient;
+        }
+        return m_inferenceLiveClient;
+    };
+
+    std::lock_guard<std::mutex> lock(mutexForLane(lane));
+    if (!ensureInferenceClientConnected(lane) || !clientForLane(lane)) {
         recordInferenceFallback(roleForMetrics);
         return std::nullopt;
     }
@@ -802,20 +876,20 @@ std::optional<QJsonObject> QueryService::sendInferenceRequest(const QString& met
         requestParams[QStringLiteral("cancelToken")] = cancelToken;
     }
 
-    auto response = m_inferenceClient->sendRequest(method, requestParams, timeoutMs);
+    auto response = clientForLane(lane)->sendRequest(method, requestParams, timeoutMs);
     if (!response.has_value()) {
-        recordInferenceConnected(false);
+        recordInferenceConnected(lane, false);
         recordInferenceTimeout(roleForMetrics);
         recordInferenceFallback(roleForMetrics);
-        m_inferenceClient->disconnect();
+        clientForLane(lane)->disconnect();
         return std::nullopt;
     }
 
     const QString responseType = response->value(QStringLiteral("type")).toString();
     if (responseType == QLatin1String("error")) {
-        recordInferenceConnected(false);
+        recordInferenceConnected(lane, false);
         recordInferenceFallback(roleForMetrics);
-        m_inferenceClient->disconnect();
+        clientForLane(lane)->disconnect();
         return std::nullopt;
     }
 
@@ -839,7 +913,8 @@ std::optional<QJsonObject> QueryService::sendInferenceRequest(const QString& met
         }
     }
 
-    recordInferenceConnected(true);
+    recordInferenceConnected(lane, true);
+    payload[QStringLiteral("transportLane")] = inferenceLaneName(lane);
     return payload;
 }
 
@@ -861,10 +936,24 @@ void QueryService::recordInferenceFallback(const QString& role)
     m_inferenceFallbackCountByRole[role] = m_inferenceFallbackCountByRole.value(role) + 1;
 }
 
-void QueryService::recordInferenceConnected(bool connected)
+void QueryService::recordInferenceConnected(InferenceLane lane, bool connected)
 {
     std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
-    m_inferenceServiceConnected = connected;
+    switch (lane) {
+    case InferenceLane::Live:
+        m_inferenceLiveLaneConnected = connected;
+        break;
+    case InferenceLane::Health:
+        m_inferenceHealthLaneConnected = connected;
+        break;
+    case InferenceLane::Rebuild:
+        m_inferenceRebuildLaneConnected = connected;
+        break;
+    }
+    m_inferenceServiceConnected =
+        m_inferenceLiveLaneConnected
+        || m_inferenceHealthLaneConnected
+        || m_inferenceRebuildLaneConnected;
 }
 
 QJsonObject QueryService::inferenceHealthSnapshot()
@@ -882,9 +971,13 @@ QJsonObject QueryService::inferenceHealthSnapshot()
 
     QJsonObject timeoutCounts;
     QJsonObject fallbackCounts;
+    QJsonObject laneConnections;
     {
         std::lock_guard<std::mutex> lock(m_inferenceStatsMutex);
         snapshot[QStringLiteral("inferenceServiceConnected")] = m_inferenceServiceConnected;
+        laneConnections[QStringLiteral("live")] = m_inferenceLiveLaneConnected;
+        laneConnections[QStringLiteral("health")] = m_inferenceHealthLaneConnected;
+        laneConnections[QStringLiteral("rebuild")] = m_inferenceRebuildLaneConnected;
         for (auto it = m_inferenceTimeoutCountByRole.constBegin();
              it != m_inferenceTimeoutCountByRole.constEnd(); ++it) {
             timeoutCounts[it.key()] = it.value();
@@ -896,15 +989,18 @@ QJsonObject QueryService::inferenceHealthSnapshot()
     }
     snapshot[QStringLiteral("inferenceTimeoutCountByRole")] = timeoutCounts;
     snapshot[QStringLiteral("inferenceFallbackCountByRole")] = fallbackCounts;
+    snapshot[QStringLiteral("inferenceTransportConnectedByLane")] = laneConnections;
+    snapshot[QStringLiteral("inferenceTransportLaneIsolationEnabled")] = true;
 
-    std::lock_guard<std::mutex> lock(m_inferenceRpcMutex);
-    if (!ensureInferenceClientConnected() || !m_inferenceClient) {
+    std::lock_guard<std::mutex> lock(m_inferenceRpcMutexHealth);
+    if (!ensureInferenceClientConnected(InferenceLane::Health) || !m_inferenceHealthClient) {
         return snapshot;
     }
 
-    auto response = m_inferenceClient->sendRequest(QStringLiteral("get_inference_health"), {}, 250);
+    auto response =
+        m_inferenceHealthClient->sendRequest(QStringLiteral("get_inference_health"), {}, 250);
     if (!response.has_value() || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        recordInferenceConnected(false);
+        recordInferenceConnected(InferenceLane::Health, false);
         return snapshot;
     }
 
@@ -917,6 +1013,10 @@ QJsonObject QueryService::inferenceHealthSnapshot()
         payload.value(QStringLiteral("connected")).toBool(true);
     snapshot[QStringLiteral("inferenceRoleStatusByModel")] =
         payload.value(QStringLiteral("roleStatusByModel")).toObject();
+    snapshot[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        payload.value(QStringLiteral("roleStateReasonByModel")).toObject();
+    snapshot[QStringLiteral("inferenceRoleAdmissionByModel")] =
+        payload.value(QStringLiteral("roleAdmissionByModel")).toObject();
     snapshot[QStringLiteral("inferenceQueueDepthByRole")] =
         payload.value(QStringLiteral("queueDepthByRole")).toObject();
     snapshot[QStringLiteral("inferenceServiceTimeoutCountByRole")] =
@@ -931,7 +1031,17 @@ QJsonObject QueryService::inferenceHealthSnapshot()
         payload.value(QStringLiteral("backoffMsByRole")).toObject();
     snapshot[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
         payload.value(QStringLiteral("restartBudgetExhaustedByRole")).toObject();
-    recordInferenceConnected(snapshot.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
+    snapshot[QStringLiteral("inferenceSupervisorModeRequested")] =
+        payload.value(QStringLiteral("requestedSupervisorMode")).toString();
+    snapshot[QStringLiteral("inferenceSupervisorModeEffective")] =
+        payload.value(QStringLiteral("effectiveSupervisorMode")).toString();
+    snapshot[QStringLiteral("inferenceSupervisorModeCoerced")] =
+        payload.value(QStringLiteral("supervisorModeCoerced")).toBool(false);
+    snapshot[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
+        payload.value(QStringLiteral("placeholderWorkersEnabled")).toBool(false);
+    recordInferenceConnected(
+        InferenceLane::Health,
+        snapshot.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
     return snapshot;
 }
 
@@ -2553,6 +2663,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                     .arg(id)
                     .arg(role);
                 auto payload = sendInferenceRequest(
+                    InferenceLane::Live,
                     QStringLiteral("embed_query"),
                     embedParams,
                     static_cast<int>(std::min<qint64>(remainingBudget + 25, 2000)),
@@ -2825,6 +2936,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             .arg(method);
 
         auto payload = sendInferenceRequest(
+            InferenceLane::Live,
             method,
             rerankParams,
             std::min(budgetRemainingMs + 25, 2000),
@@ -3873,6 +3985,7 @@ QJsonObject QueryService::handleGetAnswerSnippet(uint64_t id, const QJsonObject&
             .arg(QDateTime::currentMSecsSinceEpoch());
 
         auto payload = sendInferenceRequest(
+            InferenceLane::Live,
             QStringLiteral("qa_extract"),
             qaParams,
             timeoutMs + 50,
@@ -4179,7 +4292,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     int queueStaleDropped = 0;
     int queuePrepWorkers = 0;
     int queueWriterBatchDepth = 0;
-    QString queueActorMode = QStringLiteral("legacy");
+    QString queueActorMode = QStringLiteral("actor_primary");
     QJsonObject queueBulkhead;
     QString queueSource = QStringLiteral("unavailable");
     QJsonArray queueRoots;
@@ -4239,7 +4352,8 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
                 queueStaleDropped = queueResult.value(QStringLiteral("staleDropped")).toInt();
                 queuePrepWorkers = queueResult.value(QStringLiteral("prepWorkers")).toInt();
                 queueWriterBatchDepth = queueResult.value(QStringLiteral("writerBatchDepth")).toInt();
-                queueActorMode = queueResult.value(QStringLiteral("actorMode")).toString(QStringLiteral("legacy"));
+                queueActorMode = queueResult.value(QStringLiteral("actorMode"))
+                    .toString(queueActorMode);
                 queueBulkhead = queueResult.value(QStringLiteral("bulkhead")).toObject();
                 queueRoots = queueResult.value(QStringLiteral("roots")).toArray();
                 queueSource = QStringLiteral("indexer_rpc");
@@ -4320,6 +4434,10 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     indexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
         inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    indexHealth[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+    indexHealth[QStringLiteral("inferenceRoleAdmissionByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleAdmissionByModel")).toObject();
     indexHealth[QStringLiteral("inferenceQueueDepthByRole")] =
         inferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
     indexHealth[QStringLiteral("inferenceTimeoutCountByRole")] =
@@ -4338,6 +4456,18 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         inferenceHealth.value(QStringLiteral("inferenceBackoffMsByRole")).toObject();
     indexHealth[QStringLiteral("inferenceRestartBudgetExhaustedByRole")] =
         inferenceHealth.value(QStringLiteral("inferenceRestartBudgetExhaustedByRole")).toObject();
+    indexHealth[QStringLiteral("inferenceTransportConnectedByLane")] =
+        inferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+    indexHealth[QStringLiteral("inferenceTransportLaneIsolationEnabled")] =
+        inferenceHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(false);
+    indexHealth[QStringLiteral("inferenceSupervisorModeRequested")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString();
+    indexHealth[QStringLiteral("inferenceSupervisorModeEffective")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString();
+    indexHealth[QStringLiteral("inferenceSupervisorModeCoerced")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
+    indexHealth[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
+        inferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
     indexHealth[QStringLiteral("contentCoveragePct")] = contentCoveragePct;
     indexHealth[QStringLiteral("semanticCoveragePct")] = semanticCoveragePct;
     indexHealth[QStringLiteral("multiChunkEmbeddingEnabled")] = true;
@@ -4790,8 +4920,20 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         inferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
     runtimeComponents[QStringLiteral("inferenceRoleStatusByModel")] =
         inferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    runtimeComponents[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+    runtimeComponents[QStringLiteral("inferenceRoleAdmissionByModel")] =
+        inferenceHealth.value(QStringLiteral("inferenceRoleAdmissionByModel")).toObject();
     runtimeComponents[QStringLiteral("inferenceQueueDepthByRole")] =
         inferenceHealth.value(QStringLiteral("inferenceQueueDepthByRole")).toObject();
+    runtimeComponents[QStringLiteral("inferenceTransportConnectedByLane")] =
+        inferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+    runtimeComponents[QStringLiteral("inferenceSupervisorModeEffective")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString();
+    runtimeComponents[QStringLiteral("inferenceSupervisorModeCoerced")] =
+        inferenceHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false);
+    runtimeComponents[QStringLiteral("inferencePlaceholderWorkersEnabled")] =
+        inferenceHealth.value(QStringLiteral("inferencePlaceholderWorkersEnabled")).toBool(false);
     runtimeComponents[QStringLiteral("embeddingStrongAvailable")] =
         (m_embeddingManager && m_embeddingManager->isAvailable());
     runtimeComponents[QStringLiteral("embeddingStrongModelId")] =

@@ -1,5 +1,6 @@
 #include <QtTest/QtTest>
 
+#include "services/inference/inference_worker_actor.h"
 #include "services/inference/inference_supervisor_actor.h"
 
 class TestInferenceSupervisorActor : public QObject {
@@ -9,6 +10,7 @@ private slots:
     void testThresholdAndRestartBudget();
     void testSuccessClearsGivingUpState();
     void testTimeoutRestoresAvailability();
+    void testRebuildAdmissionDefersToLiveLanePressure();
 };
 
 void TestInferenceSupervisorActor::testThresholdAndRestartBudget()
@@ -77,6 +79,34 @@ void TestInferenceSupervisorActor::testTimeoutRestoresAvailability()
 
     const QJsonObject states = actor.supervisorStateByRole();
     QCOMPARE(states.value(role).toString(), QStringLiteral("ready"));
+}
+
+void TestInferenceSupervisorActor::testRebuildAdmissionDefersToLiveLanePressure()
+{
+    const auto decision = bs::InferenceWorkerActor::admitRebuild(
+        /*workerRebuildDepth=*/0,
+        /*workerRebuildLimit=*/2,
+        /*globalRebuildDepth=*/0,
+        /*globalRebuildLimit=*/4,
+        /*workerLiveDepth=*/1,
+        /*workerLiveLimit=*/2,
+        /*globalLiveDepth=*/1,
+        /*globalLiveLimit=*/4);
+
+    QVERIFY(!decision.accepted);
+    QCOMPARE(decision.reason, QStringLiteral("worker_live_lane_busy"));
+    QCOMPARE(decision.priorityLaneName, QStringLiteral("live"));
+    QCOMPARE(decision.priorityLaneDepth, 1);
+    QCOMPARE(decision.priorityLaneLimit, 4);
+    QCOMPARE(decision.laneQueueDepth, 0);
+    QCOMPARE(decision.laneQueueLimit, 2);
+    QCOMPARE(decision.globalLaneDepth, 0);
+    QCOMPARE(decision.globalLaneLimit, 4);
+
+    const QJsonObject json = bs::InferenceWorkerActor::toJson(decision);
+    QCOMPARE(json.value(QStringLiteral("priorityLane")).toString(), QStringLiteral("live"));
+    QCOMPARE(json.value(QStringLiteral("priorityLaneDepth")).toInt(), 1);
+    QCOMPARE(json.value(QStringLiteral("priorityLaneLimit")).toInt(), 4);
 }
 
 QTEST_MAIN(TestInferenceSupervisorActor)

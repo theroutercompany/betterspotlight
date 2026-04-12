@@ -24,6 +24,11 @@ inline bool isUnsupportedProductionPipelineMode(const QString& mode)
     return mode == QLatin1String("legacy") || mode == QLatin1String("dual");
 }
 
+inline bool isUnsupportedInferenceSupervisorMode(const QString& mode)
+{
+    return mode == QLatin1String("legacy") || mode == QLatin1String("dual");
+}
+
 inline QString effectivePipelineActorMode(const QString& requestedMode,
                                           bool* coercedOut = nullptr)
 {
@@ -75,6 +80,26 @@ inline QString effectiveControlPlaneMode(const QString& requestedMode,
         return QStringLiteral("actor_primary");
     }
     return normalized;
+}
+
+inline QString effectiveInferenceSupervisorMode(const QString& requestedMode,
+                                                bool* coercedOut = nullptr)
+{
+    const QString normalized = requestedMode.trimmed().toLower();
+    const bool coerced =
+        !allowUnsupportedRuntimeModes() && isUnsupportedInferenceSupervisorMode(normalized);
+    if (coercedOut) {
+        *coercedOut = coerced;
+    }
+    if (coerced) {
+        return QStringLiteral("actor_primary");
+    }
+    if (normalized == QLatin1String("legacy")
+        || normalized == QLatin1String("dual")
+        || normalized == QLatin1String("actor_primary")) {
+        return normalized;
+    }
+    return QStringLiteral("actor_primary");
 }
 
 } // namespace bs::runtime_mode_policy

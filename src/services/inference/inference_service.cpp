@@ -8,6 +8,7 @@
 #include "core/ranking/cross_encoder_reranker.h"
 #include "core/ranking/qa_extractive_model.h"
 #include "core/shared/logging.h"
+#include "core/shared/runtime_mode_policy.h"
 #include "core/shared/search_result.h"
 
 #include <QDateTime>
@@ -84,15 +85,20 @@ QJsonArray toJsonEmbeddings(const std::vector<std::vector<float>>& embeddings)
 InferenceService::InferenceService(QObject* parent)
     : ServiceBase(QStringLiteral("inference"), parent)
 {
-    const QString mode =
+    m_requestedSupervisorMode =
         qEnvironmentVariable("BETTERSPOTLIGHT_INFERENCE_SUPERVISOR_MODE")
             .trimmed()
             .toLower();
-    if (mode == QLatin1String("legacy")
-        || mode == QLatin1String("dual")
-        || mode == QLatin1String("actor_primary")) {
-        m_supervisorMode = mode;
+    m_supervisorMode = runtime_mode_policy::effectiveInferenceSupervisorMode(
+        m_requestedSupervisorMode,
+        &m_supervisorModeCoerced);
+    if (m_supervisorModeCoerced) {
+        LOG_WARN(bsIpc,
+                 "Ignoring unsupported inference supervisor mode '%s'; using actor_primary. "
+                 "Set BETTERSPOTLIGHT_ALLOW_UNSUPPORTED_RUNTIME_MODES=1 to override for tests/forensics.",
+                 qUtf8Printable(m_requestedSupervisorMode));
     }
+    m_placeholderWorkersEnabled = deterministicPlaceholderWorkersEnabled();
     m_supervisorActor = std::make_unique<InferenceSupervisorActor>();
     m_workerActor = std::make_unique<InferenceWorkerActor>();
     initWorkers();
@@ -465,24 +471,32 @@ void InferenceService::workerLoop(Worker& worker)
             worker.completed.fetch_add(1);
             worker.consecutiveFailures = 0;
             worker.degraded = placeholderResponse;
+            worker.stateReason = placeholderResponse
+                ? QStringLiteral("placeholder_worker")
+                : QStringLiteral("ready");
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordSuccess(worker.roleName);
             }
         } else if (status == QLatin1String("timeout")) {
             worker.timedOut.fetch_add(1);
             worker.consecutiveFailures = 0;
+            worker.stateReason = QStringLiteral("deadline_exceeded");
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordTimeout(worker.roleName);
             }
         } else if (status == QLatin1String("cancelled")) {
             worker.cancelled.fetch_add(1);
             worker.consecutiveFailures = 0;
+            worker.stateReason = QStringLiteral("cancelled");
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordTimeout(worker.roleName);
             }
         } else {
             worker.failed.fetch_add(1);
             worker.consecutiveFailures += 1;
+            worker.stateReason = fallbackReason.isEmpty()
+                ? QStringLiteral("request_failed")
+                : fallbackReason;
             maybeRecoverWorker(worker);
         }
 
@@ -498,18 +512,21 @@ void InferenceService::workerLoop(Worker& worker)
 
 bool InferenceService::initializeWorkerModel(Worker& worker)
 {
-    const bool placeholderWorkers = deterministicPlaceholderWorkersEnabled();
-
     worker.registry.reset();
     worker.embedding.reset();
     worker.reranker.reset();
     worker.qa.reset();
     worker.available = false;
     worker.degraded = false;
+    worker.placeholder = false;
+    worker.stateReason.clear();
+    worker.lastAdmission = QJsonObject{};
 
-    if (placeholderWorkers) {
+    if (m_placeholderWorkersEnabled) {
         worker.available = true;
         worker.degraded = true;
+        worker.placeholder = true;
+        worker.stateReason = QStringLiteral("placeholder_worker");
         LOG_INFO(bsIpc,
                  "InferenceService: worker '%s' running in deterministic placeholder mode",
                  qUtf8Printable(worker.roleName));
@@ -521,6 +538,7 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
         LOG_ERROR(bsIpc,
                   "InferenceService: required production model inventory unavailable for worker '%s'",
                   qUtf8Printable(worker.roleName));
+        worker.stateReason = QStringLiteral("required_models_unavailable");
         return false;
     }
     worker.registry = std::make_unique<ModelRegistry>(modelsDir);
@@ -559,12 +577,15 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
 
     if (worker.available) {
         worker.degraded = false;
+        worker.placeholder = false;
+        worker.stateReason = QStringLiteral("ready");
         if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
             m_supervisorActor->resetRole(worker.roleName);
         }
         LOG_INFO(bsIpc, "InferenceService: worker '%s' initialized",
                  qUtf8Printable(worker.roleName));
     } else {
+        worker.stateReason = QStringLiteral("model_unavailable");
         if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
             m_supervisorActor->markRoleUnavailable(worker.roleName);
         }
@@ -583,6 +604,7 @@ void InferenceService::maybeRecoverWorker(Worker& worker)
         worker.restartAttempts = decision.restartAttempts;
         if (decision.givingUp) {
             worker.degraded = true;
+            worker.stateReason = QStringLiteral("restart_budget_exhausted");
             LOG_WARN(bsIpc,
                      "InferenceService: worker '%s' giving up after restart budget exhausted",
                      qUtf8Printable(worker.roleName));
@@ -608,6 +630,7 @@ void InferenceService::maybeRecoverWorker(Worker& worker)
         } else {
             m_supervisorActor->markRoleUnavailable(worker.roleName);
             worker.degraded = true;
+            worker.stateReason = QStringLiteral("recovery_failed");
         }
         worker.consecutiveFailures = 0;
         return;
@@ -619,6 +642,7 @@ void InferenceService::maybeRecoverWorker(Worker& worker)
 
     if (worker.restartAttempts >= kWorkerRestartBudget) {
         worker.degraded = true;
+        worker.stateReason = QStringLiteral("restart_budget_exhausted");
         LOG_WARN(bsIpc,
                  "InferenceService: worker '%s' degraded after %d restart attempts",
                  qUtf8Printable(worker.roleName),
@@ -636,7 +660,30 @@ void InferenceService::maybeRecoverWorker(Worker& worker)
     worker.consecutiveFailures = 0;
     if (!worker.available) {
         worker.degraded = true;
+        worker.stateReason = QStringLiteral("recovery_failed");
     }
+}
+
+QString InferenceService::effectiveWorkerState(const Worker& worker)
+{
+    if (worker.placeholder) {
+        return QStringLiteral("test_placeholder");
+    }
+    if (worker.degraded) {
+        return QStringLiteral("degraded");
+    }
+    if (worker.available) {
+        return QStringLiteral("ready");
+    }
+    return QStringLiteral("unavailable");
+}
+
+QString InferenceService::effectiveWorkerStateReason(const Worker& worker)
+{
+    if (!worker.stateReason.trimmed().isEmpty()) {
+        return worker.stateReason;
+    }
+    return effectiveWorkerState(worker);
 }
 
 QString InferenceService::roleToString(Role role)
@@ -791,10 +838,16 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     QJsonObject result;
     result[QStringLiteral("connected")] = true;
     result[QStringLiteral("supervisorMode")] = m_supervisorMode;
+    result[QStringLiteral("requestedSupervisorMode")] = m_requestedSupervisorMode;
+    result[QStringLiteral("effectiveSupervisorMode")] = m_supervisorMode;
+    result[QStringLiteral("supervisorModeCoerced")] = m_supervisorModeCoerced;
+    result[QStringLiteral("placeholderWorkersEnabled")] = m_placeholderWorkersEnabled;
     result[QStringLiteral("globalQueueLimitLive")] = kGlobalQueueLimitLive;
     result[QStringLiteral("globalQueueLimitRebuild")] = kGlobalQueueLimitRebuild;
 
     QJsonObject roleStatus;
+    QJsonObject roleStateReason;
+    QJsonObject roleAdmission;
     QJsonObject queueDepth;
     QJsonObject timeoutCounts;
     QJsonObject failureCounts;
@@ -806,14 +859,12 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
         std::lock_guard<std::mutex> lock(m_workersMutex);
         for (const auto& worker : m_workers) {
             const QString role = worker->roleName;
-            roleStatus[role] = worker->degraded
-                ? QStringLiteral("degraded")
-                : (worker->available ? QStringLiteral("ready")
-                                     : QStringLiteral("unavailable"));
-
             QJsonObject depth;
             {
                 std::lock_guard<std::mutex> workerLock(worker->mutex);
+                roleStatus[role] = effectiveWorkerState(*worker);
+                roleStateReason[role] = effectiveWorkerStateReason(*worker);
+                roleAdmission[role] = worker->lastAdmission;
                 const qint64 liveDepth = static_cast<qint64>(worker->liveQueue.size());
                 const qint64 rebuildDepth = static_cast<qint64>(worker->rebuildQueue.size());
                 depth[QStringLiteral("live")] = liveDepth;
@@ -830,6 +881,8 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     }
 
     result[QStringLiteral("roleStatusByModel")] = roleStatus;
+    result[QStringLiteral("roleStateReasonByModel")] = roleStateReason;
+    result[QStringLiteral("roleAdmissionByModel")] = roleAdmission;
     result[QStringLiteral("queueDepthByRole")] = queueDepth;
     result[QStringLiteral("globalQueueDepthLive")] = globalLiveDepth;
     result[QStringLiteral("globalQueueDepthRebuild")] = globalRebuildDepth;
@@ -863,17 +916,24 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
     }
 
     const bool rebuildRole = isRebuildRole(role);
-    const int globalLaneDepth = [&]() -> int {
+    const int globalLiveDepth = [&]() -> int {
         std::lock_guard<std::mutex> lock(m_workersMutex);
         int depth = 0;
         for (const auto& candidate : m_workers) {
             std::lock_guard<std::mutex> workerLock(candidate->mutex);
-            depth += static_cast<int>(
-                rebuildRole ? candidate->rebuildQueue.size() : candidate->liveQueue.size());
+            depth += static_cast<int>(candidate->liveQueue.size());
         }
         return depth;
     }();
-    const int globalLaneLimit = rebuildRole ? kGlobalQueueLimitRebuild : kGlobalQueueLimitLive;
+    const int globalRebuildDepth = [&]() -> int {
+        std::lock_guard<std::mutex> lock(m_workersMutex);
+        int depth = 0;
+        for (const auto& candidate : m_workers) {
+            std::lock_guard<std::mutex> workerLock(candidate->mutex);
+            depth += static_cast<int>(candidate->rebuildQueue.size());
+        }
+        return depth;
+    }();
 
     auto task = std::make_shared<Task>();
     task->method = method;
@@ -884,22 +944,31 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
 
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
-        const bool liveRole = isLiveRole(role);
         auto& queue = rebuildRole ? worker->rebuildQueue : worker->liveQueue;
-        const int queueLimit = rebuildRole ? kWorkerQueueLimitRebuild
-                                           : (liveRole ? kWorkerQueueLimitLive
-                                                       : kWorkerQueueLimitRebuild);
+        const int queueLimit = rebuildRole ? kWorkerQueueLimitRebuild : kWorkerQueueLimitLive;
         const int laneDepth = static_cast<int>(queue.size());
+        const int workerLiveDepth = static_cast<int>(worker->liveQueue.size());
+        const int workerRebuildDepth = static_cast<int>(worker->rebuildQueue.size());
         const auto actorDecision = rebuildRole
             ? InferenceWorkerActor::admitRebuild(
-                laneDepth, queueLimit, globalLaneDepth, globalLaneLimit)
+                workerRebuildDepth,
+                kWorkerQueueLimitRebuild,
+                globalRebuildDepth,
+                kGlobalQueueLimitRebuild,
+                workerLiveDepth,
+                kWorkerQueueLimitLive,
+                globalLiveDepth,
+                kGlobalQueueLimitLive)
             : InferenceWorkerActor::admitLive(
-                laneDepth, queueLimit, globalLaneDepth, globalLaneLimit);
+                workerLiveDepth,
+                kWorkerQueueLimitLive,
+                globalLiveDepth,
+                kGlobalQueueLimitLive);
 
         const bool legacyAccepted = laneDepth < queueLimit;
-        bool accepted = legacyAccepted;
-        if (m_supervisorMode == QLatin1String("actor_primary")) {
-            accepted = actorDecision.accepted;
+        bool accepted = actorDecision.accepted;
+        if (m_supervisorMode == QLatin1String("legacy")) {
+            accepted = legacyAccepted;
         } else if (m_supervisorMode == QLatin1String("dual")
                    && legacyAccepted != actorDecision.accepted) {
             LOG_WARN(bsIpc,
@@ -909,7 +978,16 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
                      legacyAccepted ? 1 : 0,
                      actorDecision.accepted ? 1 : 0,
                      qUtf8Printable(actorDecision.reason));
+        } else if (m_supervisorMode == QLatin1String("actor_primary")) {
+            accepted = actorDecision.accepted;
         }
+
+        worker->lastAdmission = InferenceWorkerActor::toJson(actorDecision);
+        worker->lastAdmission[QStringLiteral("method")] = method;
+        worker->lastAdmission[QStringLiteral("lane")] =
+            rebuildRole ? QStringLiteral("rebuild") : QStringLiteral("live");
+        worker->lastAdmission[QStringLiteral("mode")] = m_supervisorMode;
+        worker->lastAdmission[QStringLiteral("legacyAccepted")] = legacyAccepted;
 
         if (!accepted) {
             QJsonObject overload = makeStatusPayload(
@@ -923,8 +1001,10 @@ std::optional<QJsonObject> InferenceService::dispatch(Role role,
             overload[QStringLiteral("lane")] =
                 rebuildRole ? QStringLiteral("rebuild") : QStringLiteral("live");
             overload[QStringLiteral("mode")] = m_supervisorMode;
-            overload[QStringLiteral("globalQueueDepth")] = globalLaneDepth;
-            overload[QStringLiteral("globalQueueLimit")] = globalLaneLimit;
+            overload[QStringLiteral("globalQueueDepth")] =
+                rebuildRole ? globalRebuildDepth : globalLiveDepth;
+            overload[QStringLiteral("globalQueueLimit")] =
+                rebuildRole ? kGlobalQueueLimitRebuild : kGlobalQueueLimitLive;
             return overload;
         }
 

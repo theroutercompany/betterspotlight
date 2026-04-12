@@ -77,8 +77,11 @@ private:
 
         bool available = false;
         bool degraded = false;
+        bool placeholder = false;
         int consecutiveFailures = 0;
         int restartAttempts = 0;
+        QString stateReason;
+        QJsonObject lastAdmission;
 
         std::atomic<qint64> submitted{0};
         std::atomic<qint64> completed{0};
@@ -119,6 +122,8 @@ private:
                                          qint64 elapsedMs,
                                          const QJsonObject& result = {},
                                          const QString& fallbackReason = QString());
+    static QString effectiveWorkerState(const Worker& worker);
+    static QString effectiveWorkerStateReason(const Worker& worker);
 
     bool isCancelled(const QString& cancelToken) const;
     void markCancelled(const QString& cancelToken);
@@ -137,7 +142,10 @@ private:
 
     std::unique_ptr<InferenceSupervisorActor> m_supervisorActor;
     std::unique_ptr<InferenceWorkerActor> m_workerActor;
-    QString m_supervisorMode = QStringLiteral("dual");
+    QString m_requestedSupervisorMode;
+    QString m_supervisorMode = QStringLiteral("actor_primary");
+    bool m_supervisorModeCoerced = false;
+    bool m_placeholderWorkersEnabled = false;
 
     static constexpr int kWorkerQueueLimitLive = 64;
     static constexpr int kWorkerQueueLimitRebuild = 512;

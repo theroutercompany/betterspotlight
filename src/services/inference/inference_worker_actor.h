@@ -16,6 +16,9 @@ public:
         int laneQueueLimit = 0;
         int globalLaneDepth = 0;
         int globalLaneLimit = 0;
+        QString priorityLaneName;
+        int priorityLaneDepth = 0;
+        int priorityLaneLimit = 0;
     };
 
     explicit InferenceWorkerActor(QObject* parent = nullptr);
@@ -28,7 +31,11 @@ public:
     static AdmissionDecision admitRebuild(int workerRebuildDepth,
                                           int workerRebuildLimit,
                                           int globalRebuildDepth,
-                                          int globalRebuildLimit);
+                                          int globalRebuildLimit,
+                                          int workerLiveDepth,
+                                          int workerLiveLimit,
+                                          int globalLiveDepth,
+                                          int globalLiveLimit);
     static QJsonObject toJson(const AdmissionDecision& decision);
 };
 

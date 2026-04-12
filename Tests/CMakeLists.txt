@@ -192,6 +192,7 @@ bs_add_test(test-inference-supervisor-actor Unit/test_inference_supervisor_actor
     LABELS "unit"
     SOURCES
         ${CMAKE_SOURCE_DIR}/src/services/inference/inference_supervisor_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_worker_actor.cpp
     COMPILE_OPTIONS -Wno-keyword-macro
 )
 bs_add_unit_test(test-migration Unit/test_migration.cpp)

@@ -234,10 +234,19 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         if (method == QLatin1String("get_inference_health")) {
             QJsonObject payload;
             payload[QStringLiteral("connected")] = true;
+            payload[QStringLiteral("requestedSupervisorMode")] = QStringLiteral("legacy");
+            payload[QStringLiteral("effectiveSupervisorMode")] = QStringLiteral("actor_primary");
+            payload[QStringLiteral("supervisorModeCoerced")] = true;
+            payload[QStringLiteral("placeholderWorkersEnabled")] = false;
             QJsonObject roleStatus;
             roleStatus[QStringLiteral("bi-encoder")] = QStringLiteral("ready");
             roleStatus[QStringLiteral("cross-encoder")] = QStringLiteral("degraded");
             payload[QStringLiteral("roleStatusByModel")] = roleStatus;
+            QJsonObject roleReason;
+            roleReason[QStringLiteral("bi-encoder")] = QStringLiteral("ready");
+            roleReason[QStringLiteral("cross-encoder")] = QStringLiteral("actor_degraded");
+            payload[QStringLiteral("roleStateReasonByModel")] = roleReason;
+            payload[QStringLiteral("roleAdmissionByModel")] = QJsonObject{};
             QJsonObject queueDepth;
             queueDepth[QStringLiteral("bi-encoder")] = 1;
             payload[QStringLiteral("queueDepthByRole")] = queueDepth;
@@ -326,6 +335,12 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         const QJsonObject roleStatus =
             indexHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
         QCOMPARE(roleStatus.value(QStringLiteral("bi-encoder")).toString(), QStringLiteral("ready"));
+        QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString(),
+                 QStringLiteral("legacy"));
+        QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString(),
+                 QStringLiteral("actor_primary"));
+        QVERIFY(indexHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(false));
+        QVERIFY(indexHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(false));
         QVERIFY(indexHealth.value(QStringLiteral("recentErrors")).toArray().size() >= 1);
         const QJsonObject memoryByService =
             indexHealth.value(QStringLiteral("memoryByService")).toObject();
