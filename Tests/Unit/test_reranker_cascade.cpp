@@ -14,7 +14,7 @@ namespace {
 
 bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
 {
-    if (!bs::test::prepareFixtureEmbeddingModelFiles(modelsDir)) {
+    if (!bs::test::prepareFixtureRerankModelFiles(modelsDir)) {
         return false;
     }
 
@@ -24,10 +24,10 @@ bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
                 "name": "cross-fixture",
                 "modelId": "cross-fixture-v1",
                 "generationId": "v1",
-                "file": "bge-small-en-v1.5-int8.onnx",
+                "file": "mxbai-rerank-xsmall-v1-int8.onnx",
                 "vocab": "vocab.txt",
                 "tokenizer": "wordpiece",
-                "inputs": ["input_ids", "attention_mask", "token_type_ids"],
+                "inputs": ["input_ids", "attention_mask"],
                 "outputs": ["logits"],
                 "task": "rerank"
             }

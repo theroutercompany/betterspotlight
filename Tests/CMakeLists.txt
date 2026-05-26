@@ -92,6 +92,22 @@ bs_add_unit_test(test-query-normalizer Unit/test_query_normalizer.cpp)
 bs_add_unit_test(test-search-result Unit/test_search_result.cpp)
 bs_add_unit_test(test-chunker Unit/test_chunker.cpp)
 bs_add_unit_test(test-bsignore-parser Unit/test_bsignore_parser.cpp)
+bs_add_unit_test(test-behavior-event-payload-utils Unit/test_behavior_event_payload_utils.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/query/behavior_event_payload_utils.cpp
+)
+bs_add_unit_test(test-embedding-response-utils Unit/test_embedding_response_utils.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/query/embedding_response_utils.cpp
+)
+bs_add_unit_test(test-rerank-score-utils Unit/test_rerank_score_utils.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/query/rerank_score_utils.cpp
+)
+bs_add_unit_test(test-file-monitor-macos Unit/test_file_monitor_macos.cpp
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_unit_test(test-fda-check Unit/test_fda_check.cpp)
 bs_add_unit_test(test-ipc-messages Unit/test_ipc_messages.cpp)
 bs_add_unit_test(test-match-classifier Unit/test_match_classifier.cpp)
 bs_add_unit_test(test-corrupt-files Unit/test_corrupt_files.cpp)
@@ -122,7 +138,10 @@ bs_add_unit_test(test-reranker-cascade Unit/test_reranker_cascade.cpp
         Utils/model_fixture_paths.cpp
 )
 bs_add_unit_test(test-personalized-ltr Unit/test_personalized_ltr.cpp)
-bs_add_unit_test(test-learning-engine Unit/test_learning_engine.cpp)
+bs_add_test(test-learning-engine Unit/test_learning_engine.cpp
+    TIMEOUT 120
+    LABELS "unit"
+)
 bs_add_unit_test(test-online-ranker Unit/test_online_ranker.cpp)
 bs_add_unit_test(test-dual-index-calibration Unit/test_dual_index_calibration.cpp)
 
@@ -162,6 +181,10 @@ bs_add_unit_test(test-type-affinity Unit/test_type_affinity.cpp)
 
 # New hotspot unit tests
 bs_add_unit_test(test-indexer Unit/test_indexer.cpp)
+bs_add_unit_test(test-indexer-service-contract Unit/test_indexer_service_contract.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/indexer/indexer_service.cpp
+)
 bs_add_test(test-pipeline Unit/test_pipeline.cpp
     TIMEOUT 180
     LABELS "unit"
@@ -194,6 +217,18 @@ bs_add_test(test-inference-supervisor-actor Unit/test_inference_supervisor_actor
         ${CMAKE_SOURCE_DIR}/src/services/inference/inference_supervisor_actor.cpp
         ${CMAKE_SOURCE_DIR}/src/services/inference/inference_worker_actor.cpp
     COMPILE_OPTIONS -Wno-keyword-macro
+)
+bs_add_unit_test(test-inference-payload-utils Unit/test_inference_payload_utils.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_payload_utils.cpp
+)
+bs_add_unit_test(test-inference-service-contract Unit/test_inference_service_contract.cpp
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_service.cpp
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_payload_utils.cpp
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_supervisor_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/services/inference/inference_worker_actor.cpp
+    COMPILE_DEFINITIONS BETTERSPOTLIGHT_ENABLE_TEST_HOOKS
 )
 bs_add_unit_test(test-migration Unit/test_migration.cpp)
 bs_add_unit_test(test-vector-store Unit/test_vector_store.cpp)
@@ -303,6 +338,19 @@ bs_add_test(test-health-consistency-v2 Integration/test_health_consistency_v2.cp
         Qt6::Gui
     COMPILE_OPTIONS -Wno-keyword-macro
 )
+bs_add_test(test-search-controller Unit/test_search_controller.cpp
+    TIMEOUT 60
+    LABELS "unit"
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/app/search_controller.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/service_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/control_plane_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_aggregator_actor.cpp
+        ${CMAKE_SOURCE_DIR}/src/app/control_plane/health_snapshot_v2.cpp
+    LINK_LIBS
+        Qt6::Gui
+    COMPILE_OPTIONS -Wno-keyword-macro
+)
 bs_add_test(test-orphan-reconciliation Integration/test_orphan_reconciliation.cpp
     TIMEOUT 120
     LABELS "integration"
@@ -318,6 +366,47 @@ bs_add_test(test-settings-controller-platform Unit/test_settings_controller_plat
         ${CMAKE_SOURCE_DIR}/src/app/platform_integration.cpp
     COMPILE_OPTIONS -Wno-keyword-macro
 )
+
+bs_add_test(test-onboarding-qml-layout Unit/test_onboarding_qml_layout.cpp
+    TIMEOUT 60
+    LABELS "unit;ui_layout"
+    LINK_LIBS
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+    COMPILE_DEFINITIONS
+        BETTERSPOTLIGHT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        BETTERSPOTLIGHT_BUILD_QML_DIR="${CMAKE_BINARY_DIR}/src/app/BetterSpotlight"
+    ENV
+        QT_QPA_PLATFORM=offscreen
+        QSG_RHI_BACKEND=software
+)
+add_dependencies(test-onboarding-qml-layout betterspotlight)
+
+function(bs_add_dependencies_if_targets target_name)
+    if(NOT TARGET ${target_name})
+        return()
+    endif()
+    foreach(dep_name IN LISTS ARGN)
+        if(TARGET ${dep_name})
+            add_dependencies(${target_name} ${dep_name})
+        endif()
+    endforeach()
+endfunction()
+
+bs_add_dependencies_if_targets(test-query-service-core-improvements betterspotlight-query)
+bs_add_dependencies_if_targets(test-query-service-ipc-extensions betterspotlight-query)
+bs_add_dependencies_if_targets(test-query-service-semantic-offload betterspotlight-query)
+bs_add_dependencies_if_targets(test-query-service-m2-ipc
+    betterspotlight-query
+    betterspotlight-inference
+)
+bs_add_dependencies_if_targets(test-query-service-relevance-fixture betterspotlight-query)
+bs_add_dependencies_if_targets(test-ui-sim-query-suite betterspotlight-query)
+bs_add_dependencies_if_targets(test-indexer-service-ipc betterspotlight-indexer)
+bs_add_dependencies_if_targets(test-extractor-service-ipc betterspotlight-extractor)
+bs_add_dependencies_if_targets(test-inference-service-ipc betterspotlight-inference)
 
 get_property(BS_ALL_TEST_TARGETS GLOBAL PROPERTY BS_ALL_TEST_TARGETS)
 if(BS_ALL_TEST_TARGETS)

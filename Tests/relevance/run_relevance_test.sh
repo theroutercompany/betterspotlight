@@ -16,9 +16,9 @@ set -euo pipefail
 #   7) Exit non-zero when threshold is not met.
 
 MODE="both"
-CORPUS="tests/relevance/test_corpus.json"
-FIXTURE="tests/Fixtures/standard_home_v1"
-OUTPUT="tests/relevance/results.csv"
+CORPUS="Tests/relevance/test_corpus.json"
+FIXTURE="Tests/Fixtures/standard_home_v1"
+OUTPUT="Tests/relevance/results.csv"
 
 usage() {
 	cat <<'EOF'
@@ -28,9 +28,9 @@ Options:
   --mode fts5       Run FTS5-only baseline
   --mode semantic   Run FTS5+semantic
   --mode both       Run both and produce comparison (default)
-  --corpus          Path to test_corpus.json (default: tests/relevance/test_corpus.json)
-  --fixture         Path to fixture directory (default: tests/Fixtures/standard_home_v1)
-  --output          Path to results CSV (default: tests/relevance/results.csv)
+  --corpus          Path to test_corpus.json (default: Tests/relevance/test_corpus.json)
+  --fixture         Path to fixture directory (default: Tests/Fixtures/standard_home_v1)
+  --output          Path to results CSV (default: Tests/relevance/results.csv)
 EOF
 }
 
