@@ -85,6 +85,7 @@ private:
                                 const std::optional<QJsonObject>& response);
     void failAllPendingRequests(const QString& reason);
     void attemptReconnect();
+    bool writeFrame(const QByteArray& encoded, const QString& context);
 };
 
 } // namespace bs

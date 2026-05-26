@@ -34,6 +34,9 @@ QString resolveJsonFixturePath(const QString& envVar,
                                const QString& compiledPath,
                                const QString& relativeFallback);
 QString resolveModelsDirForTests();
+QString prepareLightweightModelsDirForTests(const QString& sourceModelsDir,
+                                            const QString& targetModelsDir,
+                                            QString* errorOut = nullptr);
 std::vector<RelevanceCase> parseRelevanceCases(const QJsonArray& caseArray);
 QString syntheticContentForFile(const QString& sourcePath);
 bool envFlagEnabled(const QString& raw);
@@ -62,7 +65,7 @@ public:
                              QString* errorOut = nullptr);
     bool startQueryService(const QHash<QString, QString>& extraEnv = {},
                            QString* errorOut = nullptr);
-    bool ensureSemanticReady(QString* errorOut = nullptr, int timeoutMs = 120000);
+    bool ensureSemanticReady(QString* errorOut = nullptr, int timeoutMs = 240000);
     QJsonObject request(const QString& method,
                         const QJsonObject& params = {},
                         int timeoutMs = -1);

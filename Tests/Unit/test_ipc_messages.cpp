@@ -6,6 +6,8 @@
 #include "core/ipc/message.h"
 #include "core/shared/ipc_messages.h"
 
+#include <limits>
+
 class TestIpcMessages : public QObject {
     Q_OBJECT
 
@@ -37,10 +39,13 @@ private slots:
     void testDecodePartialMessage();
     void testDecodeMultipleMessagesConsumesOnlyFirst();
     void testDecodeEmptyBuffer();
+    void testDecodeFrameDistinguishesIncompleteAndInvalid();
+    void testDecodeRejectsInvalidProtocolShapes();
 
     // ── Max message size ─────────────────────────────────────────
     void testMaxMessageSizeConstant();
     void testDecodeRejectsOversizedLength();
+    void testDecodeRejectsUint32LengthOverflow();
 
     // ── Unicode content ──────────────────────────────────────────
     void testUnicodeContentSurvivesRoundtrip();
@@ -270,6 +275,75 @@ void TestIpcMessages::testDecodeEmptyBuffer()
     QVERIFY(!result.has_value());
 }
 
+void TestIpcMessages::testDecodeFrameDistinguishesIncompleteAndInvalid()
+{
+    auto incomplete = bs::IpcMessage::decodeFrame(QByteArray("\x00\x00", 2));
+    QCOMPARE(incomplete.status, bs::IpcMessage::DecodeStatus::Incomplete);
+    QVERIFY(!incomplete.result.has_value());
+
+    QByteArray invalidJson;
+    invalidJson.resize(4);
+    const QByteArray payload = QByteArrayLiteral("{ invalid");
+    quint32 invalidLen = qToBigEndian(static_cast<quint32>(payload.size()));
+    memcpy(invalidJson.data(), &invalidLen, 4);
+    invalidJson.append(payload);
+
+    auto invalid = bs::IpcMessage::decodeFrame(invalidJson);
+    QCOMPARE(invalid.status, bs::IpcMessage::DecodeStatus::Invalid);
+    QVERIFY(!invalid.error.isEmpty());
+    QVERIFY(!invalid.result.has_value());
+
+    auto valid = bs::IpcMessage::decodeFrame(
+        bs::IpcMessage::encode(bs::IpcMessage::makeRequest(1, QStringLiteral("ping"))));
+    QCOMPARE(valid.status, bs::IpcMessage::DecodeStatus::Complete);
+    QVERIFY(valid.result.has_value());
+}
+
+void TestIpcMessages::testDecodeRejectsInvalidProtocolShapes()
+{
+    const QJsonObject missingType{{QStringLiteral("method"), QStringLiteral("ping")}};
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(missingType)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+
+    const QJsonObject unknownType{
+        {QStringLiteral("type"), QStringLiteral("mystery")},
+        {QStringLiteral("id"), 1},
+        {QStringLiteral("method"), QStringLiteral("ping")},
+    };
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(unknownType)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+
+    const QJsonObject requestWithoutId{
+        {QStringLiteral("type"), QStringLiteral("request")},
+        {QStringLiteral("method"), QStringLiteral("ping")},
+    };
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(requestWithoutId)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+
+    const QJsonObject requestWithScalarParams{
+        {QStringLiteral("type"), QStringLiteral("request")},
+        {QStringLiteral("id"), 1},
+        {QStringLiteral("method"), QStringLiteral("ping")},
+        {QStringLiteral("params"), QStringLiteral("not-an-object")},
+    };
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(requestWithScalarParams)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+
+    const QJsonObject responseWithoutObjectResult{
+        {QStringLiteral("type"), QStringLiteral("response")},
+        {QStringLiteral("id"), 1},
+        {QStringLiteral("result"), true},
+    };
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(responseWithoutObjectResult)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+
+    const QJsonObject notificationWithoutMethod{
+        {QStringLiteral("type"), QStringLiteral("notification")},
+    };
+    QCOMPARE(bs::IpcMessage::decodeFrame(bs::IpcMessage::encode(notificationWithoutMethod)).status,
+             bs::IpcMessage::DecodeStatus::Invalid);
+}
+
 // ── Max message size ─────────────────────────────────────────────
 
 void TestIpcMessages::testMaxMessageSizeConstant()
@@ -289,6 +363,22 @@ void TestIpcMessages::testDecodeRejectsOversizedLength()
 
     auto result = bs::IpcMessage::decode(buf);
     QVERIFY(!result.has_value());
+
+    auto frame = bs::IpcMessage::decodeFrame(buf);
+    QCOMPARE(frame.status, bs::IpcMessage::DecodeStatus::Invalid);
+}
+
+void TestIpcMessages::testDecodeRejectsUint32LengthOverflow()
+{
+    QByteArray buf;
+    buf.resize(4);
+    quint32 hugeLen = qToBigEndian(std::numeric_limits<quint32>::max());
+    memcpy(buf.data(), &hugeLen, 4);
+    buf.append(QByteArrayLiteral("{}"));
+
+    auto frame = bs::IpcMessage::decodeFrame(buf);
+    QCOMPARE(frame.status, bs::IpcMessage::DecodeStatus::Invalid);
+    QVERIFY(frame.error.contains(QStringLiteral("message length exceeds max")));
 }
 
 // ── Unicode content ──────────────────────────────────────────────
@@ -320,8 +410,10 @@ void TestIpcMessages::testEncodeEmptyObject()
     QVERIFY(!encoded.isEmpty());
 
     auto decoded = bs::IpcMessage::decode(encoded);
-    QVERIFY(decoded.has_value());
-    QVERIFY(decoded->json.isEmpty());
+    QVERIFY(!decoded.has_value());
+
+    auto frame = bs::IpcMessage::decodeFrame(encoded);
+    QCOMPARE(frame.status, bs::IpcMessage::DecodeStatus::Invalid);
 }
 
 // ── bytesConsumed ────────────────────────────────────────────────

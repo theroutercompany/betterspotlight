@@ -33,9 +33,12 @@ public:
             QPointer<QLocalSocket> client;
             std::shared_ptr<ConnectionState> connection;
             std::atomic<bool> completed{false};
+            bool hasRequestId = false;
+            uint64_t requestId = 0;
         };
 
         explicit RequestResponder(std::shared_ptr<State> state);
+        static bool stateConnected(const std::shared_ptr<State>& state);
 
         std::shared_ptr<State> m_state;
 
@@ -81,7 +84,7 @@ private:
 
     bool detachClient(QLocalSocket* client);
     void processBuffer(QLocalSocket* client);
-    void sendResponse(QLocalSocket* client, const QJsonObject& response);
+    bool sendResponse(QLocalSocket* client, const QJsonObject& response);
     void sendDeferredResponse(const std::shared_ptr<RequestResponder::State>& state,
                               const QJsonObject& response);
 };

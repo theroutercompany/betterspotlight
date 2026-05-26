@@ -15,6 +15,7 @@
 #include <optional>
 #include <QFileSystemWatcher>
 #include <QHash>
+#include <QThread>
 #include <QTimer>
 #include <QStringList>
 #include <shared_mutex>
@@ -267,6 +268,7 @@ private:
     bool ensureStoreOpen();
     void resolveDataPathsIfNeeded();
     bool ensureM2ModulesInitialized();
+    bool ensureLearningEngineInitialized();
     bool ensureTypoLexiconReady();
     void startRequestExecutionLanes();
     void stopRequestExecutionLanes();
@@ -299,6 +301,7 @@ private:
     void disconnectInferenceLane(InferenceLane lane);
     static QString inferenceLaneName(InferenceLane lane);
     QJsonObject inferenceHealthSnapshot();
+    bool refreshInferencePeerProbeDirect(int connectTimeoutMs, int requestTimeoutMs);
     void schedulePeerProbeRefresh(bool force = false);
     void refreshPeerProbesIfNeeded(bool force = false);
     void refreshIndexerPeerProbe(bool force = false);
@@ -307,11 +310,13 @@ private:
     void refreshRuntimeMirror();
     void refreshLearningHealthCache();
     QJsonObject cachedLearningHealthSnapshot() const;
+    void setLearningSchedulerActive(bool active);
     QJsonObject buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagnosticsDb);
     QJsonObject buildHealthDetailsPayloadFromDiagnostics(sqlite3* diagnosticsDb,
                                                         int limit,
                                                         int offset);
     QJsonObject buildMergedHealthResult(bool includeIndexerQueueProbe);
+    QJsonObject buildUnavailableHealthSnapshotFallback();
     QJsonObject buildRuntimeSettingsSnapshot(sqlite3* db) const;
     QJsonArray buildModelManifestSnapshot(const QString& modelsDirResolved,
                                           const RuntimeMirror& runtimeMirror,
@@ -338,6 +343,8 @@ private:
     std::unique_ptr<QFileSystemWatcher> m_bsignoreWatcher;
     BsignoreParser m_bsignoreParser;
     QString m_bsignorePath;
+    QByteArray m_bsignoreFileSignature;
+    QByteArray m_bsignoreEffectiveSignature;
     qint64 m_bsignoreLastLoadedAtMs = 0;
     int m_bsignorePatternCount = 0;
     bool m_bsignoreLoaded = false;
@@ -356,6 +363,8 @@ private:
     mutable std::mutex m_inferenceStatsMutex;
     mutable std::mutex m_learningSchedulerMutex;
     QTimer m_learningSchedulerTimer;
+    std::atomic<bool> m_learningSchedulerActive{false};
+    int m_learningSchedulerIntervalMs = 0;
     QTimer m_peerProbeRefreshTimer;
     QTimer m_diagnosticsRefreshTimer;
     qint64 m_learningSchedulerLastTickAtMs = 0;
@@ -369,8 +378,8 @@ private:
     std::deque<LaneTask> m_defaultRequestQueue;
     std::deque<LaneTask> m_healthRequestQueue;
     std::deque<std::function<void()>> m_defaultControlQueue;
-    std::thread m_defaultRequestThread;
-    std::thread m_healthRequestThread;
+    std::unique_ptr<QThread> m_defaultRequestThread;
+    std::unique_ptr<QThread> m_healthRequestThread;
     bool m_stopRequestLanes = false;
     std::atomic<bool> m_shuttingDown{false};
     mutable std::mutex m_runtimeMirrorMutex;

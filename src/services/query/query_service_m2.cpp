@@ -1,5 +1,8 @@
 #include "query_service.h"
 
+#include "behavior_event_payload_utils.h"
+#include "embedding_response_utils.h"
+
 #include "core/feedback/feedback_aggregator.h"
 #include "core/feedback/interaction_tracker.h"
 #include "core/feedback/path_preferences.h"
@@ -22,7 +25,6 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QJsonArray>
-#include <QTimeZone>
 
 #include <algorithm>
 #include <cmath>
@@ -110,19 +112,37 @@ QJsonObject QueryService::handleRecordInteraction(uint64_t id, const QJsonObject
                                      QStringLiteral("Missing 'query' parameter"));
     }
 
-    int64_t selectedItemId = static_cast<int64_t>(
-        params.value(QStringLiteral("selectedItemId")).toInteger());
-    if (selectedItemId <= 0) {
+    QString parseError;
+    const std::optional<qint64> selectedItemId = query_behavior::parseRequiredPositiveItemId(
+        params,
+        QStringLiteral("selectedItemId"),
+        &parseError);
+    if (!selectedItemId.has_value()) {
         return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
                                      QStringLiteral("Missing or invalid 'selectedItemId'"));
+    }
+    const std::optional<int> resultPosition = query_behavior::parseOptionalNonNegativeInt(
+        params,
+        QStringLiteral("resultPosition"),
+        0,
+        &parseError);
+    if (!resultPosition.has_value()) {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("Missing or invalid 'resultPosition'"));
+    }
+    const auto learningRaw = m_store.has_value()
+        ? m_store->getSetting(QStringLiteral("learningEnabled"))
+        : std::optional<QString>{};
+    if (learningRaw.has_value() && envFlagEnabled(learningRaw.value())) {
+        ensureLearningEngineInitialized();
     }
 
     InteractionTracker::Interaction interaction;
     interaction.query = query;
-    interaction.selectedItemId = selectedItemId;
+    interaction.selectedItemId = *selectedItemId;
     interaction.selectedPath = params.value(QStringLiteral("selectedPath")).toString();
     interaction.matchType = params.value(QStringLiteral("matchType")).toString();
-    interaction.resultPosition = params.value(QStringLiteral("resultPosition")).toInt(0);
+    interaction.resultPosition = *resultPosition;
     const QString appBundleId = params.value(QStringLiteral("appBundleId")).toString().trimmed();
     const QString frontmostApp = params.value(QStringLiteral("frontmostApp")).toString().trimmed();
     interaction.frontmostApp = appBundleId.isEmpty() ? frontmostApp : appBundleId;
@@ -281,58 +301,21 @@ QJsonObject QueryService::handleRecordBehaviorEvent(uint64_t id, const QJsonObje
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
-    if (!m_learningEngine) {
+    if (!ensureLearningEngineInitialized() || !m_learningEngine) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Learning engine not initialized"));
     }
 
-    BehaviorEvent event;
-    event.eventId = params.value(QStringLiteral("eventId")).toString();
-    event.source = params.value(QStringLiteral("source")).toString(QStringLiteral("betterspotlight"));
-    event.eventType = params.value(QStringLiteral("eventType")).toString(QStringLiteral("activity"));
-    event.appBundleId = params.value(QStringLiteral("appBundleId")).toString();
-    event.windowTitleHash = params.value(QStringLiteral("windowTitleHash")).toString();
-    event.itemPath = params.value(QStringLiteral("itemPath")).toString();
-    event.itemId = static_cast<int64_t>(params.value(QStringLiteral("itemId")).toInteger(0));
-    event.browserHostHash = params.value(QStringLiteral("browserHostHash")).toString();
-    event.attributionConfidence = std::clamp(
-        params.value(QStringLiteral("attributionConfidence")).toDouble(0.0), 0.0, 1.0);
-    event.contextEventId = params.value(QStringLiteral("contextEventId")).toString();
-    event.activityDigest = params.value(QStringLiteral("activityDigest")).toString();
-
-    const QJsonValue timestampValue = params.value(QStringLiteral("timestamp"));
-    if (timestampValue.isDouble()) {
-        const qint64 tsRaw = static_cast<qint64>(timestampValue.toDouble());
-        if (tsRaw > 9999999999LL) {
-            event.timestamp = QDateTime::fromMSecsSinceEpoch(tsRaw, QTimeZone::UTC);
-        } else {
-            event.timestamp = QDateTime::fromSecsSinceEpoch(tsRaw, QTimeZone::UTC);
-        }
-    } else if (timestampValue.isString()) {
-        event.timestamp = QDateTime::fromString(timestampValue.toString(), Qt::ISODate);
-        if (event.timestamp.isValid()) {
-            event.timestamp = event.timestamp.toUTC();
-        }
-    } else {
-        event.timestamp = QDateTime::currentDateTimeUtc();
+    QString parseError;
+    const std::optional<BehaviorEvent> parsedEvent =
+        query_behavior::parseBehaviorEventPayload(params, &parseError);
+    if (!parsedEvent.has_value()) {
+        return IpcMessage::makeError(
+            id,
+            IpcErrorCode::InvalidParams,
+            parseError.isEmpty() ? QStringLiteral("Invalid behavior event payload") : parseError);
     }
-
-    const QJsonObject inputMeta = params.value(QStringLiteral("inputMeta")).toObject();
-    event.inputMeta.keyEventCount = std::max(0, inputMeta.value(QStringLiteral("keyEventCount")).toInt(0));
-    event.inputMeta.shortcutCount = std::max(0, inputMeta.value(QStringLiteral("shortcutCount")).toInt(0));
-    event.inputMeta.scrollCount = std::max(0, inputMeta.value(QStringLiteral("scrollCount")).toInt(0));
-    event.inputMeta.metadataOnly = inputMeta.value(QStringLiteral("metadataOnly")).toBool(true);
-
-    const QJsonObject mouseMeta = params.value(QStringLiteral("mouseMeta")).toObject();
-    event.mouseMeta.moveDistancePx = std::max(0.0, mouseMeta.value(QStringLiteral("moveDistancePx")).toDouble(0.0));
-    event.mouseMeta.clickCount = std::max(0, mouseMeta.value(QStringLiteral("clickCount")).toInt(0));
-    event.mouseMeta.dragCount = std::max(0, mouseMeta.value(QStringLiteral("dragCount")).toInt(0));
-
-    const QJsonObject privacyFlags = params.value(QStringLiteral("privacyFlags")).toObject();
-    event.privacyFlags.secureInput = privacyFlags.value(QStringLiteral("secureInput")).toBool(false);
-    event.privacyFlags.privateContext = privacyFlags.value(QStringLiteral("privateContext")).toBool(false);
-    event.privacyFlags.denylistedApp = privacyFlags.value(QStringLiteral("denylistedApp")).toBool(false);
-    event.privacyFlags.redacted = privacyFlags.value(QStringLiteral("redacted")).toBool(false);
+    const BehaviorEvent event = *parsedEvent;
 
     bool eventPersisted = false;
     QString error;
@@ -386,7 +369,7 @@ QJsonObject QueryService::handleGetLearningHealth(uint64_t id)
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
-    if (!m_learningEngine) {
+    if (!ensureLearningEngineInitialized() || !m_learningEngine) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Learning engine not initialized"));
     }
@@ -403,7 +386,7 @@ QJsonObject QueryService::handleSetLearningConsent(uint64_t id, const QJsonObjec
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
-    if (!m_learningEngine) {
+    if (!ensureLearningEngineInitialized() || !m_learningEngine) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Learning engine not initialized"));
     }
@@ -567,7 +550,7 @@ QJsonObject QueryService::handleTriggerLearningCycle(uint64_t id, const QJsonObj
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
     }
-    if (!m_learningEngine) {
+    if (!ensureLearningEngineInitialized() || !m_learningEngine) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Learning engine not initialized"));
     }
@@ -598,7 +581,9 @@ QJsonObject QueryService::handleRebuildVectorIndex(uint64_t id,
     }
 
     const bool fakeEmbeddings = testFakeEmbeddingsEnabled();
-    if ((!m_embeddingManager || !m_embeddingManager->isAvailable()) && !fakeEmbeddings) {
+    const bool localEmbeddingAvailable = m_embeddingManager && m_embeddingManager->isAvailable();
+    const bool manifestEmbeddingAvailable = m_modelRegistry && m_modelRegistry->hasModel("bi-encoder");
+    if (!localEmbeddingAvailable && !manifestEmbeddingAvailable && !fakeEmbeddings) {
         return IpcMessage::makeError(id, IpcErrorCode::Unsupported,
                                      QStringLiteral("Embedding model is unavailable"));
     }
@@ -853,48 +838,84 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         workerEmbeddingManager = std::make_unique<EmbeddingManager>(workerRegistry.get(), "bi-encoder");
         workerFastEmbeddingManager = std::make_unique<EmbeddingManager>(workerRegistry.get(),
                                                                          "bi-encoder-fast");
-        if (!workerEmbeddingManager->initialize()) {
+        auto manifestEntry = [&](const std::string& role) -> const ModelManifestEntry* {
+            if (!workerRegistry) {
+                return nullptr;
+            }
+            const auto& models = workerRegistry->manifest().models;
+            const auto it = models.find(role);
+            return it == models.end() ? nullptr : &it->second;
+        };
+
+        if (workerEmbeddingManager->initialize()) {
+            embeddingDimensions = std::max(workerEmbeddingManager->embeddingDimensions(), 1);
+            embeddingModelId = workerEmbeddingManager->activeModelId();
+            embeddingProvider = workerEmbeddingManager->providerName();
+            embedStrongBatchLocal =
+                [strong = workerEmbeddingManager.get()](const std::vector<QString>& texts) {
+                    return strong->embedBatch(texts);
+                };
+            embedStrongSingleLocal =
+                [strong = workerEmbeddingManager.get()](const QString& text) {
+                    return strong->embed(text);
+                };
+        } else if (inferenceEmbedOffloadActive) {
+            const ModelManifestEntry* entry = manifestEntry("bi-encoder");
+            if (!entry || entry->dimensions <= 0 || entry->modelId.trimmed().isEmpty()) {
+                updateFailedState(QStringLiteral("Embedding model is unavailable"));
+                closeResources();
+                return;
+            }
+            embeddingDimensions = entry->dimensions;
+            embeddingModelId = entry->modelId;
+            embeddingProvider = QStringLiteral("inference");
+            LOG_INFO(bsIpc,
+                     "Vector rebuild using inference-only embeddings for role bi-encoder");
+        } else {
             updateFailedState(QStringLiteral("Embedding model is unavailable"));
             closeResources();
             return;
         }
-        fastEmbeddingAvailable = workerFastEmbeddingManager->initialize();
 
-        embeddingDimensions = std::max(workerEmbeddingManager->embeddingDimensions(), 1);
-        embeddingModelId = workerEmbeddingManager->activeModelId();
-        embeddingProvider = workerEmbeddingManager->providerName();
-        embedStrongBatchLocal =
-            [strong = workerEmbeddingManager.get()](const std::vector<QString>& texts) {
-                return strong->embedBatch(texts);
-            };
-        embedStrongSingleLocal =
-            [strong = workerEmbeddingManager.get()](const QString& text) {
-                return strong->embed(text);
-            };
-
-        fastGeneration = workerFastEmbeddingManager->activeGenerationId().isEmpty()
-            ? QStringLiteral("v3_fast")
-            : workerFastEmbeddingManager->activeGenerationId();
-        fastEmbeddingDimensions = std::max(workerFastEmbeddingManager->embeddingDimensions(), 1);
-        fastModelId = workerFastEmbeddingManager->activeModelId();
-        fastProvider = workerFastEmbeddingManager->providerName();
-        embedFastBatchLocal =
-            [fast = workerFastEmbeddingManager.get()](const std::vector<QString>& texts) {
-                return fast->embedBatch(texts);
-            };
-        embedFastSingleLocal =
-            [fast = workerFastEmbeddingManager.get()](const QString& text) {
-                return fast->embed(text);
-            };
+        if (workerFastEmbeddingManager->initialize()) {
+            fastEmbeddingAvailable = true;
+            fastGeneration = workerFastEmbeddingManager->activeGenerationId().isEmpty()
+                ? QStringLiteral("v3_fast")
+                : workerFastEmbeddingManager->activeGenerationId();
+            fastEmbeddingDimensions = std::max(workerFastEmbeddingManager->embeddingDimensions(), 1);
+            fastModelId = workerFastEmbeddingManager->activeModelId();
+            fastProvider = workerFastEmbeddingManager->providerName();
+            embedFastBatchLocal =
+                [fast = workerFastEmbeddingManager.get()](const std::vector<QString>& texts) {
+                    return fast->embedBatch(texts);
+                };
+            embedFastSingleLocal =
+                [fast = workerFastEmbeddingManager.get()](const QString& text) {
+                    return fast->embed(text);
+                };
+        } else if (inferenceEmbedOffloadActive) {
+            const ModelManifestEntry* entry = manifestEntry("bi-encoder-fast");
+            if (entry && entry->dimensions > 0 && !entry->modelId.trimmed().isEmpty()) {
+                fastEmbeddingAvailable = true;
+                fastEmbeddingDimensions = entry->dimensions;
+                fastGeneration = entry->generationId.trimmed().isEmpty()
+                    ? QStringLiteral("v3_fast")
+                    : entry->generationId;
+                fastModelId = entry->modelId;
+                fastProvider = QStringLiteral("inference");
+                LOG_INFO(bsIpc,
+                         "Vector rebuild using inference-only embeddings for role bi-encoder-fast");
+            }
+        }
     }
 
     const auto embedBatchViaInference =
         [&](const QString& role,
             const std::vector<QString>& texts,
+            int expectedDimensions,
             int microBatchSize) -> std::vector<std::vector<float>> {
-        std::vector<std::vector<float>> embeddings;
         if (!inferenceEmbedOffloadRunEnabled || texts.empty()) {
-            return embeddings;
+            return {};
         }
 
         QJsonArray textArray;
@@ -934,17 +955,20 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
             .toObject()
             .value(QStringLiteral("embeddings"))
             .toArray();
-        embeddings.reserve(static_cast<size_t>(embeddingRows.size()));
-        for (const QJsonValue& rowValue : embeddingRows) {
-            const QJsonArray rowArray = rowValue.toArray();
-            std::vector<float> row;
-            row.reserve(static_cast<size_t>(rowArray.size()));
-            for (const QJsonValue& value : rowArray) {
-                row.push_back(static_cast<float>(value.toDouble(0.0)));
-            }
-            embeddings.push_back(std::move(row));
+        QString embeddingParseFailureReason;
+        std::optional<std::vector<std::vector<float>>> embeddings =
+            query_embedding::parseEmbeddingBatch(embeddingRows,
+                                                 texts.size(),
+                                                 expectedDimensions,
+                                                 &embeddingParseFailureReason);
+        if (!embeddings.has_value()) {
+            LOG_WARN(bsIpc,
+                     "Ignoring malformed inference embedding batch for %s: %s",
+                     qUtf8Printable(role),
+                     qUtf8Printable(embeddingParseFailureReason));
+            return {};
         }
-        return embeddings;
+        return std::move(*embeddings);
     };
 
     VectorIndex::IndexMetadata rebuiltMeta;
@@ -1182,7 +1206,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
 
         std::vector<std::vector<float>> embeddings;
         if (inferenceEmbedOffloadRunEnabled) {
-            embeddings = embedBatchViaInference(QStringLiteral("bi-encoder"), texts, 8);
+            embeddings = embedBatchViaInference(QStringLiteral("bi-encoder"),
+                                                texts,
+                                                embeddingDimensions,
+                                                8);
             if (embeddings.size() != texts.size()) {
                 disableInferenceOffloadForRun(
                     QStringLiteral("embed_passages timeout/degraded (bi-encoder)"));
@@ -1245,7 +1272,10 @@ void QueryService::runVectorRebuildWorker(uint64_t runId,
         if (fastEmbeddingAvailable && rebuiltFastIndex) {
             std::vector<std::vector<float>> fastEmbeddings;
             if (inferenceEmbedOffloadRunEnabled) {
-                fastEmbeddings = embedBatchViaInference(QStringLiteral("bi-encoder-fast"), texts, 8);
+                fastEmbeddings = embedBatchViaInference(QStringLiteral("bi-encoder-fast"),
+                                                        texts,
+                                                        fastEmbeddingDimensions,
+                                                        8);
                 if (fastEmbeddings.size() != texts.size()) {
                     disableInferenceOffloadForRun(
                         QStringLiteral("embed_passages timeout/degraded (bi-encoder-fast)"));

@@ -7,10 +7,14 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <limits>
 
 namespace bs {
 
 namespace {
+
+constexpr int kMinReconnectDelayMs = 1;
+constexpr int kMaxReconnectDelayMs = 30000;
 
 bool isTransientConnectError(QLocalSocket::LocalSocketError error)
 {
@@ -22,6 +26,26 @@ bool isTransientConnectError(QLocalSocket::LocalSocketError error)
     default:
         return false;
     }
+}
+
+bool isValidMethodName(const QString& method)
+{
+    return !method.trimmed().isEmpty();
+}
+
+int normalizedReconnectBaseDelayMs(int baseDelayMs)
+{
+    return std::clamp(baseDelayMs, kMinReconnectDelayMs, kMaxReconnectDelayMs);
+}
+
+int boundedReconnectDelayMs(int baseDelayMs, int attempt)
+{
+    qint64 delay = normalizedReconnectBaseDelayMs(baseDelayMs);
+    const int boundedAttempt = std::max(0, attempt);
+    for (int i = 0; i < boundedAttempt && delay < kMaxReconnectDelayMs; ++i) {
+        delay = std::min<qint64>(delay * 2, kMaxReconnectDelayMs);
+    }
+    return static_cast<int>(delay);
 }
 
 } // namespace
@@ -95,7 +119,11 @@ bool SocketClient::connectToServer(const QString& socketPath, int timeoutMs)
 
 void SocketClient::disconnect()
 {
+    QPointer<SocketClient> self(this);
     failAllPendingRequests(QStringLiteral("Disconnected"));
+    if (!self) {
+        return;
+    }
     if (m_socket->state() != QLocalSocket::UnconnectedState) {
         m_socket->disconnectFromServer();
     }
@@ -111,6 +139,16 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
                                                       const QJsonObject& params,
                                                       int timeoutMs)
 {
+    if (!isValidMethodName(method)) {
+        qCWarning(bsIpc, "Cannot send request: empty method");
+        return std::nullopt;
+    }
+
+    if (timeoutMs <= 0) {
+        qCWarning(bsIpc, "Cannot send request: invalid timeout %dms", timeoutMs);
+        return std::nullopt;
+    }
+
     if (!isConnected()) {
         qCWarning(bsIpc, "Cannot send request: not connected");
         return std::nullopt;
@@ -131,9 +169,10 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
     auto pending = std::make_shared<PendingRequest>();
     m_pending[id] = pending;
 
-    // Write the message
-    m_socket->write(encoded);
-    m_socket->flush();
+    if (!writeFrame(encoded, QStringLiteral("request %1").arg(method))) {
+        m_pending.remove(id);
+        return std::nullopt;
+    }
 
     // Block-wait for response without pumping the global event loop.
     // This avoids re-entrancy side effects when callers invoke synchronous RPC on UI paths.
@@ -151,8 +190,11 @@ std::optional<QJsonObject> SocketClient::sendRequest(const QString& method,
             m_socket->waitForReadyRead(waitMs);
         }
 
-        if (m_socket->bytesAvailable() > 0 || m_socket->state() != QLocalSocket::ConnectedState) {
+        if (m_socket->bytesAvailable() > 0) {
             onReadyRead();
+        }
+        if (!pending->completed && m_socket->state() != QLocalSocket::ConnectedState) {
+            failAllPendingRequests(QStringLiteral("Connection lost"));
         }
     }
 
@@ -173,6 +215,16 @@ void SocketClient::sendRequestAsync(const QString& method,
                                     RequestCallback callback)
 {
     if (!callback) {
+        return;
+    }
+    if (!isValidMethodName(method)) {
+        qCWarning(bsIpc, "Cannot send async request: empty method");
+        callback(std::nullopt);
+        return;
+    }
+    if (timeoutMs <= 0) {
+        qCWarning(bsIpc, "Cannot send async request: invalid timeout %dms", timeoutMs);
+        callback(std::nullopt);
         return;
     }
     if (!isConnected()) {
@@ -221,13 +273,20 @@ void SocketClient::sendRequestAsync(const QString& method,
     qCDebug(bsIpc, "Sending async request: method=%s id=%llu",
             qPrintable(method),
             static_cast<unsigned long long>(id));
-    m_socket->write(encoded);
-    m_socket->flush();
+    if (!writeFrame(encoded, QStringLiteral("async request %1").arg(method))) {
+        completePendingRequest(id, pending, std::nullopt);
+        return;
+    }
     timeoutTimer->start(effectiveTimeoutMs);
 }
 
 bool SocketClient::sendNotification(const QString& method, const QJsonObject& params)
 {
+    if (!isValidMethodName(method)) {
+        qCWarning(bsIpc, "Cannot send notification: empty method");
+        return false;
+    }
+
     if (!isConnected()) {
         qCWarning(bsIpc, "Cannot send notification: not connected");
         return false;
@@ -243,9 +302,7 @@ bool SocketClient::sendNotification(const QString& method, const QJsonObject& pa
 
     qCDebug(bsIpc, "Sending notification: method=%s", qPrintable(method));
 
-    m_socket->write(encoded);
-    m_socket->flush();
-    return true;
+    return writeFrame(encoded, QStringLiteral("notification %1").arg(method));
 }
 
 void SocketClient::setNotificationHandler(NotificationHandler handler)
@@ -260,17 +317,32 @@ void SocketClient::onReadyRead()
     if (m_readBuffer.size() > kMaxReadBufferSize) {
         qCCritical(bsIpc, "Read buffer exceeded %d bytes, disconnecting", kMaxReadBufferSize);
         m_readBuffer.clear();
+        failAllPendingRequests(QStringLiteral("Read buffer exceeded limit"));
         m_socket->disconnectFromServer();
         return;
     }
 
     while (true) {
-        auto result = IpcMessage::decode(m_readBuffer);
-        if (!result) break;
+        IpcMessage::DecodeAttempt attempt = IpcMessage::decodeFrame(m_readBuffer);
+        if (attempt.status == IpcMessage::DecodeStatus::Incomplete) {
+            break;
+        }
+        if (attempt.status == IpcMessage::DecodeStatus::Invalid) {
+            qCWarning(bsIpc, "Disconnecting after invalid IPC frame: %s",
+                      qPrintable(attempt.error));
+            m_readBuffer.clear();
+            failAllPendingRequests(QStringLiteral("Invalid IPC frame: %1").arg(attempt.error));
+            m_socket->disconnectFromServer();
+            return;
+        }
+        if (!attempt.result.has_value()) {
+            break;
+        }
 
-        m_readBuffer.remove(0, result->bytesConsumed);
+        const IpcMessage::DecodeResult& result = attempt.result.value();
+        m_readBuffer.remove(0, result.bytesConsumed);
 
-        const QJsonObject& msg = result->json;
+        const QJsonObject& msg = result.json;
         QString type = msg.value(QStringLiteral("type")).toString();
 
         if (type == QLatin1String("response") || type == QLatin1String("error")) {
@@ -324,9 +396,9 @@ void SocketClient::enableAutoReconnect(const QString& socketPath,
                                         int baseDelayMs)
 {
     m_autoReconnectEnabled = true;
-    m_reconnectSocketPath = socketPath;
-    m_reconnectMaxAttempts = maxAttempts;
-    m_reconnectBaseDelayMs = baseDelayMs;
+    m_reconnectSocketPath = socketPath.trimmed();
+    m_reconnectMaxAttempts = std::max(0, maxAttempts);
+    m_reconnectBaseDelayMs = normalizedReconnectBaseDelayMs(baseDelayMs);
     m_reconnectAttempt = 0;
 }
 
@@ -348,8 +420,7 @@ void SocketClient::attemptReconnect()
         return;
     }
 
-    // Exponential backoff: base * 2^attempt (500ms, 1s, 2s, 4s, 8s)
-    int delay = m_reconnectBaseDelayMs * (1 << m_reconnectAttempt);
+    const int delay = boundedReconnectDelayMs(m_reconnectBaseDelayMs, m_reconnectAttempt);
     ++m_reconnectAttempt;
 
     qCInfo(bsIpc, "Auto-reconnect attempt %d/%d in %dms for %s",
@@ -407,6 +478,7 @@ void SocketClient::failAllPendingRequests(const QString& reason)
         return;
     }
 
+    QPointer<SocketClient> self(this);
     const auto pendingMap = m_pending;
     m_pending.clear();
 
@@ -429,8 +501,44 @@ void SocketClient::failAllPendingRequests(const QString& reason)
         if (pending->callback) {
             auto callback = std::move(pending->callback);
             callback(pending->response);
+            if (!self) {
+                return;
+            }
         }
     }
+}
+
+bool SocketClient::writeFrame(const QByteArray& encoded, const QString& context)
+{
+    if (encoded.isEmpty()) {
+        const QString err = QStringLiteral("Refusing to write empty IPC frame for %1").arg(context);
+        qCWarning(bsIpc, "%s", qPrintable(err));
+        emit errorOccurred(err);
+        return false;
+    }
+
+    if (!isConnected()) {
+        const QString err = QStringLiteral("Cannot write IPC frame for %1: not connected").arg(context);
+        qCWarning(bsIpc, "%s", qPrintable(err));
+        emit errorOccurred(err);
+        return false;
+    }
+
+    const qint64 written = m_socket->write(encoded);
+    if (written != encoded.size()) {
+        const QString err = QStringLiteral(
+            "Failed to queue complete IPC frame for %1: wrote %2 of %3 bytes")
+            .arg(context)
+            .arg(written)
+            .arg(encoded.size());
+        qCWarning(bsIpc, "%s", qPrintable(err));
+        emit errorOccurred(err);
+        m_socket->disconnectFromServer();
+        return false;
+    }
+
+    m_socket->flush();
+    return true;
 }
 
 } // namespace bs

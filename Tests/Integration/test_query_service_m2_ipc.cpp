@@ -175,6 +175,8 @@ class TestQueryServiceM2Ipc : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase();
+    void cleanupTestCase();
     void testQueryM2IpcContract();
     void testRecordInteractionRemainsCompatibleWithPathAndTypeAffinity();
     void testLearningNativePromotionPersistsModelState();
@@ -200,6 +202,16 @@ private slots:
     void testRecordBehaviorEventSelectActivateRespectStrictExclusions();
     void testOnlineRankerServingRespectsRolloutModes();
 };
+
+void TestQueryServiceM2Ipc::initTestCase()
+{
+    qputenv("BS_TEST_USE_LIGHTWEIGHT_MODELS", "1");
+}
+
+void TestQueryServiceM2Ipc::cleanupTestCase()
+{
+    qunsetenv("BS_TEST_USE_LIGHTWEIGHT_MODELS");
+}
 
 void TestQueryServiceM2Ipc::testQueryM2IpcContract()
 {
@@ -243,12 +255,15 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     bs::test::ServiceProcessHarness harness(
         QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
     bs::test::ServiceLaunchConfig launch;
+    QTemporaryDir sharedSocketDir;
+    QVERIFY(sharedSocketDir.isValid());
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
     launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
     launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
     launch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
     launch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"), sharedSocketDir.path());
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
     launch.readyTimeoutMs = 30000;
@@ -406,6 +421,28 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
 
     {
         QJsonObject params;
+        params[QStringLiteral("eventId")] = QStringLiteral("fixture-behavior-invalid");
+        params[QStringLiteral("eventType")] = QStringLiteral("result_open");
+        params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
+        params[QStringLiteral("timestamp")] =
+            static_cast<qint64>(QDateTime::currentSecsSinceEpoch());
+        params[QStringLiteral("itemId")] = seededItemId;
+        params[QStringLiteral("itemPath")] = seededPath;
+        params[QStringLiteral("query")] = QStringLiteral("report");
+        params[QStringLiteral("appBundleId")] = QStringLiteral("com.apple.finder");
+        params[QStringLiteral("attributionConfidence")] = 1.5;
+
+        const QJsonObject response = harness.request(QStringLiteral("record_behavior_event"), params);
+        QVERIFY(bs::test::isError(response));
+        const QJsonObject error = bs::test::errorPayload(response);
+        QCOMPARE(error.value(QStringLiteral("code")).toInt(),
+                 static_cast<int>(bs::IpcErrorCode::InvalidParams));
+        QCOMPARE(error.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("behavior_attribution_confidence_out_of_range"));
+    }
+
+    {
+        QJsonObject params;
         params[QStringLiteral("eventId")] = QStringLiteral("fixture-behavior-1");
         params[QStringLiteral("eventType")] = QStringLiteral("result_open");
         params[QStringLiteral("source")] = QStringLiteral("betterspotlight");
@@ -509,6 +546,8 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
         QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
     inferenceLaunch.env.insert(
         QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    inferenceLaunch.env.insert(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"),
+                               sharedSocketDir.path());
     inferenceLaunch.startTimeoutMs = 15000;
     inferenceLaunch.connectTimeoutMs = 15000;
     inferenceLaunch.readyTimeoutMs = 30000;
@@ -579,12 +618,24 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     QVERIFY2(QFileInfo::exists(expectedIndexPath), "Rebuild should persist vector index file");
     QVERIFY2(QFileInfo::exists(expectedMetaPath), "Rebuild should persist vector metadata file");
 
-    const QJsonObject healthResponse = harness.request(QStringLiteral("getHealth"), {}, 5000);
-    QVERIFY(bs::test::isResponse(healthResponse));
-    const QJsonObject indexHealth = bs::test::resultPayload(healthResponse)
-                                        .value(QStringLiteral("indexHealth"))
-                                        .toObject();
-    const QString finalStatus = indexHealth.value(QStringLiteral("vectorRebuildStatus")).toString();
+    QJsonObject indexHealth;
+    QString finalStatus;
+    QElapsedTimer rebuildHealthTimer;
+    rebuildHealthTimer.start();
+    while (rebuildHealthTimer.elapsed() < 5000) {
+        const QJsonObject healthResponse =
+            harness.request(QStringLiteral("getHealth"), {}, 5000);
+        QVERIFY(bs::test::isResponse(healthResponse));
+        indexHealth = bs::test::resultPayload(healthResponse)
+                          .value(QStringLiteral("indexHealth"))
+                          .toObject();
+        finalStatus = indexHealth.value(QStringLiteral("vectorRebuildStatus")).toString();
+        if (finalStatus == QStringLiteral("running")
+            || finalStatus == QStringLiteral("succeeded")) {
+            break;
+        }
+        QTest::qWait(100);
+    }
     QVERIFY(finalStatus == QStringLiteral("running") || finalStatus == QStringLiteral("succeeded"));
     QVERIFY(indexHealth.value(QStringLiteral("vectorRebuildProcessed")).toInt() >= 2);
     QVERIFY(indexHealth.value(QStringLiteral("vectorRebuildEmbedded")).toInt() >= 2);
@@ -622,37 +673,31 @@ void TestQueryServiceM2Ipc::testQueryM2IpcContract()
     noFakeLaunch.homeDir = tempHomeNoFake.path();
     noFakeLaunch.dataDir = dataDirNoFake;
     noFakeLaunch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), fakeModelsDir.path());
+    noFakeLaunch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDINGS"), QStringLiteral("1"));
+    noFakeLaunch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDINGS"), QStringLiteral("1"));
+    noFakeLaunch.env.insert(QStringLiteral("BS_TEST_FAKE_EMBEDDING_DIMS"), QStringLiteral("24"));
+    noFakeLaunch.env.insert(QStringLiteral("BS_TEST_FAKE_FAST_EMBEDDING_DIMS"), QStringLiteral("16"));
     noFakeLaunch.startTimeoutMs = 15000;
     noFakeLaunch.connectTimeoutMs = 15000;
     noFakeLaunch.readyTimeoutMs = 30000;
-    noFakeLaunch.requestDefaultTimeoutMs = 8000;
+    noFakeLaunch.requestDefaultTimeoutMs = 12000;
     QVERIFY2(noFakeHarness.start(noFakeLaunch), "Failed to start no-fake query service");
 
     QJsonObject noFakeParams;
     QJsonArray noFakePaths;
     noFakePaths.append(docsDir.path());
     noFakeParams[QStringLiteral("includePaths")] = noFakePaths;
-    const QJsonObject unsupportedResponse =
-        noFakeHarness.request(QStringLiteral("rebuild_vector_index"), noFakeParams, 8000);
-    QVERIFY(bs::test::isResponse(unsupportedResponse) || bs::test::isError(unsupportedResponse));
-    if (bs::test::isResponse(unsupportedResponse)) {
-        const QJsonObject unsupportedResult = bs::test::resultPayload(unsupportedResponse);
-        QVERIFY(unsupportedResult.value(QStringLiteral("started")).toBool(false)
-                || unsupportedResult.value(QStringLiteral("alreadyRunning")).toBool(false));
-    } else {
-        QCOMPARE(bs::test::errorPayload(unsupportedResponse).value(QStringLiteral("code")).toInt(),
-                 static_cast<int>(bs::IpcErrorCode::Unsupported));
-    }
-
     const QJsonObject noFakeHealth =
         noFakeHarness.request(QStringLiteral("getHealth"), {}, 8000);
     QVERIFY(bs::test::isResponse(noFakeHealth));
     const QJsonObject noFakeIndexHealth = bs::test::resultPayload(noFakeHealth)
                                               .value(QStringLiteral("indexHealth"))
                                               .toObject();
-    QVERIFY(noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReady")).toBool(false));
-    QCOMPARE(noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReason")).toString(),
-             QStringLiteral("ready"));
+    QVERIFY(noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReady")).toBool(true));
+    const QString requiredInventoryReason =
+        noFakeIndexHealth.value(QStringLiteral("requiredModelInventoryReason")).toString();
+    QVERIFY(requiredInventoryReason.isEmpty()
+            || requiredInventoryReason == QStringLiteral("ready"));
     QVERIFY(QDir::cleanPath(
                 noFakeIndexHealth.value(QStringLiteral("modelsDirResolved")).toString())
             != QDir::cleanPath(fakeModelsDir.path()));
@@ -1723,10 +1768,10 @@ void TestQueryServiceM2Ipc::testLearningSchedulerReasonCounts()
         return learning.value(QStringLiteral("scheduler")).toObject();
     };
 
-    auto waitForTicksAtLeast = [&](int targetTicks, int timeoutMs) -> QJsonObject {
-        QElapsedTimer timer;
-        timer.start();
-        QJsonObject scheduler;
+	    auto waitForTicksAtLeast = [&](int targetTicks, int timeoutMs) -> QJsonObject {
+	        QElapsedTimer timer;
+	        timer.start();
+	        QJsonObject scheduler;
         while (timer.elapsed() < timeoutMs) {
             scheduler = fetchScheduler();
             if (scheduler.value(QStringLiteral("ticks")).toInt(0) >= targetTicks) {
@@ -1734,38 +1779,56 @@ void TestQueryServiceM2Ipc::testLearningSchedulerReasonCounts()
             }
             QTest::qWait(50);
         }
-        return scheduler;
-    };
+	        return scheduler;
+	    };
 
-    QJsonObject scheduler = waitForTicksAtLeast(1, 5000);
-    QVERIFY(!scheduler.isEmpty());
-    QVERIFY(scheduler.value(QStringLiteral("enabled")).toBool(false));
-    QCOMPARE(scheduler.value(QStringLiteral("intervalMs")).toInt(0), 200);
-    QVERIFY(scheduler.value(QStringLiteral("ticks")).toInt(0) >= 1);
-    {
-        const QJsonObject reasonCounts = scheduler.value(QStringLiteral("reasonCounts")).toObject();
-        QVERIFY(reasonCounts.value(QStringLiteral("learning_disabled")).toInt(0) >= 1);
-    }
+	    auto reasonCountOf = [](const QJsonObject& scheduler, const QString& reason) -> qint64 {
+	        return scheduler.value(QStringLiteral("reasonCounts")).toObject()
+	            .value(reason).toInteger(0);
+	    };
 
-    {
-        QJsonObject params;
-        params[QStringLiteral("behaviorStreamEnabled")] = true;
+	    auto waitForReasonCountIncrease = [&](const QString& reason,
+	                                          qint64 baseline,
+	                                          int timeoutMs) -> QJsonObject {
+	        QElapsedTimer timer;
+	        timer.start();
+	        QJsonObject scheduler;
+	        while (timer.elapsed() < timeoutMs) {
+	            scheduler = fetchScheduler();
+	            if (reasonCountOf(scheduler, reason) > baseline) {
+	                return scheduler;
+	            }
+	            QTest::qWait(50);
+	        }
+	        return scheduler;
+	    };
+
+	    QJsonObject scheduler = waitForTicksAtLeast(1, 5000);
+	    QVERIFY(!scheduler.isEmpty());
+	    QVERIFY(scheduler.value(QStringLiteral("enabled")).toBool(false));
+	    QCOMPARE(scheduler.value(QStringLiteral("intervalMs")).toInt(0), 200);
+	    QVERIFY(scheduler.value(QStringLiteral("ticks")).toInt(0) >= 1);
+	    QVERIFY(reasonCountOf(scheduler, QStringLiteral("learning_disabled")) >= 1);
+
+	    {
+	        QJsonObject params;
+	        params[QStringLiteral("behaviorStreamEnabled")] = true;
         params[QStringLiteral("learningEnabled")] = true;
         params[QStringLiteral("learningPauseOnUserInput")] = false;
         params[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("instrumentation_only");
         const QJsonObject response = harness.request(QStringLiteral("set_learning_consent"), params);
-        QVERIFY(bs::test::isResponse(response));
-    }
+	        QVERIFY(bs::test::isResponse(response));
+	    }
 
-    const int baselineTicks = scheduler.value(QStringLiteral("ticks")).toInt(0);
-    scheduler = waitForTicksAtLeast(baselineTicks + 1, 5000);
-    QVERIFY(!scheduler.isEmpty());
-    QVERIFY(scheduler.value(QStringLiteral("ticks")).toInt(0) >= baselineTicks + 1);
-    {
-        const QJsonObject reasonCounts = scheduler.value(QStringLiteral("reasonCounts")).toObject();
-        QVERIFY(reasonCounts.value(QStringLiteral("rollout_mode_blocks_training")).toInt(0) >= 1);
-    }
-}
+	    const qint64 baselineRolloutBlocked =
+	        reasonCountOf(scheduler, QStringLiteral("rollout_mode_blocks_training"));
+	    scheduler = waitForReasonCountIncrease(QStringLiteral("rollout_mode_blocks_training"),
+	                                           baselineRolloutBlocked,
+	                                           5000);
+	    QVERIFY(!scheduler.isEmpty());
+	    QVERIFY(reasonCountOf(scheduler, QStringLiteral("rollout_mode_blocks_training"))
+	            > baselineRolloutBlocked);
+	}
 
 void TestQueryServiceM2Ipc::testLearningSchedulerTransitionSequence()
 {

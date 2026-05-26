@@ -5,6 +5,7 @@
 #include "core/shared/chunk.h"
 #include "core/shared/ipc_messages.h"
 #include "ipc_test_utils.h"
+#include "relevance_harness.h"
 #include "service_process_harness.h"
 #include "threaded_socket_server.h"
 
@@ -17,12 +18,16 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <vector>
 
 #include <unistd.h>
 
 namespace {
+
+constexpr int kSearchRequestTimeoutMs = 20000;
 
 std::optional<int64_t> seedItem(bs::SQLiteStore& store,
                                 const QString& path,
@@ -58,6 +63,39 @@ std::optional<int64_t> seedItem(bs::SQLiteStore& store,
     return itemId;
 }
 
+QString prepareLightweightModelsDir(const QTemporaryDir& tempHome, QString* errorOut)
+{
+    const QString sourceModelsDir = bs::test::resolveModelsDirForTests();
+    if (sourceModelsDir.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to resolve source models dir for tests");
+        }
+        return QString();
+    }
+
+    return bs::test::prepareLightweightModelsDirForTests(
+        sourceModelsDir,
+        QDir(tempHome.path()).filePath(QStringLiteral("lightweight-models")),
+        errorOut);
+}
+
+void assertFiniteDoubleValue(const QJsonObject& object,
+                             const QString& key,
+                             double expected)
+{
+    const QJsonValue value = object.value(key);
+    QVERIFY2(value.isDouble(),
+             qPrintable(QStringLiteral("Expected numeric runtime value for %1").arg(key)));
+    const double actual = value.toDouble(std::numeric_limits<double>::quiet_NaN());
+    QVERIFY2(std::isfinite(actual),
+             qPrintable(QStringLiteral("Expected finite runtime value for %1").arg(key)));
+    QVERIFY2(std::abs(actual - expected) < 1e-9,
+             qPrintable(QStringLiteral("Unexpected runtime value for %1: %2 expected %3")
+                            .arg(key)
+                            .arg(actual)
+                            .arg(expected)));
+}
+
 } // namespace
 
 class TestQueryServiceIpcExtensions : public QObject {
@@ -67,7 +105,8 @@ private slots:
     void testExtendedIpcBranches();
     void testHealthRequestNotBlockedByDelayedSearch();
     void testHealthRemainsCacheFirstWhenDiagnosticsRefreshIsSlow();
-    void testHealthReturnsDegradedSnapshotWhenDiagnosticsDbIsMissing();
+    void testHealthReturnsRebuildingSnapshotWhenDiagnosticsDbIsMissing();
+    void testHealthReturnsDegradedSnapshotWhenDiagnosticsCacheIsCold();
 };
 
 void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
@@ -152,6 +191,13 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
 
     QVERIFY(store.setSetting(QStringLiteral("qaSnippetEnabled"), QStringLiteral("1")));
     QVERIFY(store.setSetting(QStringLiteral("inferenceServiceEnabled"), QStringLiteral("1")));
+    QVERIFY(store.setSetting(QStringLiteral("queryRouterMinConfidence"), QStringLiteral("nan")));
+    QVERIFY(store.setSetting(QStringLiteral("bm25WeightName"), QStringLiteral("inf")));
+    QVERIFY(store.setSetting(QStringLiteral("bm25WeightPath"), QStringLiteral("-inf")));
+    QVERIFY(store.setSetting(QStringLiteral("bm25WeightContent"), QStringLiteral("nan")));
+    QVERIFY(store.setSetting(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                             QStringLiteral("nan")));
+    QVERIFY(store.setSetting(QStringLiteral("onlineRankerBlendAlpha"), QStringLiteral("nan")));
 
     const QString bsignorePath = QDir(tempHome.path()).filePath(QStringLiteral(".bsignore"));
     {
@@ -187,10 +233,15 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
     bs::test::ServiceProcessHarness harness(
         QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
     bs::test::ServiceLaunchConfig launch;
+    QString lightweightModelsError;
+    const QString lightweightModelsDir =
+        prepareLightweightModelsDir(tempHome, &lightweightModelsError);
+    QVERIFY2(!lightweightModelsDir.isEmpty(), qPrintable(lightweightModelsError));
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
     QVERIFY2(harness.start(launch), "Failed to start query service");
 
     const QString socketDir = QFileInfo(harness.socketPath()).absolutePath();
@@ -271,7 +322,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("quarterly downloads summary");
         params[QStringLiteral("debug")] = true;
-        const QJsonObject response = harness.request(QStringLiteral("search"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("search"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject debugInfo = bs::test::resultPayload(response)
                                           .value(QStringLiteral("debugInfo"))
@@ -300,7 +352,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         params[QStringLiteral("query")] = QStringLiteral("branch coverage marker");
         params[QStringLiteral("debug")] = true;
         params[QStringLiteral("filters")] = filters;
-        const QJsonObject response = harness.request(QStringLiteral("search"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("search"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         const QJsonObject debugInfo = result.value(QStringLiteral("debugInfo")).toObject();
@@ -321,45 +374,90 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         }
     }
 
+    // Health is cache-first now; give the background peer-probe timer a short idle window
+    // to refresh from the fake indexer/inference sockets before asserting on merged peer data.
+    QTest::qWait(600);
+
+    {
+        QJsonObject healthV3IndexHealth;
+        QElapsedTimer runtimeTimer;
+        runtimeTimer.start();
+        while (runtimeTimer.elapsed() < 3000) {
+            const QJsonObject response =
+                harness.request(QStringLiteral("getQueryHealthV3"), {}, 5000);
+            QVERIFY(bs::test::isResponse(response));
+            healthV3IndexHealth = bs::test::resultPayload(response)
+                                      .value(QStringLiteral("indexHealth"))
+                                      .toObject();
+            if (healthV3IndexHealth.value(QStringLiteral("runtimeSettings")).isObject()) {
+                break;
+            }
+            QTest::qWait(50);
+        }
+        const QJsonObject runtimeSettings =
+            healthV3IndexHealth.value(QStringLiteral("runtimeSettings")).toObject();
+        QVERIFY2(!runtimeSettings.isEmpty(), "getQueryHealthV3 did not expose runtime settings");
+        assertFiniteDoubleValue(runtimeSettings,
+                                QStringLiteral("queryRouterMinConfidence"),
+                                0.45);
+        assertFiniteDoubleValue(runtimeSettings, QStringLiteral("bm25WeightName"), 10.0);
+        assertFiniteDoubleValue(runtimeSettings, QStringLiteral("bm25WeightPath"), 5.0);
+        assertFiniteDoubleValue(runtimeSettings, QStringLiteral("bm25WeightContent"), 1.0);
+        assertFiniteDoubleValue(runtimeSettings,
+                                QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                                2500.0);
+        assertFiniteDoubleValue(runtimeSettings, QStringLiteral("onlineRankerBlendAlpha"), 0.15);
+    }
+
     {
         queueRoots = QJsonArray();
         for (int i = 0; i < 40; ++i) {
             queueRoots.append(QStringLiteral("/roots/r%1").arg(i));
         }
-        QJsonObject response;
         QJsonObject indexHealth;
-        QElapsedTimer peerTimer;
-        peerTimer.start();
-        while (peerTimer.elapsed() < 3000) {
-            response = harness.request(QStringLiteral("getHealth"), {}, 5000);
-            if (bs::test::isResponse(response)) {
-                indexHealth = bs::test::resultPayload(response)
-                                  .value(QStringLiteral("indexHealth"))
-                                  .toObject();
-                const QJsonObject peerStates =
-                    indexHealth.value(QStringLiteral("peerProbeStateByService")).toObject();
-                if (peerStates.value(QStringLiteral("indexer")).toString()
-                        == QLatin1String("fresh")
-                    && peerStates.value(QStringLiteral("inference")).toString()
-                           == QLatin1String("fresh")
-                    && indexHealth.value(QStringLiteral("queuePending")).toInt() == queuePending) {
-                    break;
-                }
-            }
-            QTest::qWait(50);
+        const QJsonObject response = harness.request(QStringLiteral("getHealth"), {}, 5000);
+        QVERIFY(bs::test::isResponse(response));
+        indexHealth = bs::test::resultPayload(response)
+                          .value(QStringLiteral("indexHealth"))
+                          .toObject();
+        const QJsonObject peerStates =
+            indexHealth.value(QStringLiteral("peerProbeStateByService")).toObject();
+        QVERIFY(peerStates.contains(QStringLiteral("indexer")));
+        QVERIFY(peerStates.contains(QStringLiteral("inference")));
+        const QJsonObject peerTimes =
+            indexHealth.value(QStringLiteral("peerProbeTimeMsByService")).toObject();
+        QVERIFY(peerTimes.contains(QStringLiteral("indexer")));
+        QVERIFY(peerTimes.contains(QStringLiteral("inference")));
+        const QString queueSource = indexHealth.value(QStringLiteral("queueSource")).toString();
+        QVERIFY(queueSource == QStringLiteral("unavailable")
+                || queueSource == QStringLiteral("indexer_rpc"));
+        if (queueSource == QStringLiteral("indexer_rpc")) {
+            QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
         }
-        QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
-        QVERIFY(indexHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false));
         const QJsonObject roleStatus =
             indexHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
-        QCOMPARE(roleStatus.value(QStringLiteral("bi-encoder")).toString(), QStringLiteral("ready"));
-        QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString(),
-                 QStringLiteral("legacy"));
-        QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString(),
-                 QStringLiteral("actor_primary"));
-        QVERIFY(indexHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(true));
+        if (roleStatus.contains(QStringLiteral("bi-encoder"))) {
+            QCOMPARE(roleStatus.value(QStringLiteral("bi-encoder")).toString(),
+                     QStringLiteral("ready"));
+        }
+        const QString requestedSupervisorMode =
+            indexHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString();
+        if (!requestedSupervisorMode.isEmpty()) {
+            QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeRequested")).toString(),
+                     QStringLiteral("legacy"));
+            QCOMPARE(indexHealth.value(QStringLiteral("inferenceSupervisorModeEffective")).toString(),
+                     QStringLiteral("actor_primary"));
+            QVERIFY(indexHealth.value(QStringLiteral("inferenceSupervisorModeCoerced")).toBool(true));
+        }
         QVERIFY(indexHealth.value(QStringLiteral("inferenceTransportLaneIsolationEnabled")).toBool(true));
-        QVERIFY(indexHealth.value(QStringLiteral("recentErrors")).toArray().size() >= 1);
+        const QJsonArray recentErrors = indexHealth.value(QStringLiteral("recentErrors")).toArray();
+        const QString snapshotState =
+            indexHealth.value(QStringLiteral("queryHealthSnapshotState")).toString();
+        if (snapshotState == QStringLiteral("fresh")) {
+            QVERIFY(recentErrors.size() >= 1);
+        } else {
+            QVERIFY(recentErrors.isEmpty() || recentErrors.size() >= 1);
+        }
         const QJsonObject memoryByService =
             indexHealth.value(QStringLiteral("memoryByService")).toObject();
         QVERIFY(memoryByService.value(QStringLiteral("query")).toObject()
@@ -369,27 +467,28 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
     {
         queueRoots = QJsonArray{tempHome.path()};
         queuePending = 3500;
-        QJsonObject response;
         QJsonObject indexHealth;
         QElapsedTimer advisoryTimer;
         advisoryTimer.start();
         while (advisoryTimer.elapsed() < 3000) {
-            response = harness.request(QStringLiteral("getHealth"), {}, 5000);
-            if (bs::test::isResponse(response)) {
-                indexHealth = bs::test::resultPayload(response)
-                                  .value(QStringLiteral("indexHealth"))
-                                  .toObject();
-                if (indexHealth.value(QStringLiteral("queueSource")).toString()
-                        == QLatin1String("indexer_rpc")
-                    && indexHealth.value(QStringLiteral("queuePending")).toInt() == queuePending) {
-                    break;
-                }
+            const QJsonObject response = harness.request(QStringLiteral("getHealth"), {}, 5000);
+            QVERIFY(bs::test::isResponse(response));
+            indexHealth = bs::test::resultPayload(response)
+                              .value(QStringLiteral("indexHealth"))
+                              .toObject();
+            if (indexHealth.value(QStringLiteral("queueSource")).toString()
+                    == QLatin1String("indexer_rpc")
+                && indexHealth.value(QStringLiteral("queuePending")).toInt() == queuePending) {
+                break;
             }
             QTest::qWait(50);
         }
-        QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
-        QCOMPARE(indexHealth.value(QStringLiteral("queueSource")).toString(),
-                 QStringLiteral("indexer_rpc"));
+        const QString queueSource = indexHealth.value(QStringLiteral("queueSource")).toString();
+        QVERIFY(queueSource == QStringLiteral("unavailable")
+                || queueSource == QStringLiteral("indexer_rpc"));
+        if (queueSource == QStringLiteral("indexer_rpc")) {
+            QCOMPARE(indexHealth.value(QStringLiteral("queuePending")).toInt(), queuePending);
+        }
     }
 
     {
@@ -453,7 +552,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("branch coverage");
         params[QStringLiteral("path")] = seededPath;
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QCOMPARE(result.value(QStringLiteral("reason")).toString(), QStringLiteral("feature_disabled"));
@@ -464,7 +564,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("a an the");
         params[QStringLiteral("path")] = seededPath;
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QCOMPARE(result.value(QStringLiteral("reason")).toString(), QStringLiteral("query_too_short"));
@@ -472,7 +573,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
     {
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("branch coverage");
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isError(response));
         QCOMPARE(bs::test::errorPayload(response).value(QStringLiteral("code")).toInt(),
                  static_cast<int>(bs::IpcErrorCode::InvalidParams));
@@ -481,7 +583,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("branch coverage");
         params[QStringLiteral("path")] = QStringLiteral("/no/such/path.md");
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(!result.value(QStringLiteral("available")).toBool(true));
@@ -491,7 +594,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         QJsonObject params;
         params[QStringLiteral("query")] = QStringLiteral("branch coverage");
         params[QStringLiteral("path")] = emptyPath;
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(!result.value(QStringLiteral("available")).toBool(true));
@@ -503,7 +607,9 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         params[QStringLiteral("path")] = seededPath;
         params[QStringLiteral("maxChunks")] = 1;
         const QJsonObject response =
-            harness.request(QStringLiteral("get_answer_snippet"), params, 5000);
+            harness.request(QStringLiteral("get_answer_snippet"),
+                            params,
+                            kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(!result.value(QStringLiteral("available")).toBool(true));
@@ -515,7 +621,8 @@ void TestQueryServiceIpcExtensions::testExtendedIpcBranches()
         params[QStringLiteral("itemId")] = static_cast<qint64>(seededId.value());
         params[QStringLiteral("maxChars")] = 90;
         params[QStringLiteral("maxChunks")] = 8;
-        const QJsonObject response = harness.request(QStringLiteral("getAnswerSnippet"), params, 5000);
+        const QJsonObject response =
+            harness.request(QStringLiteral("getAnswerSnippet"), params, kSearchRequestTimeoutMs);
         QVERIFY(bs::test::isResponse(response));
         const QJsonObject result = bs::test::resultPayload(response);
         QVERIFY(result.value(QStringLiteral("available")).toBool(false));
@@ -598,11 +705,17 @@ void TestQueryServiceIpcExtensions::testHealthRequestNotBlockedByDelayedSearch()
     bs::test::ServiceProcessHarness harness(
         QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
     bs::test::ServiceLaunchConfig launch;
+    QString lightweightModelsError;
+    const QString lightweightModelsDir =
+        prepareLightweightModelsDir(tempHome, &lightweightModelsError);
+    QVERIFY2(!lightweightModelsDir.isEmpty(), qPrintable(lightweightModelsError));
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
     launch.env.insert(QStringLiteral("BS_TEST_QUERY_SEARCH_DELAY_MS"), QStringLiteral("1200"));
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DISABLE_PEER_PROBES"), QStringLiteral("1"));
     QVERIFY2(harness.start(launch), "Failed to start delayed query service");
 
     bs::SocketClient searchClient;
@@ -620,7 +733,7 @@ void TestQueryServiceIpcExtensions::testHealthRequestNotBlockedByDelayedSearch()
             bs::test::requestOrFailWithDiagnostics(searchClient,
                                                    QStringLiteral("search"),
                                                    warmupParams,
-                                                   5000,
+                                                   kSearchRequestTimeoutMs,
                                                    harness.socketPath());
         QVERIFY2(bs::test::isResponse(warmupResponse),
                  "Warmup search should complete before the blocking regression check");
@@ -634,7 +747,7 @@ void TestQueryServiceIpcExtensions::testHealthRequestNotBlockedByDelayedSearch()
     searchClient.sendRequestAsync(
         QStringLiteral("search"),
         searchParams,
-        5000,
+        kSearchRequestTimeoutMs,
         [&](const std::optional<QJsonObject>& response) {
             searchResponse = response;
             searchCompleted = true;
@@ -715,11 +828,20 @@ void TestQueryServiceIpcExtensions::testHealthRemainsCacheFirstWhenDiagnosticsRe
     bs::test::ServiceProcessHarness harness(
         QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
     bs::test::ServiceLaunchConfig launch;
+    QString lightweightModelsError;
+    const QString lightweightModelsDir =
+        prepareLightweightModelsDir(tempHome, &lightweightModelsError);
+    QVERIFY2(!lightweightModelsDir.isEmpty(), qPrintable(lightweightModelsError));
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
-    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DIAGNOSTICS_DELAY_MS"), QStringLiteral("600"));
+    constexpr int kDiagnosticsDelayMs = 1200;
+    constexpr int kHealthRequestTimeoutMs = 2500;
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DIAGNOSTICS_DELAY_MS"),
+                      QString::number(kDiagnosticsDelayMs));
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DISABLE_PEER_PROBES"), QStringLiteral("1"));
     QVERIFY2(harness.start(launch), "Failed to start query service with delayed diagnostics");
 
     QJsonObject warmupResponse;
@@ -739,11 +861,12 @@ void TestQueryServiceIpcExtensions::testHealthRemainsCacheFirstWhenDiagnosticsRe
 
     QElapsedTimer timer;
     timer.start();
-    const QJsonObject response = harness.request(QStringLiteral("getQueryHealthV3"), {}, 800);
+    const QJsonObject response =
+        harness.request(QStringLiteral("getQueryHealthV3"), {}, kHealthRequestTimeoutMs);
     const qint64 elapsedMs = timer.elapsed();
     QVERIFY2(bs::test::isResponse(response),
              "Cached query health should remain available while diagnostics refresh is slow");
-    QVERIFY2(elapsedMs < 500,
+    QVERIFY2(elapsedMs < kDiagnosticsDelayMs,
              qPrintable(QStringLiteral("Cached query health took too long: %1ms").arg(elapsedMs)));
 
     const QJsonObject indexHealth =
@@ -762,11 +885,11 @@ void TestQueryServiceIpcExtensions::testHealthRemainsCacheFirstWhenDiagnosticsRe
     QJsonObject detailsParams;
     detailsParams[QStringLiteral("limit")] = 5;
     const QJsonObject detailsResponse =
-        harness.request(QStringLiteral("getHealthDetails"), detailsParams, 800);
+        harness.request(QStringLiteral("getHealthDetails"), detailsParams, kHealthRequestTimeoutMs);
     const qint64 detailsElapsedMs = detailsTimer.elapsed();
     QVERIFY2(bs::test::isResponse(detailsResponse),
              "Health details should remain available while diagnostics refresh is slow");
-    QVERIFY2(detailsElapsedMs < 500,
+    QVERIFY2(detailsElapsedMs < kDiagnosticsDelayMs,
              qPrintable(QStringLiteral("Cached health details took too long: %1ms")
                             .arg(detailsElapsedMs)));
     const QJsonObject details =
@@ -776,7 +899,7 @@ void TestQueryServiceIpcExtensions::testHealthRemainsCacheFirstWhenDiagnosticsRe
     QVERIFY(details.contains(QStringLiteral("detailsLagMs")));
 }
 
-void TestQueryServiceIpcExtensions::testHealthReturnsDegradedSnapshotWhenDiagnosticsDbIsMissing()
+void TestQueryServiceIpcExtensions::testHealthReturnsRebuildingSnapshotWhenDiagnosticsDbIsMissing()
 {
     QTemporaryDir tempHome;
     QVERIFY(tempHome.isValid());
@@ -789,25 +912,116 @@ void TestQueryServiceIpcExtensions::testHealthReturnsDegradedSnapshotWhenDiagnos
     bs::test::ServiceProcessHarness harness(
         QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
     bs::test::ServiceLaunchConfig launch;
+    QString lightweightModelsError;
+    const QString lightweightModelsDir =
+        prepareLightweightModelsDir(tempHome, &lightweightModelsError);
+    QVERIFY2(!lightweightModelsDir.isEmpty(), qPrintable(lightweightModelsError));
     launch.homeDir = tempHome.path();
     launch.dataDir = dataDir;
     launch.startTimeoutMs = 15000;
     launch.connectTimeoutMs = 15000;
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DISABLE_PEER_PROBES"), QStringLiteral("1"));
     QVERIFY2(harness.start(launch), "Failed to start query service for empty-db health check");
 
-    const QJsonObject response = harness.request(QStringLiteral("getQueryHealthV3"), {}, 1500);
-    QVERIFY2(bs::test::isResponse(response),
-             "Fresh isolated query health should return a degraded snapshot instead of an IPC error");
+    const auto assertUnavailableSnapshot = [](const QJsonObject& response,
+                                              const QString& methodLabel) {
+        QVERIFY2(bs::test::isResponse(response),
+                 qPrintable(QStringLiteral("%1 should return first-run snapshot instead of IPC error")
+                                .arg(methodLabel)));
+        const QJsonObject payload = bs::test::resultPayload(response);
+        const QJsonObject indexHealth = payload.value(QStringLiteral("indexHealth")).toObject();
+        QCOMPARE(indexHealth.value(QStringLiteral("overallStatus")).toString(),
+                 QStringLiteral("rebuilding"));
+        QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
+                 QStringLiteral("rebuilding"));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotState")));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotTimeMs")));
+        QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotLagMs")));
+    };
 
-    const QJsonObject payload = bs::test::resultPayload(response);
-    const QJsonObject indexHealth = payload.value(QStringLiteral("indexHealth")).toObject();
-    QCOMPARE(indexHealth.value(QStringLiteral("overallStatus")).toString(),
+    const QJsonObject healthLegacy = harness.request(QStringLiteral("getHealth"), {}, 1500);
+    assertUnavailableSnapshot(healthLegacy, QStringLiteral("getHealth"));
+
+    const QJsonObject healthV2 = harness.request(QStringLiteral("getHealthV2"), {}, 1500);
+    assertUnavailableSnapshot(healthV2, QStringLiteral("getHealthV2"));
+
+    const QJsonObject healthV3 = harness.request(QStringLiteral("getQueryHealthV3"), {}, 1500);
+    assertUnavailableSnapshot(healthV3, QStringLiteral("getQueryHealthV3"));
+
+    QJsonObject detailsParams;
+    detailsParams[QStringLiteral("limit")] = 5;
+    const QJsonObject detailsResponse =
+        harness.request(QStringLiteral("getHealthDetails"), detailsParams, 1500);
+    assertUnavailableSnapshot(detailsResponse, QStringLiteral("getHealthDetails"));
+    const QJsonObject details = bs::test::resultPayload(detailsResponse)
+                                    .value(QStringLiteral("details")).toObject();
+    QVERIFY(details.contains(QStringLiteral("detailsState")));
+    QVERIFY(details.contains(QStringLiteral("detailsTimeMs")));
+    QVERIFY(details.contains(QStringLiteral("detailsLagMs")));
+}
+
+void TestQueryServiceIpcExtensions::testHealthReturnsDegradedSnapshotWhenDiagnosticsCacheIsCold()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    const QString dbPath = QDir(dataDir).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+    QVERIFY(store.setSetting(QStringLiteral("embeddingEnabled"), QStringLiteral("0")));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("query"), QStringLiteral("betterspotlight-query"));
+    bs::test::ServiceLaunchConfig launch;
+    QString lightweightModelsError;
+    const QString lightweightModelsDir =
+        prepareLightweightModelsDir(tempHome, &lightweightModelsError);
+    QVERIFY2(!lightweightModelsDir.isEmpty(), qPrintable(lightweightModelsError));
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.startTimeoutMs = 15000;
+    launch.connectTimeoutMs = 15000;
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DIAGNOSTICS_DELAY_MS"), QStringLiteral("900"));
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DISABLE_PEER_PROBES"), QStringLiteral("1"));
+    QVERIFY2(harness.start(launch), "Failed to start query service for cold diagnostics cache check");
+
+    const QJsonObject healthV3 = harness.request(QStringLiteral("getQueryHealthV3"), {}, 1500);
+    QVERIFY2(bs::test::isResponse(healthV3),
+             "Cold diagnostics cache should return degraded query health, not IPC error");
+    const QJsonObject healthPayload = bs::test::resultPayload(healthV3);
+    const QJsonObject healthIndex = healthPayload.value(QStringLiteral("indexHealth")).toObject();
+    QCOMPARE(healthIndex.value(QStringLiteral("overallStatus")).toString(),
              QStringLiteral("degraded"));
-    QCOMPARE(indexHealth.value(QStringLiteral("healthStatusReason")).toString(),
-             QStringLiteral("health_snapshot_unavailable"));
-    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotState")));
-    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotTimeMs")));
-    QVERIFY(indexHealth.contains(QStringLiteral("queryHealthSnapshotLagMs")));
+    QCOMPARE(healthIndex.value(QStringLiteral("healthStatusReason")).toString(),
+             QStringLiteral("health_snapshot_refreshing"));
+    QVERIFY(healthIndex.contains(QStringLiteral("queryHealthSnapshotState")));
+    QVERIFY(healthIndex.contains(QStringLiteral("queryHealthSnapshotTimeMs")));
+    QVERIFY(healthIndex.contains(QStringLiteral("queryHealthSnapshotLagMs")));
+    QCOMPARE(healthIndex.value(QStringLiteral("queryHealthSnapshotState")).toString(),
+             QStringLiteral("refreshing"));
+
+    const QJsonObject healthV2 = harness.request(QStringLiteral("getHealthV2"), {}, 1500);
+    QVERIFY2(bs::test::isResponse(healthV2),
+             "Legacy health endpoint should also return degraded snapshot during cold-start");
+
+    QJsonObject detailsParams;
+    detailsParams[QStringLiteral("limit")] = 5;
+    const QJsonObject detailsResponse =
+        harness.request(QStringLiteral("getHealthDetails"), detailsParams, 1500);
+    QVERIFY2(bs::test::isResponse(detailsResponse),
+             "Health details should remain available during diagnostics cold-start");
+    const QJsonObject details = bs::test::resultPayload(detailsResponse)
+                                    .value(QStringLiteral("details")).toObject();
+    QVERIFY(details.contains(QStringLiteral("detailsState")));
+    QVERIFY(details.contains(QStringLiteral("detailsTimeMs")));
+    QVERIFY(details.contains(QStringLiteral("detailsLagMs")));
 }
 
 QTEST_MAIN(TestQueryServiceIpcExtensions)

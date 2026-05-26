@@ -1,9 +1,103 @@
 #include "core/ipc/message.h"
 #include "core/shared/logging.h"
 #include <QJsonDocument>
+#include <QJsonValue>
 #include <QtEndian>
 
+#include <cmath>
+#include <limits>
+
 namespace bs {
+
+namespace {
+
+IpcMessage::DecodeAttempt invalidFrame(const QString& error)
+{
+    IpcMessage::DecodeAttempt attempt;
+    attempt.status = IpcMessage::DecodeStatus::Invalid;
+    attempt.error = error;
+    qCWarning(bsIpc, "%s", qPrintable(error));
+    return attempt;
+}
+
+bool isNonNegativeJsonInteger(const QJsonValue& value)
+{
+    if (!value.isDouble()) {
+        return false;
+    }
+    const double numeric = value.toDouble(-1.0);
+    return std::isfinite(numeric)
+        && numeric >= 0.0
+        && numeric <= static_cast<double>(std::numeric_limits<qint64>::max())
+        && std::floor(numeric) == numeric;
+}
+
+std::optional<QString> validateMessageShape(const QJsonObject& json)
+{
+    const QJsonValue typeValue = json.value(QStringLiteral("type"));
+    if (!typeValue.isString()) {
+        return QStringLiteral("IPC message missing string type");
+    }
+
+    const QString type = typeValue.toString();
+    if (type == QLatin1String("request")) {
+        if (!isNonNegativeJsonInteger(json.value(QStringLiteral("id")))) {
+            return QStringLiteral("IPC request missing non-negative integer id");
+        }
+        if (!json.value(QStringLiteral("method")).isString()
+            || json.value(QStringLiteral("method")).toString().isEmpty()) {
+            return QStringLiteral("IPC request missing non-empty method");
+        }
+        const QJsonValue params = json.value(QStringLiteral("params"));
+        if (!params.isUndefined() && !params.isObject()) {
+            return QStringLiteral("IPC request params must be an object");
+        }
+        return std::nullopt;
+    }
+
+    if (type == QLatin1String("response")) {
+        if (!isNonNegativeJsonInteger(json.value(QStringLiteral("id")))) {
+            return QStringLiteral("IPC response missing non-negative integer id");
+        }
+        if (!json.value(QStringLiteral("result")).isObject()) {
+            return QStringLiteral("IPC response result must be an object");
+        }
+        return std::nullopt;
+    }
+
+    if (type == QLatin1String("error")) {
+        if (!isNonNegativeJsonInteger(json.value(QStringLiteral("id")))) {
+            return QStringLiteral("IPC error missing non-negative integer id");
+        }
+        const QJsonObject error = json.value(QStringLiteral("error")).toObject();
+        if (error.isEmpty()) {
+            return QStringLiteral("IPC error missing error object");
+        }
+        if (!error.value(QStringLiteral("code")).isDouble()) {
+            return QStringLiteral("IPC error missing numeric code");
+        }
+        if (!error.value(QStringLiteral("message")).isString()) {
+            return QStringLiteral("IPC error missing string message");
+        }
+        return std::nullopt;
+    }
+
+    if (type == QLatin1String("notification")) {
+        if (!json.value(QStringLiteral("method")).isString()
+            || json.value(QStringLiteral("method")).toString().isEmpty()) {
+            return QStringLiteral("IPC notification missing non-empty method");
+        }
+        const QJsonValue params = json.value(QStringLiteral("params"));
+        if (!params.isUndefined() && !params.isObject()) {
+            return QStringLiteral("IPC notification params must be an object");
+        }
+        return std::nullopt;
+    }
+
+    return QStringLiteral("IPC message has unknown type: %1").arg(type);
+}
+
+} // namespace
 
 QByteArray IpcMessage::encode(const QJsonObject& json)
 {
@@ -29,9 +123,23 @@ QByteArray IpcMessage::encode(const QJsonObject& json)
 
 std::optional<IpcMessage::DecodeResult> IpcMessage::decode(const QByteArray& buffer)
 {
+    DecodeAttempt attempt = decodeFrame(buffer);
+    if (attempt.status != DecodeStatus::Complete || !attempt.result.has_value()) {
+        return std::nullopt;
+    }
+    return attempt.result;
+}
+
+std::optional<QString> IpcMessage::validate(const QJsonObject& json)
+{
+    return validateMessageShape(json);
+}
+
+IpcMessage::DecodeAttempt IpcMessage::decodeFrame(const QByteArray& buffer)
+{
     // Need at least 4 bytes for the length prefix
     if (buffer.size() < 4) {
-        return std::nullopt;
+        return {};
     }
 
     // Read the 4-byte big-endian length
@@ -39,16 +147,16 @@ std::optional<IpcMessage::DecodeResult> IpcMessage::decode(const QByteArray& buf
     memcpy(&rawLen, buffer.constData(), 4);
     quint32 payloadLen = qFromBigEndian(rawLen);
 
-    if (static_cast<int>(payloadLen) > kMaxMessageSize) {
-        qCWarning(bsIpc, "Received message length exceeds max: %u > %d",
-                  payloadLen, kMaxMessageSize);
-        return std::nullopt;
+    if (payloadLen > static_cast<quint32>(kMaxMessageSize)) {
+        return invalidFrame(QStringLiteral("message length exceeds max: %1 > %2")
+                                .arg(payloadLen)
+                                .arg(kMaxMessageSize));
     }
 
     // Check if the full payload has arrived
     int totalLen = 4 + static_cast<int>(payloadLen);
     if (buffer.size() < totalLen) {
-        return std::nullopt;
+        return {};
     }
 
     // Parse the JSON payload
@@ -57,20 +165,26 @@ std::optional<IpcMessage::DecodeResult> IpcMessage::decode(const QByteArray& buf
     QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
 
     if (parseError.error != QJsonParseError::NoError) {
-        qCWarning(bsIpc, "JSON parse error: %s",
-                  qPrintable(parseError.errorString()));
-        return std::nullopt;
+        return invalidFrame(QStringLiteral("JSON parse error: %1").arg(parseError.errorString()));
     }
 
     if (!doc.isObject()) {
-        qCWarning(bsIpc, "Expected JSON object, got something else");
-        return std::nullopt;
+        return invalidFrame(QStringLiteral("expected JSON object"));
     }
 
+    const QJsonObject object = doc.object();
+    if (const std::optional<QString> shapeError = validate(object);
+        shapeError.has_value()) {
+        return invalidFrame(shapeError.value());
+    }
+
+    DecodeAttempt attempt;
+    attempt.status = DecodeStatus::Complete;
     DecodeResult result;
-    result.json = doc.object();
+    result.json = object;
     result.bytesConsumed = totalLen;
-    return result;
+    attempt.result = result;
+    return attempt;
 }
 
 QJsonObject IpcMessage::makeRequest(uint64_t id, const QString& method, const QJsonObject& params)

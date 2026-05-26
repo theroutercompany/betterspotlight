@@ -1,4 +1,6 @@
 #include "query_service.h"
+#include "embedding_response_utils.h"
+#include "rerank_score_utils.h"
 #include "core/ipc/message.h"
 #include "core/ipc/socket_client.h"
 #include "core/query/doctype_classifier.h"
@@ -32,6 +34,7 @@
 #include "core/feedback/type_affinity.h"
 
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -43,6 +46,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
+#include <QThread>
 #include <QVector>
 
 #include <algorithm>
@@ -53,6 +57,10 @@
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
+
+#if defined(Q_OS_MACOS)
+#include <mach/mach.h>
+#endif
 
 namespace bs {
 
@@ -440,13 +448,58 @@ bool isExpectedGapFailureMessage(const QString& errorMessage)
         || lowered == QLatin1String("file appears to be a cloud placeholder (size reported but no content readable)");
 }
 
-constexpr qint64 kLocalHealthSnapshotTtlMs = 250;
+constexpr int kBsignoreReloadDebounceMs = 250;
+constexpr char kBsignoreReloadDebounceTimerName[] = "_query_bsignore_reload_debounce_timer";
+
+QByteArray bsignoreFileSignature(const QString& path)
+{
+    if (path.isEmpty()) {
+        return QByteArrayLiteral("path:empty");
+    }
+
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        return QByteArrayLiteral("file:missing");
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QByteArrayLiteral("file:unreadable:size:")
+            + QByteArray::number(info.size());
+    }
+
+    const QByteArray data = file.readAll();
+    const QByteArray digest = QCryptographicHash::hash(
+        data, QCryptographicHash::Sha256);
+    return QByteArrayLiteral("file:sha256:") + digest.toHex();
+}
+
+QByteArray bsignoreEffectiveSignature(bool fileExists,
+                                      bool loaded,
+                                      const std::vector<std::string>& patterns)
+{
+    QByteArray payload;
+    payload.reserve(64 + static_cast<int>(patterns.size() * 16));
+    payload.append(fileExists ? "exists:1\n" : "exists:0\n");
+    payload.append(loaded ? "loaded:1\n" : "loaded:0\n");
+    payload.append("patternCount:");
+    payload.append(QByteArray::number(static_cast<qint64>(patterns.size())));
+    payload.append('\n');
+    for (const std::string& pattern : patterns) {
+        payload.append(pattern.data(), static_cast<int>(pattern.size()));
+        payload.append('\n');
+    }
+    return QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex();
+}
+
+constexpr qint64 kLocalHealthSnapshotTtlMs = 2000;
 constexpr qint64 kHealthDetailsSnapshotTtlMs = 750;
 constexpr qint64 kPeerProbeStaleMs = 1500;
 constexpr int kPeerProbeRefreshIntervalMs = 250;
-constexpr int kDiagnosticsRefreshIntervalMs = 250;
+constexpr int kDiagnosticsRefreshIntervalMs = 2000;
 constexpr qint64 kInitialDiagnosticsWaitMs = 150;
 constexpr qint64 kHealthDetailsRequestBudgetMs = 150;
+constexpr uint kRequestLaneThreadStackSizeBytes = 8U * 1024U * 1024U;
 
 int testQueryDiagnosticsDelayMs()
 {
@@ -456,6 +509,27 @@ int testQueryDiagnosticsDelayMs()
         return 0;
     }
     return std::clamp(parsed, 0, 5000);
+}
+
+bool testQueryDisablePeerProbesEnabled()
+{
+    return envFlagEnabled(qEnvironmentVariable("BS_TEST_QUERY_DISABLE_PEER_PROBES"));
+}
+
+std::optional<qint64> currentProcessResidentSetKb()
+{
+#if defined(Q_OS_MACOS)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    const kern_return_t rc = task_info(mach_task_self(),
+                                       MACH_TASK_BASIC_INFO,
+                                       reinterpret_cast<task_info_t>(&info),
+                                       &count);
+    if (rc == KERN_SUCCESS) {
+        return static_cast<qint64>(info.resident_size / 1024);
+    }
+#endif
+    return std::nullopt;
 }
 
 sqlite3* openReadOnlyDiagnosticsDb(const QString& dbPath)
@@ -710,7 +784,7 @@ IndexHealth readIndexHealthFromSqlite(sqlite3* db)
         lastIndex.has_value()) {
         bool ok = false;
         const double parsed = lastIndex->toDouble(&ok);
-        if (ok) {
+        if (ok && std::isfinite(parsed)) {
             health.lastIndexTime = parsed;
             if (parsed > 0.0) {
                 const double now = static_cast<double>(QDateTime::currentSecsSinceEpoch());
@@ -930,7 +1004,8 @@ QueryService::QueryService(QObject* parent)
             schedulerIntervalMs = std::clamp(parsed, 100, 60000);
         }
     }
-    m_learningSchedulerTimer.setInterval(schedulerIntervalMs);
+    m_learningSchedulerIntervalMs = schedulerIntervalMs;
+    m_learningSchedulerTimer.setInterval(m_learningSchedulerIntervalMs);
     m_learningSchedulerTimer.setSingleShot(false);
     QObject::connect(&m_learningSchedulerTimer, &QTimer::timeout, this, [this]() {
         if (!m_learningEngine) {
@@ -968,7 +1043,9 @@ QueryService::QueryService(QObject* parent)
     startRequestExecutionLanes();
     startDiagnosticsWorker();
     m_peerProbeRefreshTimer.start();
-    m_diagnosticsRefreshTimer.start();
+    if (envFlagEnabled(qEnvironmentVariable("BETTERSPOTLIGHT_QUERY_AUTO_DIAGNOSTICS"))) {
+        m_diagnosticsRefreshTimer.start();
+    }
     QMetaObject::invokeMethod(this, [this]() {
         refreshPeerProbesIfNeeded(true);
     }, Qt::QueuedConnection);
@@ -992,7 +1069,7 @@ QueryService::~QueryService()
     }
     stopDiagnosticsWorker();
     stopRequestExecutionLanes();
-    m_learningSchedulerTimer.stop();
+    setLearningSchedulerActive(false);
 }
 
 void QueryService::resolveDataPathsIfNeeded()
@@ -1106,7 +1183,7 @@ void QueryService::refreshRuntimeMirror()
 
     std::lock_guard<std::mutex> lock(m_runtimeMirrorMutex);
     m_runtimeMirror = std::move(mirror);
-    invalidateDiagnosticsCaches(true);
+    invalidateDiagnosticsCaches(false);
 }
 
 QString QueryService::vectorRebuildStatusToString(VectorRebuildState::Status status)
@@ -1231,7 +1308,7 @@ void QueryService::refreshVectorGenerationState()
             setting.has_value()) {
             bool ok = false;
             const double parsed = setting->toDouble(&ok);
-            if (ok) {
+            if (ok && std::isfinite(parsed)) {
                 m_vectorMigrationProgressPct = parsed;
             }
         }
@@ -1311,24 +1388,32 @@ void QueryService::handleRequestWithResponder(const QJsonObject& request,
 void QueryService::startRequestExecutionLanes()
 {
     std::lock_guard<std::mutex> lock(m_requestLaneMutex);
-    if (m_defaultRequestThread.joinable() || m_healthRequestThread.joinable()) {
+    if (m_defaultRequestThread || m_healthRequestThread) {
         return;
     }
     m_stopRequestLanes = false;
-    m_defaultRequestThread = std::thread([this]() {
-        requestLaneLoop(RequestExecutionLane::Default);
-    });
-    m_healthRequestThread = std::thread([this]() {
-        requestLaneLoop(RequestExecutionLane::Health);
-    });
+
+    auto startLaneThread = [this](RequestExecutionLane lane, const QString& name) {
+        std::unique_ptr<QThread> thread(QThread::create([this, lane]() {
+            requestLaneLoop(lane);
+        }));
+        thread->setObjectName(name);
+        thread->setStackSize(kRequestLaneThreadStackSizeBytes);
+        thread->start();
+        return thread;
+    };
+
+    m_defaultRequestThread = startLaneThread(RequestExecutionLane::Default,
+                                            QStringLiteral("query-default-lane"));
+    m_healthRequestThread = startLaneThread(RequestExecutionLane::Health,
+                                           QStringLiteral("query-health-lane"));
 }
 
 void QueryService::stopRequestExecutionLanes()
 {
     {
         std::lock_guard<std::mutex> lock(m_requestLaneMutex);
-        if (m_stopRequestLanes && !m_defaultRequestThread.joinable()
-            && !m_healthRequestThread.joinable()) {
+        if (m_stopRequestLanes && !m_defaultRequestThread && !m_healthRequestThread) {
             return;
         }
         m_stopRequestLanes = true;
@@ -1337,11 +1422,13 @@ void QueryService::stopRequestExecutionLanes()
         m_healthRequestQueue.clear();
     }
     m_requestLaneCv.notify_all();
-    if (m_defaultRequestThread.joinable()) {
-        m_defaultRequestThread.join();
+    if (m_defaultRequestThread) {
+        m_defaultRequestThread->wait();
+        m_defaultRequestThread.reset();
     }
-    if (m_healthRequestThread.joinable()) {
-        m_healthRequestThread.join();
+    if (m_healthRequestThread) {
+        m_healthRequestThread->wait();
+        m_healthRequestThread.reset();
     }
 }
 
@@ -1656,6 +1743,9 @@ void QueryService::schedulePeerProbeRefresh(bool force)
 
 void QueryService::refreshPeerProbesIfNeeded(bool force)
 {
+    if (testQueryDisablePeerProbesEnabled()) {
+        return;
+    }
     if (m_shuttingDown.load()) {
         return;
     }
@@ -1784,6 +1874,53 @@ void QueryService::refreshInferencePeerProbe(bool force)
         });
 }
 
+bool QueryService::refreshInferencePeerProbeDirect(int connectTimeoutMs, int requestTimeoutMs)
+{
+    if (testQueryDisablePeerProbesEnabled() || m_shuttingDown.load()) {
+        return false;
+    }
+
+    SocketClient client;
+    const QString socketPath = ServiceBase::socketPath(QStringLiteral("inference"));
+    if (!client.connectToServer(socketPath, std::max(1, connectTimeoutMs))) {
+        recordInferenceConnected(InferenceLane::Health, false);
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        m_inferencePeerCache.refreshInFlight = false;
+        m_inferencePeerCache.state = m_inferencePeerCache.payload.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        return false;
+    }
+
+    const std::optional<QJsonObject> response =
+        client.sendRequest(QStringLiteral("get_inference_health"),
+                           {},
+                           std::max(1, requestTimeoutMs));
+    if (!response.has_value()
+        || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
+        recordInferenceConnected(InferenceLane::Health, false);
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        m_inferencePeerCache.refreshInFlight = false;
+        m_inferencePeerCache.state = m_inferencePeerCache.payload.isEmpty()
+            ? QStringLiteral("unavailable")
+            : QStringLiteral("stale");
+        return false;
+    }
+
+    const QJsonObject payload = response->value(QStringLiteral("result")).toObject();
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        m_inferencePeerCache.payload = payload;
+        m_inferencePeerCache.snapshotTimeMs = QDateTime::currentMSecsSinceEpoch();
+        m_inferencePeerCache.refreshInFlight = false;
+        m_inferencePeerCache.state = QStringLiteral("fresh");
+    }
+    recordInferenceConnected(
+        InferenceLane::Health,
+        payload.value(QStringLiteral("connected")).toBool(false));
+    return true;
+}
+
 bool QueryService::isHealthRequestMethod(const QString& method)
 {
     return method == QLatin1String("getHealth")
@@ -1843,6 +1980,34 @@ bool QueryService::ensureM2ModulesInitialized()
     if (!m_m2Initialized) {
         initM2Modules();
     }
+    return true;
+}
+
+bool QueryService::ensureLearningEngineInitialized()
+{
+    if (m_learningEngine) {
+        return true;
+    }
+    if (!ensureStoreOpen() || !m_store.has_value()) {
+        return false;
+    }
+
+    sqlite3* db = m_store->rawDb();
+    if (!db) {
+        return false;
+    }
+
+    m_learningEngine = std::make_unique<LearningEngine>(db, m_dataDir);
+    if (m_learningEngine->initialize()) {
+        LOG_INFO(bsIpc, "Online learning engine initialized (model=%s)",
+                 qUtf8Printable(m_learningEngine->modelVersion()));
+        setLearningSchedulerActive(true);
+    } else {
+        LOG_WARN(bsIpc, "Online learning engine unavailable");
+        setLearningSchedulerActive(false);
+    }
+    refreshLearningHealthCache();
+    refreshRuntimeMirror();
     return true;
 }
 
@@ -2042,8 +2207,10 @@ void QueryService::sendInferenceCancelBestEffort(const QString& cancelToken,
         return;
     }
 
-    std::lock_guard<std::mutex> lock(m_inferenceRpcMutexHealth);
-    if (!ensureInferenceClientConnected(InferenceLane::Health) || !m_inferenceHealthClient) {
+    SocketClient cancelClient;
+    const QString socketPath = ServiceBase::socketPath(QStringLiteral("inference"));
+    if (!cancelClient.connectToServer(socketPath, 200)) {
+        recordInferenceConnected(InferenceLane::Health, false);
         return;
     }
 
@@ -2056,15 +2223,17 @@ void QueryService::sendInferenceCancelBestEffort(const QString& cancelToken,
             QDateTime::currentMSecsSinceEpoch());
     }
 
-    auto response = m_inferenceHealthClient->sendRequest(
+    auto response = cancelClient.sendRequest(
         QStringLiteral("cancel_request"),
         params,
         200);
     if (!response.has_value()
         || response->value(QStringLiteral("type")).toString() == QLatin1String("error")) {
-        m_inferenceHealthClient->disconnect();
         recordInferenceConnected(InferenceLane::Health, false);
+        return;
     }
+
+    recordInferenceConnected(InferenceLane::Health, true);
 }
 
 void QueryService::recordInferenceTimeout(const QString& role)
@@ -2211,8 +2380,8 @@ void QueryService::noteLearningSchedulerOutcome(bool promoted, const QString& re
 QJsonObject QueryService::learningSchedulerSnapshot() const
 {
     QJsonObject scheduler;
-    scheduler[QStringLiteral("enabled")] = m_learningSchedulerTimer.isActive();
-    scheduler[QStringLiteral("intervalMs")] = m_learningSchedulerTimer.interval();
+    scheduler[QStringLiteral("enabled")] = m_learningSchedulerActive.load();
+    scheduler[QStringLiteral("intervalMs")] = m_learningSchedulerIntervalMs;
 
     QJsonObject reasonCounts;
     {
@@ -2258,6 +2427,32 @@ QJsonObject QueryService::cachedLearningHealthSnapshot() const
     return m_learningHealthCache;
 }
 
+void QueryService::setLearningSchedulerActive(bool active)
+{
+    if (m_shuttingDown.load() && active) {
+        return;
+    }
+
+    auto applyState = [this, active]() {
+        if (active) {
+            if (!m_learningSchedulerTimer.isActive()) {
+                m_learningSchedulerTimer.start();
+            }
+            m_learningSchedulerActive.store(m_learningSchedulerTimer.isActive());
+            return;
+        }
+        m_learningSchedulerTimer.stop();
+        m_learningSchedulerActive.store(false);
+    };
+
+    if (QThread::currentThread() == thread()) {
+        applyState();
+        return;
+    }
+
+    QMetaObject::invokeMethod(this, std::move(applyState), Qt::BlockingQueuedConnection);
+}
+
 QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
 {
     const auto readBoolRuntimeSetting = [&](const QString& key, bool defaultValue) -> bool {
@@ -2283,7 +2478,7 @@ QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
         }
         bool ok = false;
         const double parsed = value.value().toDouble(&ok);
-        return ok ? parsed : defaultValue;
+        return ok && std::isfinite(parsed) ? parsed : defaultValue;
     };
     const auto readStringRuntimeSetting = [&](const QString& key,
                                               const QString& defaultValue) -> QString {
@@ -2353,9 +2548,9 @@ QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
     runtimeSettings[QStringLiteral("learningEnabled")] =
         readBoolRuntimeSetting(QStringLiteral("learningEnabled"), false);
     runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
-        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
+        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 350));
     runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(
-        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 120));
+        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 600));
     const int maxFileSizeBytes = std::max(
         1, readIntRuntimeSetting(QStringLiteral("max_file_size"), 50 * 1024 * 1024));
     runtimeSettings[QStringLiteral("maxFileSizeBytes")] = maxFileSizeBytes;
@@ -2396,6 +2591,44 @@ QJsonObject QueryService::buildRuntimeSettingsSnapshot(sqlite3* db) const
     runtimeSettings[QStringLiteral("onlineRankerRolloutMode")] = readStringRuntimeSetting(
         QStringLiteral("onlineRankerRolloutMode"),
         QStringLiteral("instrumentation_only")).toLower();
+    runtimeSettings[QStringLiteral("onlineRankerHealthWindowDays")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("onlineRankerHealthWindowDays"), 7));
+    runtimeSettings[QStringLiteral("onlineRankerRecentCycleHistoryLimit")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("onlineRankerRecentCycleHistoryLimit"), 50));
+    runtimeSettings[QStringLiteral("onlineRankerPromotionGateMinPositives")] = std::max(
+        1, readIntRuntimeSetting(QStringLiteral("onlineRankerPromotionGateMinPositives"), 80));
+    runtimeSettings[QStringLiteral("onlineRankerPromotionMinAttributedRate")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionMinAttributedRate"), 0.5),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionMinContextDigestRate")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionMinContextDigestRate"), 0.1),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionLatencyUsMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionLatencyUsMax"), 2500.0),
+        10.0,
+        1000000.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"), 35.0),
+        0.0,
+        1000.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionPredictionFailureRateMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"), 0.05),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("onlineRankerPromotionSaturationRateMax")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerPromotionSaturationRateMax"), 0.995),
+        0.0,
+        1.0);
+    runtimeSettings[QStringLiteral("onlineRankerBlendAlpha")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerBlendAlpha"), 0.15), 0.0, 1.0);
+    runtimeSettings[QStringLiteral("onlineRankerNegativeSampleRatio")] = std::clamp(
+        readDoubleRuntimeSetting(QStringLiteral("onlineRankerNegativeSampleRatio"), 3.0), 0.0, 10.0);
+    runtimeSettings[QStringLiteral("onlineRankerMinExamples")] = std::max(
+        40, readIntRuntimeSetting(QStringLiteral("onlineRankerMinExamples"), 60));
+    runtimeSettings[QStringLiteral("onlineRankerMaxTrainingBatchSize")] = std::max(
+        60, readIntRuntimeSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"), 1200));
     return runtimeSettings;
 }
 
@@ -2409,8 +2642,16 @@ QJsonArray QueryService::buildModelManifestSnapshot(const QString& modelsDirReso
         return modelManifest;
     }
 
-    ModelRegistry registry(modelsDirResolved);
-    const auto& manifest = registry.manifest();
+    std::unique_ptr<ModelRegistry> snapshotRegistry;
+    const ModelManifest* manifestPtr = nullptr;
+    if (m_modelRegistry
+        && QDir::cleanPath(m_modelRegistry->modelsDir()) == QDir::cleanPath(modelsDirResolved)) {
+        manifestPtr = &m_modelRegistry->manifest();
+    } else {
+        snapshotRegistry = std::make_unique<ModelRegistry>(modelsDirResolved);
+        manifestPtr = &snapshotRegistry->manifest();
+    }
+    const ModelManifest& manifest = *manifestPtr;
     if (manifest.models.empty()) {
         return modelManifest;
     }
@@ -2640,7 +2881,12 @@ QJsonObject QueryService::buildLocalHealthSnapshotFromDiagnostics(sqlite3* diagn
 
     QStringList missingRoles;
     bool requiredModelInventoryReady = false;
-    if (!runtimeMirror.modelsDirResolved.isEmpty()) {
+    if (m_modelRegistry
+        && QDir::cleanPath(m_modelRegistry->modelsDir())
+               == QDir::cleanPath(runtimeMirror.modelsDirResolved)) {
+        requiredModelInventoryReady =
+            m_modelRegistry->hasRequiredProductionRoles(&missingRoles);
+    } else if (!runtimeMirror.modelsDirResolved.isEmpty()) {
         ModelRegistry manifestRegistry(runtimeMirror.modelsDirResolved);
         requiredModelInventoryReady =
             manifestRegistry.hasRequiredProductionRoles(&missingRoles);
@@ -3081,6 +3327,42 @@ void QueryService::initM2Modules()
     m_vectorStore = std::make_unique<VectorStore>(db);
     refreshVectorGenerationState();
 
+    const auto readBoolSetting = [&](const QString& key, bool defaultValue) {
+        if (!m_store.has_value()) {
+            return defaultValue;
+        }
+        const auto raw = m_store->getSetting(key);
+        if (!raw.has_value() || raw->trimmed().isEmpty()) {
+            return defaultValue;
+        }
+        return envFlagEnabled(raw.value());
+    };
+    const bool embeddingEnabled = readBoolSetting(QStringLiteral("embeddingEnabled"), true);
+    const bool inferenceServiceEnabled =
+        readBoolSetting(QStringLiteral("inferenceServiceEnabled"), true);
+    const bool inferenceEmbedOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    const bool inferenceRerankOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    const bool inferenceQaOffloadEnabled =
+        readBoolSetting(QStringLiteral("inferenceQaOffloadEnabled"), true);
+    const bool inferenceShadowModeEnabled =
+        readBoolSetting(QStringLiteral("inferenceShadowModeEnabled"), false);
+    const bool fastEmbeddingEnabled =
+        readBoolSetting(QStringLiteral("fastEmbeddingEnabled"), true);
+    const bool dualEmbeddingFusionEnabled =
+        readBoolSetting(QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    const bool personalizedLtrEnabled =
+        readBoolSetting(QStringLiteral("personalizedLtrEnabled"), true);
+    const bool localEmbeddingNeeded =
+        embeddingEnabled
+        && (!inferenceServiceEnabled || !inferenceEmbedOffloadEnabled || inferenceShadowModeEnabled);
+    const bool localRerankerNeeded =
+        embeddingEnabled
+        && (!inferenceServiceEnabled || !inferenceRerankOffloadEnabled || inferenceShadowModeEnabled);
+    const bool localQaNeeded =
+        !inferenceServiceEnabled || !inferenceQaOffloadEnabled || inferenceShadowModeEnabled;
+
     const QString modelsDir = ModelRegistry::resolveModelsDir();
     if (!modelsDir.isEmpty()) {
         m_modelRegistry = std::make_unique<ModelRegistry>(modelsDir);
@@ -3102,11 +3384,15 @@ void QueryService::initM2Modules()
 
     bool embeddingAvailable = false;
     bool fastEmbeddingAvailable = false;
-    if (m_modelRegistry && m_modelRegistry->hasModel("bi-encoder")) {
+    if (localEmbeddingNeeded && m_modelRegistry && m_modelRegistry->hasModel("bi-encoder")) {
         m_embeddingManager = std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder");
     }
     if (!m_embeddingManager || !m_embeddingManager->initialize()) {
-        LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
+        if (localEmbeddingNeeded) {
+            LOG_WARN(bsIpc, "EmbeddingManager unavailable, semantic search disabled");
+        } else if (embeddingEnabled) {
+            LOG_INFO(bsIpc, "EmbeddingManager local initialization deferred; inference offload active");
+        }
     } else {
         embeddingAvailable = true;
         m_targetVectorGeneration = m_embeddingManager->activeGenerationId().isEmpty()
@@ -3117,12 +3403,18 @@ void QueryService::initM2Modules()
         m_activeVectorDimensions = std::max(m_embeddingManager->embeddingDimensions(), 1);
         LOG_INFO(bsIpc, "EmbeddingManager initialized");
     }
-    if (m_modelRegistry && m_modelRegistry->hasModel("bi-encoder-fast")) {
+    if (localEmbeddingNeeded
+        && fastEmbeddingEnabled
+        && dualEmbeddingFusionEnabled
+        && m_modelRegistry
+        && m_modelRegistry->hasModel("bi-encoder-fast")) {
         m_fastEmbeddingManager =
             std::make_unique<EmbeddingManager>(m_modelRegistry.get(), "bi-encoder-fast");
     }
     if (!m_fastEmbeddingManager || !m_fastEmbeddingManager->initialize()) {
-        LOG_WARN(bsIpc, "Fast EmbeddingManager unavailable, dual-index retrieval disabled");
+        if (localEmbeddingNeeded && fastEmbeddingEnabled && dualEmbeddingFusionEnabled) {
+            LOG_WARN(bsIpc, "Fast EmbeddingManager unavailable, dual-index retrieval disabled");
+        }
     } else {
         fastEmbeddingAvailable = true;
         if (!m_fastEmbeddingManager->activeGenerationId().isEmpty()) {
@@ -3224,55 +3516,53 @@ void QueryService::initM2Modules()
         m_fastVectorIndex = std::move(loadedFastVectorIndex);
     }
 
-    if (m_modelRegistry && m_modelRegistry->hasModel("cross-encoder-fast")) {
+    if (localRerankerNeeded && m_modelRegistry && m_modelRegistry->hasModel("cross-encoder-fast")) {
         m_fastCrossEncoderReranker =
             std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder-fast");
     }
     if (m_fastCrossEncoderReranker && m_fastCrossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Fast cross-encoder reranker initialized");
     } else {
-        LOG_WARN(bsIpc, "Fast cross-encoder reranker unavailable");
+        if (localRerankerNeeded) {
+            LOG_WARN(bsIpc, "Fast cross-encoder reranker unavailable");
+        }
     }
 
-    if (m_modelRegistry && m_modelRegistry->hasModel("cross-encoder")) {
+    if (localRerankerNeeded && m_modelRegistry && m_modelRegistry->hasModel("cross-encoder")) {
         m_crossEncoderReranker =
             std::make_unique<CrossEncoderReranker>(m_modelRegistry.get(), "cross-encoder");
     }
     if (m_crossEncoderReranker && m_crossEncoderReranker->initialize()) {
         LOG_INFO(bsIpc, "Cross-encoder reranker initialized");
     } else {
-        LOG_WARN(bsIpc, "Cross-encoder reranker not available — skipping reranking");
-    }
-
-    m_personalizedLtr = std::make_unique<PersonalizedLtr>(
-        m_dataDir + QStringLiteral("/ltr_model.json"));
-    if (m_personalizedLtr->initialize(db)) {
-        LOG_INFO(bsIpc, "Personalized LTR initialized: %s",
-                 qUtf8Printable(m_personalizedLtr->modelVersion()));
-    } else {
-        LOG_WARN(bsIpc, "Personalized LTR unavailable (cold start)");
-    }
-
-    m_learningEngine = std::make_unique<LearningEngine>(db, m_dataDir);
-    if (m_learningEngine->initialize()) {
-        LOG_INFO(bsIpc, "Online learning engine initialized (model=%s)",
-                 qUtf8Printable(m_learningEngine->modelVersion()));
-        if (!m_learningSchedulerTimer.isActive()) {
-            m_learningSchedulerTimer.start();
+        if (localRerankerNeeded) {
+            LOG_WARN(bsIpc, "Cross-encoder reranker not available; skipping local reranking");
+        } else if (embeddingEnabled) {
+            LOG_INFO(bsIpc, "Cross-encoder local initialization deferred; inference offload active");
         }
-    } else {
-        LOG_WARN(bsIpc, "Online learning engine unavailable");
-        m_learningSchedulerTimer.stop();
     }
 
-    if (m_modelRegistry && m_modelRegistry->hasModel("qa-extractive")) {
+    if (personalizedLtrEnabled) {
+        m_personalizedLtr = std::make_unique<PersonalizedLtr>(
+            m_dataDir + QStringLiteral("/ltr_model.json"));
+        if (m_personalizedLtr->initialize(db)) {
+            LOG_INFO(bsIpc, "Personalized LTR initialized: %s",
+                     qUtf8Printable(m_personalizedLtr->modelVersion()));
+        } else {
+            LOG_WARN(bsIpc, "Personalized LTR unavailable (cold start)");
+        }
+    }
+
+    if (localQaNeeded && m_modelRegistry && m_modelRegistry->hasModel("qa-extractive")) {
         m_qaExtractiveModel =
             std::make_unique<QaExtractiveModel>(m_modelRegistry.get(), "qa-extractive");
     }
     if (m_qaExtractiveModel && m_qaExtractiveModel->initialize()) {
         LOG_INFO(bsIpc, "QA extractive model initialized");
     } else {
-        LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
+        if (localQaNeeded) {
+            LOG_WARN(bsIpc, "QA extractive model unavailable (fallback preview mode)");
+        }
     }
     refreshLearningHealthCache();
     refreshRuntimeMirror();
@@ -3284,12 +3574,25 @@ void QueryService::initBsignoreWatch()
         m_bsignorePath = QDir::homePath() + QStringLiteral("/.bsignore");
     }
 
+    QTimer* reloadDebounceTimer =
+        this->findChild<QTimer*>(QString::fromLatin1(kBsignoreReloadDebounceTimerName));
+    if (!reloadDebounceTimer) {
+        reloadDebounceTimer = new QTimer(this);
+        reloadDebounceTimer->setObjectName(QString::fromLatin1(kBsignoreReloadDebounceTimerName));
+        reloadDebounceTimer->setSingleShot(true);
+        connect(reloadDebounceTimer, &QTimer::timeout, this, [this]() { reloadBsignore(); });
+    }
+
     if (!m_bsignoreWatcher) {
         m_bsignoreWatcher = std::make_unique<QFileSystemWatcher>(this);
         connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::fileChanged,
-                this, [this](const QString&) { reloadBsignore(); });
+                this, [reloadDebounceTimer](const QString&) {
+                    reloadDebounceTimer->start(kBsignoreReloadDebounceMs);
+                });
         connect(m_bsignoreWatcher.get(), &QFileSystemWatcher::directoryChanged,
-                this, [this](const QString&) { reloadBsignore(); });
+                this, [reloadDebounceTimer](const QString&) {
+                    reloadDebounceTimer->start(kBsignoreReloadDebounceMs);
+                });
     }
 
     reloadBsignore();
@@ -3301,17 +3604,8 @@ void QueryService::reloadBsignore()
         return;
     }
 
-    m_bsignoreLastLoadedAtMs = QDateTime::currentMSecsSinceEpoch();
-    m_queryCache.clear();
     const QFileInfo bsignoreInfo(m_bsignorePath);
-    if (bsignoreInfo.exists()) {
-        m_bsignoreLoaded = m_bsignoreParser.loadFromFile(m_bsignorePath.toStdString());
-    } else {
-        m_bsignoreParser.clear();
-        m_bsignoreLoaded = false;
-    }
-    m_bsignorePatternCount = static_cast<int>(m_bsignoreParser.patterns().size());
-
+    const QByteArray fileSignature = bsignoreFileSignature(m_bsignorePath);
     if (m_bsignoreWatcher) {
         if (!m_bsignoreWatcher->files().isEmpty()) {
             m_bsignoreWatcher->removePaths(m_bsignoreWatcher->files());
@@ -3320,14 +3614,46 @@ void QueryService::reloadBsignore()
             m_bsignoreWatcher->removePaths(m_bsignoreWatcher->directories());
         }
 
-        const QString parentDir = bsignoreInfo.absoluteDir().absolutePath();
-        if (QFileInfo::exists(parentDir)) {
-            m_bsignoreWatcher->addPath(parentDir);
-        }
-        if (bsignoreInfo.exists()) {
+        if (bsignoreInfo.exists() && bsignoreInfo.isFile()) {
             m_bsignoreWatcher->addPath(m_bsignorePath);
+        } else {
+            const QString parentDir = bsignoreInfo.absoluteDir().absolutePath();
+            if (QFileInfo::exists(parentDir)) {
+                m_bsignoreWatcher->addPath(parentDir);
+            }
         }
     }
+
+    if (!m_bsignoreFileSignature.isEmpty()
+        && fileSignature == m_bsignoreFileSignature) {
+        return;
+    }
+
+    BsignoreParser nextParser;
+    bool nextLoaded = false;
+    if (bsignoreInfo.exists() && bsignoreInfo.isFile()) {
+        nextLoaded = nextParser.loadFromFile(m_bsignorePath.toStdString());
+    } else {
+        nextParser.clear();
+        nextLoaded = false;
+    }
+    const int nextPatternCount = static_cast<int>(nextParser.patterns().size());
+    const QByteArray nextEffectiveSignature = bsignoreEffectiveSignature(
+        bsignoreInfo.exists() && bsignoreInfo.isFile(), nextLoaded, nextParser.patterns());
+    const QByteArray previousEffectiveSignature = m_bsignoreEffectiveSignature;
+    m_bsignoreFileSignature = fileSignature;
+    m_bsignoreEffectiveSignature = nextEffectiveSignature;
+
+    if (!previousEffectiveSignature.isEmpty()
+        && nextEffectiveSignature == previousEffectiveSignature) {
+        return;
+    }
+
+    m_bsignoreLastLoadedAtMs = QDateTime::currentMSecsSinceEpoch();
+    m_queryCache.clear();
+    m_bsignoreParser = std::move(nextParser);
+    m_bsignoreLoaded = nextLoaded;
+    m_bsignorePatternCount = nextPatternCount;
     refreshRuntimeMirror();
 }
 
@@ -3342,9 +3668,11 @@ bool QueryService::isExcludedByBsignore(const QString& absolutePath) const
 QJsonObject QueryService::bsignoreStatusJson() const
 {
     QJsonObject status;
+    const QFileInfo info(m_bsignorePath);
+    const bool fileExists = info.exists() && info.isFile();
     status[QStringLiteral("path")] = m_bsignorePath;
-    status[QStringLiteral("fileExists")] = QFileInfo::exists(m_bsignorePath);
-    status[QStringLiteral("loaded")] = m_bsignoreLoaded;
+    status[QStringLiteral("fileExists")] = fileExists;
+    status[QStringLiteral("loaded")] = fileExists && m_bsignoreLoaded;
     status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
     status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;
     status[QStringLiteral("lastLoadedAt")] = m_bsignoreLastLoadedAtMs > 0
@@ -3359,26 +3687,54 @@ QJsonObject QueryService::processStatsForService(const QString& serviceName) con
     stats[QStringLiteral("service")] = serviceName;
     stats[QStringLiteral("available")] = false;
 
-    const QString pidPath = QStringLiteral("/tmp/betterspotlight-%1/%2.pid")
-        .arg(getuid()).arg(serviceName);
-    QFile pidFile(pidPath);
-    if (!pidFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return stats;
-    }
+    qint64 pid = -1;
+    if (serviceName == QLatin1String("query")) {
+        pid = static_cast<qint64>(getpid());
+        if (const std::optional<qint64> rssKb = currentProcessResidentSetKb();
+            rssKb.has_value()) {
+            stats[QStringLiteral("available")] = true;
+            stats[QStringLiteral("pid")] = pid;
+            stats[QStringLiteral("rssKb")] = rssKb.value();
+            stats[QStringLiteral("cpuPct")] = 0.0;
+            return stats;
+        }
+    } else {
+        QFile pidFile(ServiceBase::pidPath(serviceName));
+        if (!pidFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return stats;
+        }
 
-    bool ok = false;
-    const qint64 pid = pidFile.readAll().trimmed().toLongLong(&ok);
-    if (!ok || pid <= 0) {
-        return stats;
+        bool ok = false;
+        pid = pidFile.readAll().trimmed().toLongLong(&ok);
+        if (!ok || pid <= 0) {
+            return stats;
+        }
     }
 
     QProcess ps;
-    ps.start(QStringLiteral("ps"), {
+    ps.setProgram(QStringLiteral("ps"));
+    ps.setArguments({
         QStringLiteral("-o"), QStringLiteral("rss="),
         QStringLiteral("-o"), QStringLiteral("%cpu="),
         QStringLiteral("-p"), QString::number(pid),
     });
-    if (!ps.waitForFinished(1000) || ps.exitStatus() != QProcess::NormalExit || ps.exitCode() != 0) {
+    ps.start();
+    if (!ps.waitForStarted(250)) {
+        if (ps.state() != QProcess::NotRunning) {
+            ps.kill();
+            ps.waitForFinished(1500);
+        }
+        return stats;
+    }
+    if (!ps.waitForFinished(500)) {
+        ps.kill();
+        if (!ps.waitForFinished(1500)) {
+            ps.terminate();
+            ps.waitForFinished(500);
+        }
+        return stats;
+    }
+    if (ps.exitStatus() != QProcess::NormalExit || ps.exitCode() != 0) {
         return stats;
     }
 
@@ -3424,9 +3780,6 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
     if (!ensureM2ModulesInitialized()) {
         return IpcMessage::makeError(id, IpcErrorCode::ServiceUnavailable,
                                      QStringLiteral("Database is not available"));
-    }
-    if (m_learningEngine) {
-        m_learningEngine->noteUserActivity();
     }
 
     // Parse query
@@ -3743,7 +4096,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         }
         bool ok = false;
         const double parsed = raw->toDouble(&ok);
-        return ok ? parsed : defaultValue;
+        return ok && std::isfinite(parsed) ? parsed : defaultValue;
     };
     const auto readStringSetting = [&](const QString& key, const QString& defaultValue) {
         if (!m_store.has_value()) {
@@ -3775,13 +4128,19 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         readBoolSetting(QStringLiteral("dualEmbeddingFusionEnabled"), true);
     const int strongEmbeddingTopK = std::max(1, readIntSetting(QStringLiteral("strongEmbeddingTopK"), 40));
     const int fastEmbeddingTopK = std::max(1, readIntSetting(QStringLiteral("fastEmbeddingTopK"), 60));
-    const int semanticBudgetMs = std::max(20, readIntSetting(QStringLiteral("semanticBudgetMs"), 70));
+    const int semanticBudgetMs = std::max(20, readIntSetting(QStringLiteral("semanticBudgetMs"), 350));
     const bool rerankerCascadeEnabled = readBoolSetting(QStringLiteral("rerankerCascadeEnabled"), true);
-    const int rerankBudgetMs = std::max(40, readIntSetting(QStringLiteral("rerankBudgetMs"), 120));
+    const int rerankBudgetMs = std::max(40, readIntSetting(QStringLiteral("rerankBudgetMs"), 600));
     const int rerankerStage1Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage1Max"), 40));
     const int rerankerStage2Max = std::max(4, readIntSetting(QStringLiteral("rerankerStage2Max"), 12));
     const bool personalizedLtrEnabled = readBoolSetting(QStringLiteral("personalizedLtrEnabled"), true);
     const bool learningEnabled = readBoolSetting(QStringLiteral("learningEnabled"), false);
+    if (learningEnabled) {
+        ensureLearningEngineInitialized();
+    }
+    if (m_learningEngine) {
+        m_learningEngine->noteUserActivity();
+    }
     QString onlineRankerRolloutMode = readStringSetting(
         QStringLiteral("onlineRankerRolloutMode"),
         QStringLiteral("instrumentation_only")).toLower();
@@ -3891,6 +4250,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         1, readIntSetting(QStringLiteral("rerankerFallbackCapElapsed180"), 12));
     const int rerankerFallbackBudgetCap = std::max(
         1, readIntSetting(QStringLiteral("rerankerFallbackBudgetCap"), 8));
+    const int localRerankerStage1Max = std::max(
+        0, readIntSetting(QStringLiteral("localRerankerStage1Max"), 0));
+    const int localRerankerStage2Max = std::max(
+        0, readIntSetting(QStringLiteral("localRerankerStage2Max"), 0));
 
     const QString queryLower = query.toLower();
     const QueryHints queryHints = parseQueryHints(queryLower);
@@ -4597,15 +4960,6 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         std::unordered_map<int64_t, double> combinedSemanticByItemId;
         combinedSemanticByItemId.reserve(128);
 
-        const auto parseEmbeddingVector = [](const QJsonArray& values) {
-            std::vector<float> out;
-            out.reserve(static_cast<size_t>(values.size()));
-            for (const QJsonValue& value : values) {
-                out.push_back(static_cast<float>(value.toDouble(0.0)));
-            }
-            return out;
-        };
-
         auto accumulateSemantic = [&](const QString& role,
                                       EmbeddingManager* manager,
                                       VectorIndex* index,
@@ -4646,9 +5000,23 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                         .toObject()
                         .value(QStringLiteral("embedding"))
                         .toArray();
-                    queryVec = parseEmbeddingVector(embeddingArray);
+                    QString embeddingParseFailureReason;
+                    std::optional<std::vector<float>> parsedEmbedding =
+                        query_embedding::parseEmbeddingVector(embeddingArray,
+                                                              index->dimensions(),
+                                                              &embeddingParseFailureReason);
+                    if (parsedEmbedding.has_value()) {
+                        queryVec = std::move(*parsedEmbedding);
+                    } else {
+                        recordInferenceFallback(role);
+                        LOG_WARN(bsIpc,
+                                 "Ignoring malformed inference embedding for %s: %s",
+                                 qUtf8Printable(role),
+                                 qUtf8Printable(embeddingParseFailureReason));
+                    }
                 }
-            } else if (manager && manager->isAvailable()) {
+            }
+            if (queryVec.empty() && manager && manager->isAvailable()) {
                 queryVec = manager->embedQuery(query);
             }
             if (queryVec.empty()) {
@@ -4922,22 +5290,26 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             .toObject()
             .value(QStringLiteral("scores"))
             .toArray();
-        QHash<qint64, float> scoreByItemId;
-        for (const QJsonValue& scoreValue : scores) {
-            const QJsonObject scoreObject = scoreValue.toObject();
-            scoreByItemId.insert(
-                scoreObject.value(QStringLiteral("itemId")).toInteger(),
-                static_cast<float>(scoreObject.value(QStringLiteral("score")).toDouble(0.0)));
+        QString scoreParseFailureReason;
+        const std::optional<QHash<qint64, float>> scoreByItemId =
+            query_rerank::parseRerankScores(scores, &scoreParseFailureReason);
+        if (!scoreByItemId.has_value()) {
+            recordInferenceFallback(roleForMetrics);
+            LOG_WARN(bsIpc,
+                     "Ignoring malformed inference rerank scores from %s: %s",
+                     qUtf8Printable(method),
+                     qUtf8Printable(scoreParseFailureReason));
+            return;
         }
 
         int boosted = 0;
         for (int i = 0; i < stageDepthOut; ++i) {
             SearchResult& result = results[static_cast<size_t>(i)];
-            if (!scoreByItemId.contains(result.itemId)) {
+            if (!scoreByItemId->contains(result.itemId)) {
                 continue;
             }
 
-            const float score = scoreByItemId.value(result.itemId);
+            const float score = scoreByItemId->value(result.itemId);
             result.crossEncoderScore = score;
             if (score >= minScoreThreshold) {
                 const double boost = static_cast<double>(weight) * static_cast<double>(score);
@@ -4973,6 +5345,20 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
 
     // Cross-encoder reranking (soft boost, before M2 boosts)
     const int elapsedBeforeRerankMs = static_cast<int>(timer.elapsed());
+    const auto capLocalRerankDepth = [&](int requested, int localLimit) {
+        int cap = std::min(requested, localLimit);
+        if (elapsedBeforeRerankMs >= rerankerFallbackElapsed180Ms) {
+            cap = std::min(cap, rerankerFallbackCapElapsed180);
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed130Ms) {
+            cap = std::min(cap, rerankerFallbackCapElapsed130);
+        } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed80Ms) {
+            cap = std::min(cap, rerankerFallbackCapElapsed80);
+        }
+        if (elapsedBeforeRerankMs >= rerankBudgetMs) {
+            cap = std::min(cap, rerankerFallbackBudgetCap);
+        }
+        return std::max(0, cap);
+    };
     if (inferenceRerankOffloadActive && rerankerCascadeEnabled) {
         const float stage1Weight = static_cast<float>(std::max(
             rerankerStage1MinWeight,
@@ -5040,8 +5426,10 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
             || (m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()))) {
         RerankerCascadeConfig cascadeConfig;
         cascadeConfig.enabled = true;
-        cascadeConfig.stage1MaxCandidates = rerankerStage1Max;
-        cascadeConfig.stage2MaxCandidates = rerankerStage2Max;
+        cascadeConfig.stage1MaxCandidates =
+            capLocalRerankDepth(rerankerStage1Max, localRerankerStage1Max);
+        cascadeConfig.stage2MaxCandidates =
+            capLocalRerankDepth(rerankerStage2Max, localRerankerStage2Max);
         cascadeConfig.rerankBudgetMs = rerankBudgetMs;
         cascadeConfig.stage1Weight = static_cast<float>(std::max(
             rerankerStage1MinWeight,
@@ -5067,13 +5455,13 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                && m_crossEncoderReranker && m_crossEncoderReranker->isAvailable()) {
         RerankerConfig rerankerConfig;
         rerankerConfig.weight = m_scorer.weights().crossEncoderWeight;
-        int rerankCap = rerankerFallbackCapDefault;
+        int rerankCap = capLocalRerankDepth(rerankerFallbackCapDefault, localRerankerStage1Max);
         if (elapsedBeforeRerankMs >= rerankerFallbackElapsed180Ms) {
-            rerankCap = rerankerFallbackCapElapsed180;
+            rerankCap = std::min(rerankCap, rerankerFallbackCapElapsed180);
         } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed130Ms) {
-            rerankCap = rerankerFallbackCapElapsed130;
+            rerankCap = std::min(rerankCap, rerankerFallbackCapElapsed130);
         } else if (elapsedBeforeRerankMs >= rerankerFallbackElapsed80Ms) {
-            rerankCap = rerankerFallbackCapElapsed80;
+            rerankCap = std::min(rerankCap, rerankerFallbackCapElapsed80);
         }
         rerankerConfig.maxCandidates = std::min(static_cast<int>(results.size()), rerankCap);
         rerankDepthApplied = rerankerConfig.maxCandidates;
@@ -5101,7 +5489,7 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
                         ok = true;
                     }
                 }
-                if (ok) {
+                if (ok && std::isfinite(modAt)) {
                     if (modAt >= structured.temporal->startEpoch &&
                         modAt <= structured.temporal->endEpoch) {
                         sqBoost += static_cast<double>(weights.temporalBoostWeight);
@@ -5497,6 +5885,8 @@ QJsonObject QueryService::handleSearch(uint64_t id, const QJsonObject& params)
         debugInfo[QStringLiteral("rerankerCascadeEnabled")] = rerankerCascadeEnabled;
         debugInfo[QStringLiteral("rerankerStage1Max")] = rerankerStage1Max;
         debugInfo[QStringLiteral("rerankerStage2Max")] = rerankerStage2Max;
+        debugInfo[QStringLiteral("localRerankerStage1Max")] = localRerankerStage1Max;
+        debugInfo[QStringLiteral("localRerankerStage2Max")] = localRerankerStage2Max;
         debugInfo[QStringLiteral("personalizedLtrEnabled")] = personalizedLtrEnabled;
         debugInfo[QStringLiteral("learningEnabled")] = learningEnabled;
         debugInfo[QStringLiteral("onlineRankerRolloutMode")] = onlineRankerRolloutMode;
@@ -6155,8 +6545,16 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
 
     if (localCache.indexHealth.isEmpty()) {
         resolveDataPathsIfNeeded();
-        if (!m_dbPath.isEmpty() && QFileInfo::exists(m_dbPath)) {
-            return QJsonObject();
+        const bool diagnosticsDbExists =
+            !m_dbPath.isEmpty() && QFileInfo::exists(m_dbPath);
+        QString overallStatus = QStringLiteral("rebuilding");
+        QString unavailableReason = QStringLiteral("rebuilding");
+        if (diagnosticsDbExists && localSnapshotState == QLatin1String("refreshing")) {
+            overallStatus = QStringLiteral("degraded");
+            unavailableReason = QStringLiteral("health_snapshot_refreshing");
+        } else if (diagnosticsDbExists) {
+            overallStatus = QStringLiteral("degraded");
+            unavailableReason = QStringLiteral("health_snapshot_cold_start");
         }
 
         QJsonObject peerProbeStateByService;
@@ -6167,9 +6565,8 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
         peerProbeTimeMsByService[QStringLiteral("inference")] = inferenceCache.snapshotTimeMs;
 
         QJsonObject indexHealth;
-        indexHealth[QStringLiteral("overallStatus")] = QStringLiteral("degraded");
-        indexHealth[QStringLiteral("healthStatusReason")] =
-            QStringLiteral("health_snapshot_unavailable");
+        indexHealth[QStringLiteral("overallStatus")] = overallStatus;
+        indexHealth[QStringLiteral("healthStatusReason")] = unavailableReason;
         indexHealth[QStringLiteral("queryHealthSnapshotState")] = localSnapshotState;
         indexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] = localCache.snapshotTimeMs;
         indexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
@@ -6424,19 +6821,107 @@ QJsonObject QueryService::buildMergedHealthResult(bool includeIndexerQueueProbe)
     return result;
 }
 
+QJsonObject QueryService::buildUnavailableHealthSnapshotFallback()
+{
+    LocalHealthSnapshotCache localCache;
+    {
+        std::lock_guard<std::mutex> lock(m_diagnosticsMutex);
+        localCache = m_localHealthSnapshotCache;
+    }
+
+    PeerProbeCache indexerCache;
+    PeerProbeCache inferenceCache;
+    {
+        std::lock_guard<std::mutex> lock(m_peerProbeMutex);
+        indexerCache = m_indexerPeerCache;
+        inferenceCache = m_inferencePeerCache;
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    const QString localSnapshotState = snapshotStateForCache(localCache.snapshotTimeMs,
+                                                             localCache.state,
+                                                             localCache.refreshInFlight,
+                                                             kLocalHealthSnapshotTtlMs);
+    const QJsonObject cachedInferenceHealth = inferenceHealthSnapshot();
+
+    resolveDataPathsIfNeeded();
+    const bool diagnosticsDbExists =
+        !m_dbPath.isEmpty() && QFileInfo::exists(m_dbPath);
+    QString overallStatus = QStringLiteral("rebuilding");
+    QString unavailableReason = QStringLiteral("rebuilding");
+    if (diagnosticsDbExists && localSnapshotState == QLatin1String("refreshing")) {
+        overallStatus = QStringLiteral("degraded");
+        unavailableReason = QStringLiteral("health_snapshot_refreshing");
+    } else if (diagnosticsDbExists) {
+        overallStatus = QStringLiteral("degraded");
+        unavailableReason = QStringLiteral("health_snapshot_cold_start");
+    }
+
+    QJsonObject peerProbeStateByService;
+    peerProbeStateByService[QStringLiteral("indexer")] = indexerCache.state;
+    peerProbeStateByService[QStringLiteral("inference")] = inferenceCache.state;
+    QJsonObject peerProbeTimeMsByService;
+    peerProbeTimeMsByService[QStringLiteral("indexer")] = indexerCache.snapshotTimeMs;
+    peerProbeTimeMsByService[QStringLiteral("inference")] = inferenceCache.snapshotTimeMs;
+
+    QJsonObject indexHealth;
+    indexHealth[QStringLiteral("overallStatus")] = overallStatus;
+    indexHealth[QStringLiteral("healthStatusReason")] = unavailableReason;
+    indexHealth[QStringLiteral("queryHealthSnapshotState")] = localSnapshotState;
+    indexHealth[QStringLiteral("queryHealthSnapshotTimeMs")] = localCache.snapshotTimeMs;
+    indexHealth[QStringLiteral("queryHealthSnapshotLagMs")] =
+        localCache.snapshotTimeMs > 0 ? (nowMs - localCache.snapshotTimeMs) : -1;
+    indexHealth[QStringLiteral("peerProbeStateByService")] = peerProbeStateByService;
+    indexHealth[QStringLiteral("peerProbeTimeMsByService")] = peerProbeTimeMsByService;
+    indexHealth[QStringLiteral("queueSource")] = QStringLiteral("unavailable");
+    indexHealth[QStringLiteral("peerDataState")] = indexerCache.state;
+    indexHealth[QStringLiteral("inferenceServiceConnected")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    indexHealth[QStringLiteral("inferenceRoleStatusByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStatusByModel")).toObject();
+    indexHealth[QStringLiteral("inferenceRoleStateReasonByModel")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceRoleStateReasonByModel")).toObject();
+    indexHealth[QStringLiteral("inferenceTransportConnectedByLane")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceTransportConnectedByLane")).toObject();
+    indexHealth[QStringLiteral("snapshotId")] = QStringLiteral("%1:%2")
+        .arg(qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID"),
+             QString::number(nowMs));
+    indexHealth[QStringLiteral("snapshotTimeMs")] = nowMs;
+    indexHealth[QStringLiteral("stalenessMs")] = static_cast<qint64>(0);
+    indexHealth[QStringLiteral("instanceId")] =
+        qEnvironmentVariable("BETTERSPOTLIGHT_INSTANCE_ID");
+    indexHealth[QStringLiteral("snapshotVersion")] = 2;
+
+    QJsonObject serviceHealth;
+    serviceHealth[QStringLiteral("indexerRunning")] = !indexerCache.payload.isEmpty();
+    serviceHealth[QStringLiteral("extractorRunning")] = true;
+    serviceHealth[QStringLiteral("queryServiceRunning")] = true;
+    serviceHealth[QStringLiteral("inferenceServiceRunning")] =
+        cachedInferenceHealth.value(QStringLiteral("inferenceServiceConnected")).toBool(false);
+    serviceHealth[QStringLiteral("uptime")] = 0;
+
+    QJsonObject result;
+    result[QStringLiteral("indexHealth")] = indexHealth;
+    result[QStringLiteral("serviceHealth")] = serviceHealth;
+    result[QStringLiteral("issues")] = QJsonArray();
+    result[QStringLiteral("snapshotVersion")] = 2;
+    return result;
+}
+
 QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndexerQueueProbe)
 {
     requestDiagnosticsSummaryRefresh(false);
     schedulePeerProbeRefresh(includeIndexerQueueProbe);
+    if (includeIndexerQueueProbe) {
+        refreshInferencePeerProbeDirect(100, 300);
+    }
 
     const QJsonObject mergedResult = buildMergedHealthResult(includeIndexerQueueProbe);
     if (!mergedResult.isEmpty()) {
         return IpcMessage::makeResponse(id, mergedResult);
     }
 
-    return IpcMessage::makeError(id,
-                                 IpcErrorCode::ServiceUnavailable,
-                                 QStringLiteral("Health snapshot is unavailable"));
+    return IpcMessage::makeResponse(id, buildUnavailableHealthSnapshotFallback());
 
 #if 0
     {
@@ -7123,7 +7608,7 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
         }
         bool ok = false;
         const double parsed = value.value().toDouble(&ok);
-        return ok ? parsed : defaultValue;
+        return ok && std::isfinite(parsed) ? parsed : defaultValue;
     };
     const auto readStringRuntimeSetting = [&](const QString& key,
                                               const QString& defaultValue) -> QString {
@@ -7241,9 +7726,9 @@ QJsonObject QueryService::handleGetHealthInternal(uint64_t id, bool includeIndex
     runtimeSettings[QStringLiteral("onlineRankerMaxTrainingBatchSize")] = std::max(
         60, readIntRuntimeSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"), 1200));
     runtimeSettings[QStringLiteral("semanticBudgetMs")] = std::max(
-        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 70));
+        20, readIntRuntimeSetting(QStringLiteral("semanticBudgetMs"), 350));
     runtimeSettings[QStringLiteral("rerankBudgetMs")] = std::max(
-        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 120));
+        40, readIntRuntimeSetting(QStringLiteral("rerankBudgetMs"), 600));
     const int maxFileSizeBytes = std::max(
         1, readIntRuntimeSetting(QStringLiteral("max_file_size"), 50 * 1024 * 1024));
     runtimeSettings[QStringLiteral("maxFileSizeBytes")] = maxFileSizeBytes;
@@ -7920,9 +8405,7 @@ QJsonObject QueryService::handleGetHealthDetails(uint64_t id, const QJsonObject&
 
     QJsonObject result = buildMergedHealthResult(/*includeIndexerQueueProbe=*/true);
     if (result.isEmpty()) {
-        return IpcMessage::makeError(id,
-                                     IpcErrorCode::ServiceUnavailable,
-                                     QStringLiteral("Health snapshot is unavailable"));
+        result = buildUnavailableHealthSnapshotFallback();
     }
 
     const QString cacheKey = healthDetailsCacheKey(limit, offset);

@@ -1,4 +1,5 @@
 #include "inference_service.h"
+#include "inference_payload_utils.h"
 #include "inference_supervisor_actor.h"
 #include "inference_worker_actor.h"
 
@@ -58,37 +59,6 @@ int testRequestDelayMs()
         return 0;
     }
     return std::clamp(parsed, 0, 30000);
-}
-
-std::vector<QString> parseTextArray(const QJsonArray& array)
-{
-    std::vector<QString> out;
-    out.reserve(static_cast<size_t>(array.size()));
-    for (const QJsonValue& value : array) {
-        const QString text = value.toString().trimmed();
-        if (!text.isEmpty()) {
-            out.push_back(text);
-        }
-    }
-    return out;
-}
-
-QJsonArray toJsonEmbedding(const std::vector<float>& embedding)
-{
-    QJsonArray out;
-    for (float value : embedding) {
-        out.append(static_cast<double>(value));
-    }
-    return out;
-}
-
-QJsonArray toJsonEmbeddings(const std::vector<std::vector<float>>& embeddings)
-{
-    QJsonArray out;
-    for (const auto& emb : embeddings) {
-        out.append(toJsonEmbedding(emb));
-    }
-    return out;
 }
 
 } // namespace
@@ -453,12 +423,13 @@ void InferenceService::workerLoop(Worker& worker)
             return it->second.modelId;
         };
 
-        if (!worker.available || worker.degraded) {
+        const WorkerStateSnapshot stateBeforeRun = snapshotWorkerState(worker);
+        if (!stateBeforeRun.available || stateBeforeRun.degraded) {
             status = QStringLiteral("degraded");
             if (deterministicPlaceholderWorkersEnabled()) {
                 fallbackReason = QStringLiteral("placeholder_worker");
             } else {
-                fallbackReason = worker.available
+                fallbackReason = stateBeforeRun.available
                     ? QStringLiteral("actor_degraded")
                     : QStringLiteral("model_unavailable");
             }
@@ -475,11 +446,18 @@ void InferenceService::workerLoop(Worker& worker)
                         const std::vector<float> embedding = applyQueryPrefix
                             ? worker.embedding->embedQuery(query)
                             : worker.embedding->embed(query);
-                        if (embedding.empty()) {
+                        QString embeddingFailureReason;
+                        std::optional<QJsonArray> serializedEmbedding =
+                            inference_payload::serializeEmbedding(embedding,
+                                                                  /*normalize=*/false,
+                                                                  &embeddingFailureReason);
+                        if (!serializedEmbedding.has_value()) {
                             status = QStringLiteral("degraded");
-                            fallbackReason = QStringLiteral("embedding_empty");
+                            fallbackReason = embeddingFailureReason.isEmpty()
+                                ? QStringLiteral("embedding_invalid")
+                                : embeddingFailureReason;
                         } else {
-                            payload[QStringLiteral("embedding")] = toJsonEmbedding(embedding);
+                            payload[QStringLiteral("embedding")] = *serializedEmbedding;
                             modelId = worker.embedding->activeModelId();
                         }
                     }
@@ -488,8 +466,20 @@ void InferenceService::workerLoop(Worker& worker)
                         status = QStringLiteral("degraded");
                         fallbackReason = QStringLiteral("embedding_unavailable");
                     } else {
-                        const std::vector<QString> texts = parseTextArray(
-                            task->params.value(QStringLiteral("texts")).toArray());
+                        QString textFailureReason;
+                        std::optional<std::vector<QString>> parsedTexts =
+                            inference_payload::parseTextBatch(
+                                task->params.value(QStringLiteral("texts")).toArray(),
+                                &textFailureReason);
+                        if (!parsedTexts.has_value()) {
+                            status = QStringLiteral("degraded");
+                            fallbackReason = textFailureReason.isEmpty()
+                                ? QStringLiteral("text_invalid")
+                                : textFailureReason;
+                        }
+                        const std::vector<QString> texts =
+                            parsedTexts.has_value() ? std::move(*parsedTexts)
+                                                    : std::vector<QString>{};
                         const bool normalize = task->params.value(QStringLiteral("normalize")).toBool(true);
                         const bool rebuildPriority =
                             task->envelope.priority.compare(QStringLiteral("rebuild"), Qt::CaseInsensitive) == 0;
@@ -501,7 +491,7 @@ void InferenceService::workerLoop(Worker& worker)
 
                         std::vector<std::vector<float>> embeddings;
                         embeddings.reserve(texts.size());
-                        if (!texts.empty()) {
+                        if (status == QLatin1String("ok") && !texts.empty()) {
                             if (microBatchSize > 0 && static_cast<int>(texts.size()) > microBatchSize) {
                                 for (size_t offset = 0; offset < texts.size(); offset += static_cast<size_t>(microBatchSize)) {
                                     if (isCancelled(cancelToken)) {
@@ -587,26 +577,23 @@ void InferenceService::workerLoop(Worker& worker)
                             }
                         }
 
-                        if (status == QLatin1String("ok") && embeddings.size() != texts.size()) {
-                            status = QStringLiteral("degraded");
-                            fallbackReason = QStringLiteral("embedding_size_mismatch");
-                        } else if (status == QLatin1String("ok")) {
-                            if (normalize) {
-                                for (auto& emb : embeddings) {
-                                    double normSquared = 0.0;
-                                    for (float value : emb) {
-                                        normSquared += static_cast<double>(value) * static_cast<double>(value);
-                                    }
-                                    const double norm = std::sqrt(normSquared);
-                                    if (norm > 0.0) {
-                                        for (float& value : emb) {
-                                            value = static_cast<float>(static_cast<double>(value) / norm);
-                                        }
-                                    }
-                                }
+                        if (status == QLatin1String("ok")) {
+                            QString embeddingFailureReason;
+                            std::optional<QJsonArray> serializedEmbeddings =
+                                inference_payload::serializeEmbeddingBatch(
+                                    std::move(embeddings),
+                                    texts.size(),
+                                    normalize,
+                                    &embeddingFailureReason);
+                            if (!serializedEmbeddings.has_value()) {
+                                status = QStringLiteral("degraded");
+                                fallbackReason = embeddingFailureReason.isEmpty()
+                                    ? QStringLiteral("embedding_invalid")
+                                    : embeddingFailureReason;
+                            } else {
+                                payload[QStringLiteral("embeddings")] = *serializedEmbeddings;
+                                modelId = worker.embedding->activeModelId();
                             }
-                            payload[QStringLiteral("embeddings")] = toJsonEmbeddings(embeddings);
-                            modelId = worker.embedding->activeModelId();
                         }
                     }
                 } else if (task->method == QLatin1String("rerank_fast")
@@ -616,11 +603,23 @@ void InferenceService::workerLoop(Worker& worker)
                         fallbackReason = QStringLiteral("reranker_unavailable");
                     } else {
                         const QString query = task->params.value(QStringLiteral("query")).toString();
-                        const QJsonArray candidates = task->params.value(QStringLiteral("candidates")).toArray();
+                        const QJsonArray candidates =
+                            task->params.value(QStringLiteral("candidates")).toArray();
+                        QString candidateFailureReason;
+                        std::optional<std::vector<SearchResult>> parsedResults =
+                            inference_payload::parseRerankCandidates(candidates,
+                                                                      &candidateFailureReason);
+                        if (!parsedResults.has_value()) {
+                            status = QStringLiteral("degraded");
+                            fallbackReason = candidateFailureReason.isEmpty()
+                                ? QStringLiteral("candidate_invalid")
+                                : candidateFailureReason;
+                        }
 
-                        std::vector<SearchResult> results;
-                        results.reserve(static_cast<size_t>(candidates.size()));
-                        for (const QJsonValue& candidateValue : candidates) {
+                        std::vector<SearchResult> results =
+                            parsedResults.has_value() ? std::move(*parsedResults)
+                                                      : std::vector<SearchResult>{};
+                        for (size_t i = 0; i < results.size(); ++i) {
                             if (isCancelled(cancelToken)) {
                                 status = QStringLiteral("cancelled");
                                 fallbackReason = QStringLiteral("cancel_token");
@@ -631,14 +630,6 @@ void InferenceService::workerLoop(Worker& worker)
                                 fallbackReason = QStringLiteral("deadline_exceeded");
                                 break;
                             }
-                            const QJsonObject candidate = candidateValue.toObject();
-                            SearchResult result;
-                            result.itemId = candidate.value(QStringLiteral("itemId")).toInteger();
-                            result.path = candidate.value(QStringLiteral("path")).toString();
-                            result.name = candidate.value(QStringLiteral("name")).toString();
-                            result.snippet = candidate.value(QStringLiteral("snippet")).toString();
-                            result.score = candidate.value(QStringLiteral("score")).toDouble();
-                            results.push_back(std::move(result));
                         }
 
                         if (status == QLatin1String("ok")) {
@@ -658,15 +649,19 @@ void InferenceService::workerLoop(Worker& worker)
                         }
 
                         if (status == QLatin1String("ok")) {
-                            QJsonArray scores;
-                            for (const SearchResult& result : results) {
-                                QJsonObject score;
-                                score[QStringLiteral("itemId")] = static_cast<qint64>(result.itemId);
-                                score[QStringLiteral("score")] = static_cast<double>(result.crossEncoderScore);
-                                scores.append(score);
+                            QString scoreFailureReason;
+                            std::optional<QJsonArray> scores =
+                                inference_payload::serializeRerankScores(results,
+                                                                          &scoreFailureReason);
+                            if (!scores.has_value()) {
+                                status = QStringLiteral("degraded");
+                                fallbackReason = scoreFailureReason.isEmpty()
+                                    ? QStringLiteral("rerank_score_invalid")
+                                    : scoreFailureReason;
+                            } else {
+                                payload[QStringLiteral("scores")] = *scores;
+                                modelId = lookupModelId();
                             }
-                            payload[QStringLiteral("scores")] = scores;
-                            modelId = lookupModelId();
                         }
                     }
                 } else if (task->method == QLatin1String("qa_extract")) {
@@ -742,34 +737,46 @@ void InferenceService::workerLoop(Worker& worker)
 
         if (status == QLatin1String("ok") || placeholderResponse) {
             worker.completed.fetch_add(1);
-            worker.consecutiveFailures = 0;
-            worker.degraded = placeholderResponse;
-            worker.stateReason = placeholderResponse
-                ? QStringLiteral("placeholder_worker")
-                : QStringLiteral("ready");
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.consecutiveFailures = 0;
+                worker.degraded = placeholderResponse;
+                worker.stateReason = placeholderResponse
+                    ? QStringLiteral("placeholder_worker")
+                    : QStringLiteral("ready");
+            }
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordSuccess(worker.roleName);
             }
         } else if (status == QLatin1String("timeout")) {
             worker.timedOut.fetch_add(1);
-            worker.consecutiveFailures = 0;
-            worker.stateReason = QStringLiteral("deadline_exceeded");
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.consecutiveFailures = 0;
+                worker.stateReason = QStringLiteral("deadline_exceeded");
+            }
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordTimeout(worker.roleName);
             }
         } else if (status == QLatin1String("cancelled")) {
             worker.cancelled.fetch_add(1);
-            worker.consecutiveFailures = 0;
-            worker.stateReason = QStringLiteral("cancelled");
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.consecutiveFailures = 0;
+                worker.stateReason = QStringLiteral("cancelled");
+            }
             if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
                 m_supervisorActor->recordTimeout(worker.roleName);
             }
         } else {
             worker.failed.fetch_add(1);
-            worker.consecutiveFailures += 1;
-            worker.stateReason = fallbackReason.isEmpty()
-                ? QStringLiteral("request_failed")
-                : fallbackReason;
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.consecutiveFailures += 1;
+                worker.stateReason = fallbackReason.isEmpty()
+                    ? QStringLiteral("request_failed")
+                    : fallbackReason;
+            }
             maybeRecoverWorker(worker);
         }
 
@@ -796,17 +803,30 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
     worker.embedding.reset();
     worker.reranker.reset();
     worker.qa.reset();
-    worker.available = false;
-    worker.degraded = false;
-    worker.placeholder = false;
-    worker.stateReason.clear();
-    worker.lastAdmission = QJsonObject{};
+    {
+        std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+        worker.available = false;
+        worker.degraded = false;
+        worker.placeholder = false;
+        worker.stateReason.clear();
+        worker.lastAdmission = QJsonObject{};
+        worker.warmupRequired = false;
+        worker.warmupCompleted = false;
+        worker.warmupElapsedMs = -1;
+        worker.warmupFailureReason.clear();
+    }
 
     if (m_placeholderWorkersEnabled) {
-        worker.available = true;
-        worker.degraded = true;
-        worker.placeholder = true;
-        worker.stateReason = QStringLiteral("placeholder_worker");
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.available = true;
+            worker.degraded = true;
+            worker.placeholder = true;
+            worker.warmupRequired = false;
+            worker.warmupCompleted = false;
+            worker.warmupElapsedMs = -1;
+            worker.stateReason = QStringLiteral("placeholder_worker");
+        }
         LOG_INFO(bsIpc,
                  "InferenceService: worker '%s' running in deterministic placeholder mode",
                  qUtf8Printable(worker.roleName));
@@ -818,7 +838,10 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
         LOG_ERROR(bsIpc,
                   "InferenceService: required production model inventory unavailable for worker '%s'",
                   qUtf8Printable(worker.roleName));
-        worker.stateReason = QStringLiteral("required_models_unavailable");
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.stateReason = QStringLiteral("required_models_unavailable");
+        }
         return false;
     }
     worker.registry = std::make_unique<ModelRegistry>(modelsDir);
@@ -828,44 +851,77 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
         return worker.embedding->initialize();
     };
 
+    bool available = false;
     switch (worker.role) {
     case Role::EmbedStrong:
-        worker.available = initializeEmbedding("bi-encoder");
+        available = initializeEmbedding("bi-encoder");
         break;
     case Role::EmbedFast:
-        worker.available = initializeEmbedding("bi-encoder-fast");
+        available = initializeEmbedding("bi-encoder-fast");
         break;
     case Role::RebuildEmbedStrong:
-        worker.available = initializeEmbedding("bi-encoder");
+        available = initializeEmbedding("bi-encoder");
         break;
     case Role::RebuildEmbedFast:
-        worker.available = initializeEmbedding("bi-encoder-fast");
+        available = initializeEmbedding("bi-encoder-fast");
         break;
     case Role::RerankStrong:
         worker.reranker = std::make_unique<CrossEncoderReranker>(worker.registry.get(), "cross-encoder");
-        worker.available = worker.reranker->initialize();
+        available = worker.reranker->initialize();
         break;
     case Role::RerankFast:
         worker.reranker = std::make_unique<CrossEncoderReranker>(worker.registry.get(), "cross-encoder-fast");
-        worker.available = worker.reranker->initialize();
+        available = worker.reranker->initialize();
         break;
     case Role::QaExtractive:
         worker.qa = std::make_unique<QaExtractiveModel>(worker.registry.get(), "qa-extractive");
-        worker.available = worker.qa->initialize();
+        available = worker.qa->initialize();
         break;
     }
 
-    if (worker.available) {
-        worker.degraded = false;
+    QString warmupFailureReason;
+    qint64 warmupElapsedMs = -1;
+    const bool warmupRequired = available;
+    bool warmupCompleted = false;
+    if (warmupRequired) {
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.warmupRequired = true;
+            worker.stateReason = QStringLiteral("warming");
+        }
+        warmupCompleted = warmupWorkerModel(worker, &warmupFailureReason, &warmupElapsedMs);
+        if (!warmupCompleted) {
+            available = false;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+        worker.available = available;
+        worker.degraded = !available && warmupRequired;
         worker.placeholder = false;
-        worker.stateReason = QStringLiteral("ready");
+        worker.warmupRequired = warmupRequired;
+        worker.warmupCompleted = warmupCompleted;
+        worker.warmupElapsedMs = warmupElapsedMs;
+        worker.warmupFailureReason = warmupFailureReason;
+        if (available) {
+            worker.stateReason = QStringLiteral("ready");
+        } else if (warmupRequired) {
+            worker.stateReason = warmupFailureReason.isEmpty()
+                ? QStringLiteral("warmup_failed")
+                : warmupFailureReason;
+        } else {
+            worker.stateReason = QStringLiteral("model_unavailable");
+        }
+    }
+
+    if (available) {
         if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
             m_supervisorActor->resetRole(worker.roleName);
         }
         LOG_INFO(bsIpc, "InferenceService: worker '%s' initialized",
                  qUtf8Printable(worker.roleName));
     } else {
-        worker.stateReason = QStringLiteral("model_unavailable");
         if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
             m_supervisorActor->markRoleUnavailable(worker.roleName);
         }
@@ -873,18 +929,137 @@ bool InferenceService::initializeWorkerModel(Worker& worker)
                  qUtf8Printable(worker.roleName));
     }
 
-    return worker.available;
+    return available;
+}
+
+bool InferenceService::warmupWorkerModel(Worker& worker,
+                                         QString* failureReason,
+                                         qint64* elapsedMs)
+{
+    QElapsedTimer timer;
+    timer.start();
+    const auto setFailure = [&](const QString& reason) {
+        if (failureReason) {
+            *failureReason = reason;
+        }
+        if (elapsedMs) {
+            *elapsedMs = timer.elapsed();
+        }
+        LOG_WARN(bsIpc,
+                 "InferenceService: worker '%s' warmup failed: %s",
+                 qUtf8Printable(worker.roleName),
+                 qUtf8Printable(reason));
+        return false;
+    };
+    const auto setSuccess = [&]() {
+        if (failureReason) {
+            failureReason->clear();
+        }
+        if (elapsedMs) {
+            *elapsedMs = timer.elapsed();
+        }
+        LOG_INFO(bsIpc,
+                 "InferenceService: worker '%s' warmed in %lldms",
+                 qUtf8Printable(worker.roleName),
+                 static_cast<long long>(timer.elapsed()));
+        return true;
+    };
+
+    try {
+        switch (worker.role) {
+        case Role::EmbedStrong:
+        case Role::EmbedFast: {
+            if (!worker.embedding || !worker.embedding->isAvailable()) {
+                return setFailure(QStringLiteral("embedding_unavailable"));
+            }
+            const std::vector<float> embedding =
+                worker.embedding->embedQuery(QStringLiteral("betterspotlight local search warmup"));
+            if (embedding.empty()) {
+                return setFailure(QStringLiteral("embedding_warmup_empty"));
+            }
+            if (worker.embedding->embeddingDimensions() > 0
+                && static_cast<int>(embedding.size()) != worker.embedding->embeddingDimensions()) {
+                return setFailure(QStringLiteral("embedding_warmup_dimension_mismatch"));
+            }
+            return setSuccess();
+        }
+        case Role::RebuildEmbedStrong:
+        case Role::RebuildEmbedFast: {
+            if (!worker.embedding || !worker.embedding->isAvailable()) {
+                return setFailure(QStringLiteral("embedding_unavailable"));
+            }
+            const std::vector<std::vector<float>> embeddings =
+                worker.embedding->embedBatch(
+                    {QStringLiteral("betterspotlight local search warmup passage")});
+            if (embeddings.size() != 1 || embeddings.front().empty()) {
+                return setFailure(QStringLiteral("embedding_warmup_empty"));
+            }
+            if (worker.embedding->embeddingDimensions() > 0
+                && static_cast<int>(embeddings.front().size())
+                       != worker.embedding->embeddingDimensions()) {
+                return setFailure(QStringLiteral("embedding_warmup_dimension_mismatch"));
+            }
+            return setSuccess();
+        }
+        case Role::RerankStrong:
+        case Role::RerankFast: {
+            if (!worker.reranker || !worker.reranker->isAvailable()) {
+                return setFailure(QStringLiteral("reranker_unavailable"));
+            }
+            SearchResult candidate;
+            candidate.itemId = 1;
+            candidate.path = QStringLiteral("/warmup/betterspotlight.txt");
+            candidate.name = QStringLiteral("betterspotlight.txt");
+            candidate.snippet =
+                QStringLiteral("BetterSpotlight indexes local developer files and documents.");
+            candidate.score = 1.0;
+            std::vector<SearchResult> candidates{candidate};
+            RerankerConfig config;
+            config.weight = 0.0f;
+            config.maxCandidates = 1;
+            config.minScoreThreshold = 0.0f;
+            const int boostedCount =
+                worker.reranker->rerank(QStringLiteral("local developer search"), candidates, config);
+            if (boostedCount != 1 || candidates.empty()
+                || !std::isfinite(candidates.front().crossEncoderScore)) {
+                return setFailure(QStringLiteral("reranker_warmup_empty"));
+            }
+            return setSuccess();
+        }
+        case Role::QaExtractive: {
+            if (!worker.qa || !worker.qa->isAvailable()) {
+                return setFailure(QStringLiteral("qa_unavailable"));
+            }
+            if (!worker.qa->warmup()) {
+                return setFailure(QStringLiteral("qa_warmup_empty"));
+            }
+            return setSuccess();
+        }
+        }
+    } catch (const std::exception& ex) {
+        return setFailure(QStringLiteral("warmup_exception:%1").arg(QString::fromUtf8(ex.what())));
+    } catch (...) {
+        return setFailure(QStringLiteral("warmup_exception"));
+    }
+
+    return setFailure(QStringLiteral("warmup_unknown_role"));
 }
 
 void InferenceService::maybeRecoverWorker(Worker& worker)
 {
     if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
         const auto decision = m_supervisorActor->recordFailure(worker.roleName);
-        worker.consecutiveFailures = decision.consecutiveFailures;
-        worker.restartAttempts = decision.restartAttempts;
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.consecutiveFailures = decision.consecutiveFailures;
+            worker.restartAttempts = decision.restartAttempts;
+        }
         if (decision.givingUp) {
-            worker.degraded = true;
-            worker.stateReason = QStringLiteral("restart_budget_exhausted");
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.degraded = true;
+                worker.stateReason = QStringLiteral("restart_budget_exhausted");
+            }
             LOG_WARN(bsIpc,
                      "InferenceService: worker '%s' giving up after restart budget exhausted",
                      qUtf8Printable(worker.roleName));
@@ -905,65 +1080,100 @@ void InferenceService::maybeRecoverWorker(Worker& worker)
                  decision.restartAttempts,
                  decision.backoffMs);
         initializeWorkerModel(worker);
-        if (worker.available) {
+        if (snapshotWorkerState(worker).available) {
             m_supervisorActor->recordSuccess(worker.roleName);
         } else {
             m_supervisorActor->markRoleUnavailable(worker.roleName);
-            worker.degraded = true;
-            worker.stateReason = QStringLiteral("recovery_failed");
+            {
+                std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+                worker.degraded = true;
+                worker.stateReason = QStringLiteral("recovery_failed");
+            }
         }
-        worker.consecutiveFailures = 0;
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.consecutiveFailures = 0;
+        }
         return;
     }
 
-    if (worker.consecutiveFailures < kWorkerRestartThreshold) {
+    WorkerStateSnapshot state = snapshotWorkerState(worker);
+    if (state.consecutiveFailures < kWorkerRestartThreshold) {
         return;
     }
 
-    if (worker.restartAttempts >= kWorkerRestartBudget) {
-        worker.degraded = true;
-        worker.stateReason = QStringLiteral("restart_budget_exhausted");
+    if (state.restartAttempts >= kWorkerRestartBudget) {
+        {
+            std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+            worker.degraded = true;
+            worker.stateReason = QStringLiteral("restart_budget_exhausted");
+        }
         LOG_WARN(bsIpc,
                  "InferenceService: worker '%s' degraded after %d restart attempts",
                  qUtf8Printable(worker.roleName),
-                 worker.restartAttempts);
+                 state.restartAttempts);
         return;
     }
 
-    ++worker.restartAttempts;
+    {
+        std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+        ++worker.restartAttempts;
+        state.restartAttempts = worker.restartAttempts;
+    }
     LOG_WARN(bsIpc,
              "InferenceService: recovering worker '%s' (attempt=%d)",
              qUtf8Printable(worker.roleName),
-             worker.restartAttempts);
+             state.restartAttempts);
 
     initializeWorkerModel(worker);
-    worker.consecutiveFailures = 0;
-    if (!worker.available) {
-        worker.degraded = true;
-        worker.stateReason = QStringLiteral("recovery_failed");
+    {
+        std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+        worker.consecutiveFailures = 0;
+        if (!worker.available) {
+            worker.degraded = true;
+            worker.stateReason = QStringLiteral("recovery_failed");
+        }
     }
 }
 
-QString InferenceService::effectiveWorkerState(const Worker& worker)
+InferenceService::WorkerStateSnapshot InferenceService::snapshotWorkerState(const Worker& worker)
 {
-    if (worker.placeholder) {
+    std::lock_guard<std::mutex> stateLock(worker.stateMutex);
+    WorkerStateSnapshot snapshot;
+    snapshot.available = worker.available;
+    snapshot.degraded = worker.degraded;
+    snapshot.placeholder = worker.placeholder;
+    snapshot.warmupRequired = worker.warmupRequired;
+    snapshot.warmupCompleted = worker.warmupCompleted;
+    snapshot.warmupElapsedMs = worker.warmupElapsedMs;
+    snapshot.consecutiveFailures = worker.consecutiveFailures;
+    snapshot.restartAttempts = worker.restartAttempts;
+    snapshot.stateReason = worker.stateReason;
+    snapshot.warmupFailureReason = worker.warmupFailureReason;
+    snapshot.lastAdmission = worker.lastAdmission;
+    return snapshot;
+}
+
+QString InferenceService::effectiveWorkerState(const WorkerStateSnapshot& state)
+{
+    if (state.placeholder) {
         return QStringLiteral("test_placeholder");
     }
-    if (worker.degraded) {
+    if (state.degraded) {
         return QStringLiteral("degraded");
     }
-    if (worker.available) {
+    if (state.available) {
         return QStringLiteral("ready");
     }
     return QStringLiteral("unavailable");
 }
 
-QString InferenceService::effectiveWorkerStateReason(const Worker& worker)
+QString InferenceService::effectiveWorkerStateReason(const WorkerStateSnapshot& state)
 {
-    if (!worker.stateReason.trimmed().isEmpty()) {
-        return worker.stateReason;
+    if (!state.stateReason.trimmed().isEmpty()) {
+        return state.stateReason;
     }
-    return effectiveWorkerState(worker);
+    return effectiveWorkerState(state);
 }
 
 QString InferenceService::roleToString(Role role)
@@ -1140,6 +1350,10 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     QJsonObject timeoutCounts;
     QJsonObject failureCounts;
     QJsonObject restartCounts;
+    QJsonObject warmupRequired;
+    QJsonObject warmupCompleted;
+    QJsonObject warmupElapsed;
+    QJsonObject warmupFailures;
     int globalLiveDepth = 0;
     int globalRebuildDepth = 0;
     int globalInFlightLive = 0;
@@ -1149,12 +1363,10 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
         std::lock_guard<std::mutex> lock(m_workersMutex);
         for (const auto& worker : m_workers) {
             const QString role = worker->roleName;
+            const WorkerStateSnapshot state = snapshotWorkerState(*worker);
             QJsonObject depth;
             {
                 std::lock_guard<std::mutex> workerLock(worker->mutex);
-                roleStatus[role] = effectiveWorkerState(*worker);
-                roleStateReason[role] = effectiveWorkerStateReason(*worker);
-                roleAdmission[role] = worker->lastAdmission;
                 const qint64 liveDepth = static_cast<qint64>(worker->liveQueue.size());
                 const qint64 rebuildDepth = static_cast<qint64>(worker->rebuildQueue.size());
                 const qint64 inFlightLive = worker->inFlightLive.load();
@@ -1179,13 +1391,20 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
                     activeLaneByRole[role] = QStringLiteral("none");
                 }
             }
+            roleStatus[role] = effectiveWorkerState(state);
+            roleStateReason[role] = effectiveWorkerStateReason(state);
+            roleAdmission[role] = state.lastAdmission;
             queueDepth[role] = depth;
 
             cancelledCounts[role] = worker->cancelled.load();
             timeoutCleanupCounts[role] = worker->timeoutCleanup.load();
             timeoutCounts[role] = worker->timedOut.load();
             failureCounts[role] = worker->failed.load();
-            restartCounts[role] = worker->restartAttempts;
+            restartCounts[role] = state.restartAttempts;
+            warmupRequired[role] = state.warmupRequired;
+            warmupCompleted[role] = state.warmupCompleted;
+            warmupElapsed[role] = state.warmupElapsedMs;
+            warmupFailures[role] = state.warmupFailureReason;
         }
     }
 
@@ -1206,6 +1425,10 @@ QJsonObject InferenceService::handleGetInferenceHealth(uint64_t id)
     result[QStringLiteral("timeoutCleanupCount")] = m_timeoutCleanupCount.load();
     result[QStringLiteral("timeoutCountByRole")] = timeoutCounts;
     result[QStringLiteral("failureCountByRole")] = failureCounts;
+    result[QStringLiteral("warmupRequiredByRole")] = warmupRequired;
+    result[QStringLiteral("warmupCompletedByRole")] = warmupCompleted;
+    result[QStringLiteral("warmupElapsedMsByRole")] = warmupElapsed;
+    result[QStringLiteral("warmupFailureReasonByRole")] = warmupFailures;
     if (m_supervisorMode == QLatin1String("legacy") || !m_supervisorActor) {
         result[QStringLiteral("restartCountByRole")] = restartCounts;
         result[QStringLiteral("supervisorStateByRole")] = roleStatus;
@@ -1291,7 +1514,7 @@ InferenceService::DispatchResult InferenceService::dispatchAsync(
 InferenceService::DispatchResult InferenceService::enqueueTask(
     Role role,
     const QString& method,
-    const RequestEnvelope& /*envelope*/,
+    const RequestEnvelope& envelope,
     const QJsonObject& /*params*/,
     const std::shared_ptr<Task>& task)
 {
@@ -1303,6 +1526,48 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
 
     result.workerFound = true;
     const bool rebuildRole = isRebuildRole(role);
+    QJsonObject admission;
+
+    if (envelope.deadlineMs > 0 && nowMs() > envelope.deadlineMs) {
+        worker->timedOut.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> stateLock(worker->stateMutex);
+            worker->consecutiveFailures = 0;
+            worker->stateReason = QStringLiteral("deadline_exceeded");
+        }
+        if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+            m_supervisorActor->recordTimeout(worker->roleName);
+        }
+        result.immediatePayload = makeStatusPayload(
+            QStringLiteral("timeout"),
+            worker->roleName,
+            QString(),
+            /*elapsedMs=*/0,
+            {},
+            QStringLiteral("deadline_exceeded"));
+        return result;
+    }
+
+    if (isCancelled(envelope.cancelToken)) {
+        worker->cancelled.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> stateLock(worker->stateMutex);
+            worker->consecutiveFailures = 0;
+            worker->stateReason = QStringLiteral("cancelled");
+        }
+        if (m_supervisorMode != QLatin1String("legacy") && m_supervisorActor) {
+            m_supervisorActor->recordTimeout(worker->roleName);
+        }
+        result.immediatePayload = makeStatusPayload(
+            QStringLiteral("cancelled"),
+            worker->roleName,
+            QString(),
+            /*elapsedMs=*/0,
+            {},
+            QStringLiteral("cancel_token"));
+        return result;
+    }
+
     const int globalLiveDepth = [&]() -> int {
         std::lock_guard<std::mutex> lock(m_workersMutex);
         int depth = 0;
@@ -1364,13 +1629,13 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
                      qUtf8Printable(actorDecision.reason));
         }
 
-        worker->lastAdmission = InferenceWorkerActor::toJson(actorDecision);
-        worker->lastAdmission[QStringLiteral("method")] = method;
-        worker->lastAdmission[QStringLiteral("lane")] =
+        admission = InferenceWorkerActor::toJson(actorDecision);
+        admission[QStringLiteral("method")] = method;
+        admission[QStringLiteral("lane")] =
             rebuildRole ? QStringLiteral("rebuild") : QStringLiteral("live");
-        worker->lastAdmission[QStringLiteral("mode")] = m_supervisorMode;
-        worker->lastAdmission[QStringLiteral("legacyAccepted")] = legacyAccepted;
-        worker->lastAdmission[QStringLiteral("deferredResponse")] = static_cast<bool>(task->complete);
+        admission[QStringLiteral("mode")] = m_supervisorMode;
+        admission[QStringLiteral("legacyAccepted")] = legacyAccepted;
+        admission[QStringLiteral("deferredResponse")] = static_cast<bool>(task->complete);
 
         if (!accepted) {
             QJsonObject overload = makeStatusPayload(
@@ -1389,11 +1654,20 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
             overload[QStringLiteral("globalQueueLimit")] =
                 rebuildRole ? kGlobalQueueLimitRebuild : kGlobalQueueLimitLive;
             result.immediatePayload = overload;
-            return result;
+        } else {
+            queue.push_back(task);
+            worker->submitted.fetch_add(1);
+            result.enqueued = true;
         }
+    }
 
-        queue.push_back(task);
-        worker->submitted.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> stateLock(worker->stateMutex);
+        worker->lastAdmission = admission;
+    }
+
+    if (!result.enqueued) {
+        return result;
     }
 
     worker->cv.notify_one();
@@ -1402,7 +1676,6 @@ InferenceService::DispatchResult InferenceService::enqueueTask(
               qUtf8Printable(method),
               qUtf8Printable(worker->roleName),
               task->complete ? 1 : 0);
-    result.enqueued = true;
     return result;
 }
 
@@ -1419,7 +1692,10 @@ InferenceService::RequestEnvelope InferenceService::parseEnvelope(const QJsonObj
     envelope.deadlineMs = params.value(QStringLiteral("deadlineMs")).toInteger(0);
 
     if (envelope.requestId.isEmpty()) {
-        envelope.requestId = QString::number(nowMs());
+        const uint64_t sequence =
+            m_requestSeq.fetch_add(1, std::memory_order_relaxed);
+        envelope.requestId =
+            QStringLiteral("%1-%2").arg(nowMs()).arg(sequence);
     }
     if (envelope.cancelToken.isEmpty()) {
         envelope.cancelToken = envelope.requestId;

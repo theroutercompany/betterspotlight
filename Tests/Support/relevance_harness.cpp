@@ -14,13 +14,19 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QTest>
 
 #include <algorithm>
 #include <optional>
 
 namespace {
+
+constexpr int kSemanticReadyPollIntervalMs = 2000;
+constexpr int kSemanticReadyHealthTimeoutMs = 2000;
 
 QStringList splitContentIntoChunks(const QString& content)
 {
@@ -71,6 +77,195 @@ QString tokenizedName(const QString& fileName)
     out.replace(QLatin1Char('_'), QLatin1Char(' '));
     out.replace(QLatin1Char('.'), QLatin1Char(' '));
     return out.simplified().toLower();
+}
+
+bool copyDirectoryRecursively(const QString& sourcePath,
+                              const QString& targetPath,
+                              QString* errorOut)
+{
+    const QFileInfo sourceInfo(sourcePath);
+    if (!sourceInfo.exists() || !sourceInfo.isDir()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Missing source directory: %1").arg(sourcePath);
+        }
+        return false;
+    }
+
+    QDir targetDir;
+    if (!targetDir.mkpath(targetPath)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create directory: %1").arg(targetPath);
+        }
+        return false;
+    }
+
+    QDirIterator it(sourcePath,
+                    QDir::NoDotAndDotDot | QDir::AllEntries,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo entry = it.fileInfo();
+        const QString relativePath = QDir(sourcePath).relativeFilePath(entry.absoluteFilePath());
+        const QString destPath = QDir(targetPath).filePath(relativePath);
+        if (entry.isDir()) {
+            if (!targetDir.mkpath(destPath)) {
+                if (errorOut) {
+                    *errorOut = QStringLiteral("Failed to create directory: %1").arg(destPath);
+                }
+                return false;
+            }
+            continue;
+        }
+
+        QFile::remove(destPath);
+        if (!QFile::copy(entry.absoluteFilePath(), destPath)) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Failed to copy %1 -> %2")
+                                .arg(entry.absoluteFilePath(), destPath);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool linkOrCopyFile(const QString& sourcePath,
+                    const QString& targetPath,
+                    QString* errorOut)
+{
+    const QFileInfo sourceInfo(sourcePath);
+    if (!sourceInfo.exists() || !sourceInfo.isFile()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Missing source file: %1").arg(sourcePath);
+        }
+        return false;
+    }
+
+    const QFileInfo targetInfo(targetPath);
+    QDir parentDir = targetInfo.dir();
+    if (!parentDir.exists() && !QDir().mkpath(parentDir.absolutePath())) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create directory: %1")
+                            .arg(parentDir.absolutePath());
+        }
+        return false;
+    }
+
+    QFile::remove(targetPath);
+    if (QFile::link(sourcePath, targetPath)) {
+        return true;
+    }
+    if (QFile::copy(sourcePath, targetPath)) {
+        return true;
+    }
+
+    if (errorOut) {
+        *errorOut = QStringLiteral("Failed to mirror %1 -> %2")
+                        .arg(sourcePath, targetPath);
+    }
+    return false;
+}
+
+QString prepareLightweightModelsDirImpl(const QString& sourceModelsDir,
+                                        const QString& targetModelsDir,
+                                        QString* errorOut)
+{
+    const QString manifestPath =
+        QDir(sourceModelsDir).filePath(QStringLiteral("manifest.json"));
+    QFile manifestFile(manifestPath);
+    if (!manifestFile.open(QIODevice::ReadOnly)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to open models manifest: %1").arg(manifestPath);
+        }
+        return QString();
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument manifestDoc =
+        QJsonDocument::fromJson(manifestFile.readAll(), &parseError);
+    manifestFile.close();
+    if (parseError.error != QJsonParseError::NoError || !manifestDoc.isObject()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Invalid models manifest: %1").arg(parseError.errorString());
+        }
+        return QString();
+    }
+
+    QJsonObject root = manifestDoc.object();
+    QJsonObject models = root.value(QStringLiteral("models")).toObject();
+    const QJsonObject legacyBiEncoder = models.value(QStringLiteral("bi-encoder-legacy")).toObject();
+    if (legacyBiEncoder.isEmpty()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Missing bi-encoder-legacy in source manifest");
+        }
+        return QString();
+    }
+
+    QJsonObject lightweightStrong = legacyBiEncoder;
+    lightweightStrong[QStringLiteral("name")] = QStringLiteral("bge-small-en-v1.5-test");
+    lightweightStrong[QStringLiteral("modelId")] = QStringLiteral("bge-small-en-v1.5-int8-test-strong");
+    lightweightStrong[QStringLiteral("generationId")] = QStringLiteral("v2");
+    lightweightStrong[QStringLiteral("latencyTier")] = QStringLiteral("strong");
+    lightweightStrong[QStringLiteral("fallbackRole")] = QStringLiteral("bi-encoder-legacy");
+    models[QStringLiteral("bi-encoder")] = lightweightStrong;
+
+    QSet<QString> relativeArtifacts;
+    for (auto it = models.begin(); it != models.end(); ++it) {
+        const QJsonObject model = it.value().toObject();
+        const QString fileName = model.value(QStringLiteral("file")).toString();
+        if (!fileName.isEmpty()) {
+            relativeArtifacts.insert(fileName);
+        }
+        const QString vocabName = model.value(QStringLiteral("vocab")).toString();
+        if (!vocabName.isEmpty()) {
+            relativeArtifacts.insert(vocabName);
+        }
+    }
+    root[QStringLiteral("models")] = models;
+
+    QDir dir;
+    if (!dir.mkpath(targetModelsDir)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to create lightweight models dir: %1")
+                            .arg(targetModelsDir);
+        }
+        return QString();
+    }
+
+    const QString runtimeBootstrapSrc =
+        QDir(sourceModelsDir).filePath(QStringLiteral("online-ranker-v1"));
+    const QString runtimeBootstrapDst =
+        QDir(targetModelsDir).filePath(QStringLiteral("online-ranker-v1"));
+    if (QFileInfo::exists(runtimeBootstrapSrc)
+        && !copyDirectoryRecursively(runtimeBootstrapSrc, runtimeBootstrapDst, errorOut)) {
+        return QString();
+    }
+
+    for (const QString& relativeArtifact : relativeArtifacts) {
+        const QString sourceArtifact = QDir(sourceModelsDir).filePath(relativeArtifact);
+        const QString targetArtifact = QDir(targetModelsDir).filePath(relativeArtifact);
+        if (!linkOrCopyFile(sourceArtifact, targetArtifact, errorOut)) {
+            return QString();
+        }
+    }
+
+    QSaveFile out(QDir(targetModelsDir).filePath(QStringLiteral("manifest.json")));
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to write lightweight models manifest");
+        }
+        return QString();
+    }
+    out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!out.commit()) {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to commit lightweight models manifest");
+        }
+        return QString();
+    }
+
+    return QDir::cleanPath(targetModelsDir);
 }
 
 } // namespace
@@ -136,6 +331,13 @@ QString resolveModelsDirForTests()
     }
 
     return QString();
+}
+
+QString prepareLightweightModelsDirForTests(const QString& sourceModelsDir,
+                                            const QString& targetModelsDir,
+                                            QString* errorOut)
+{
+    return prepareLightweightModelsDirImpl(sourceModelsDir, targetModelsDir, errorOut);
 }
 
 std::vector<RelevanceCase> parseRelevanceCases(const QJsonArray& caseArray)
@@ -378,6 +580,30 @@ bool HermeticQueryFixture::startQueryService(const QHash<QString, QString>& extr
         return false;
     }
 
+    const QString lightweightModelsDir = prepareLightweightModelsDirForTests(
+        m_modelsDir,
+        QDir(m_tempHome.path()).filePath(QStringLiteral("lightweight-models")),
+        errorOut);
+    if (lightweightModelsDir.isEmpty()) {
+        return false;
+    }
+
+    if (auto storeOpt = bs::SQLiteStore::open(m_dbPath); storeOpt.has_value()) {
+        auto& store = storeOpt.value();
+        if (!store.setSetting(QStringLiteral("inferenceServiceEnabled"), QStringLiteral("0"))
+            || !store.setSetting(QStringLiteral("inferenceEmbedOffloadEnabled"), QStringLiteral("0"))) {
+            if (errorOut) {
+                *errorOut = QStringLiteral("Failed to configure hermetic query fixture inference settings");
+            }
+            return false;
+        }
+    } else {
+        if (errorOut) {
+            *errorOut = QStringLiteral("Failed to open fixture SQLite store for hermetic settings");
+        }
+        return false;
+    }
+
     ServiceLaunchConfig launch;
     launch.homeDir = m_tempHome.path();
     launch.dataDir = m_dataDir;
@@ -385,7 +611,8 @@ bool HermeticQueryFixture::startQueryService(const QHash<QString, QString>& extr
     launch.connectTimeoutMs = 15000;
     launch.readyTimeoutMs = 30000;
     launch.requestDefaultTimeoutMs = 8000;
-    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), m_modelsDir);
+    launch.env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    launch.env.insert(QStringLiteral("BS_TEST_QUERY_DISABLE_PEER_PROBES"), QStringLiteral("1"));
     for (auto it = extraEnv.constBegin(); it != extraEnv.constEnd(); ++it) {
         launch.env.insert(it.key(), it.value());
     }
@@ -515,9 +742,12 @@ bool HermeticQueryFixture::rebuildVectors(QString* errorOut, int timeoutMs)
     QElapsedTimer rebuildTimer;
     rebuildTimer.start();
     while (rebuildTimer.elapsed() < timeoutMs) {
-        const QJsonObject healthResponse = request(QStringLiteral("getHealth"));
+        // Relevance fixtures only run the query service, so avoid the legacy getHealth peer
+        // probes that synchronously try to contact absent indexer/inference sockets.
+        const QJsonObject healthResponse =
+            request(QStringLiteral("getHealthV2"), {}, kSemanticReadyHealthTimeoutMs);
         if (!isResponse(healthResponse)) {
-            QTest::qWait(150);
+            QTest::qWait(kSemanticReadyPollIntervalMs);
             continue;
         }
 
@@ -535,7 +765,7 @@ bool HermeticQueryFixture::rebuildVectors(QString* errorOut, int timeoutMs)
             }
             return false;
         }
-        QTest::qWait(150);
+        QTest::qWait(kSemanticReadyPollIntervalMs);
     }
 
     if (errorOut) {

@@ -4,8 +4,10 @@
 #include "ipc_test_utils.h"
 #include "service_process_harness.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -16,8 +18,10 @@ class TestInferenceServiceIpc : public QObject {
 private slots:
     void testInferenceIpcContract();
     void testHealthRequestNotBlockedByDeferredInferenceWork();
+    void testExpiredDeadlineBypassesBusyWorker();
     void testDeferredRequestCancellationSignalsHealth();
     void testRebuildAdmissionRespectsLiveInFlightPressure();
+    void testHealthSnapshotsStayCoherentDuringStateChurn();
 };
 
 void TestInferenceServiceIpc::testInferenceIpcContract()
@@ -260,6 +264,109 @@ void TestInferenceServiceIpc::testHealthRequestNotBlockedByDeferredInferenceWork
     QVERIFY(bs::test::isResponse(embedResponse.value()));
 }
 
+void TestInferenceServiceIpc::testExpiredDeadlineBypassesBusyWorker()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_REQUEST_DELAY_MS"), QStringLiteral("1200"));
+    launch.startTimeoutMs = 20000;
+    launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    QVERIFY2(harness.start(launch), "Failed to start inference service");
+
+    bs::SocketClient liveClient;
+    QVERIFY2(bs::test::waitForSocketConnection(liveClient, harness.socketPath(), 5000),
+             "Failed to connect live inference client");
+    bs::SocketClient deadlineClient;
+    QVERIFY2(bs::test::waitForSocketConnection(deadlineClient, harness.socketPath(), 5000),
+             "Failed to connect deadline inference client");
+
+    bool liveCompleted = false;
+    std::optional<QJsonObject> liveResponse;
+    QJsonObject liveParams;
+    liveParams[QStringLiteral("query")] = QStringLiteral("busy worker");
+    liveParams[QStringLiteral("requestId")] = QStringLiteral("busy-worker-1");
+    liveClient.sendRequestAsync(
+        QStringLiteral("embed_query"),
+        liveParams,
+        5000,
+        [&](const std::optional<QJsonObject>& response) {
+            liveResponse = response;
+            liveCompleted = true;
+        });
+
+    QTest::qWait(100);
+
+    const QString cancelledToken = QStringLiteral("already-cancelled-while-busy");
+    QJsonObject cancelParams;
+    cancelParams[QStringLiteral("cancelToken")] = cancelledToken;
+    const QJsonObject cancelResponse =
+        bs::test::requestOrFailWithDiagnostics(deadlineClient,
+                                               QStringLiteral("cancel_request"),
+                                               cancelParams,
+                                               700,
+                                               harness.socketPath());
+    QVERIFY(bs::test::isResponse(cancelResponse));
+
+    QJsonObject cancelledParams;
+    cancelledParams[QStringLiteral("query")] = QStringLiteral("cancelled before admission");
+    cancelledParams[QStringLiteral("requestId")] = QStringLiteral("cancelled-while-busy-1");
+    cancelledParams[QStringLiteral("cancelToken")] = cancelledToken;
+    const QJsonObject cancelledResponse =
+        bs::test::requestOrFailWithDiagnostics(deadlineClient,
+                                               QStringLiteral("embed_query"),
+                                               cancelledParams,
+                                               700,
+                                               harness.socketPath());
+    QVERIFY2(bs::test::isResponse(cancelledResponse),
+             "Already-cancelled request should receive an immediate cancellation response");
+    const QJsonObject cancelledPayload = bs::test::resultPayload(cancelledResponse);
+    QCOMPARE(cancelledPayload.value(QStringLiteral("status")).toString(),
+             QStringLiteral("cancelled"));
+    QCOMPARE(cancelledPayload.value(QStringLiteral("fallbackReason")).toString(),
+             QStringLiteral("cancel_token"));
+
+    QJsonObject expiredParams;
+    expiredParams[QStringLiteral("query")] = QStringLiteral("already expired");
+    expiredParams[QStringLiteral("requestId")] = QStringLiteral("expired-while-busy-1");
+    expiredParams[QStringLiteral("deadlineMs")] = QDateTime::currentMSecsSinceEpoch() - 1;
+
+    QElapsedTimer timer;
+    timer.start();
+    const QJsonObject expiredResponse =
+        bs::test::requestOrFailWithDiagnostics(deadlineClient,
+                                               QStringLiteral("embed_query"),
+                                               expiredParams,
+                                               700,
+                                               harness.socketPath());
+    const qint64 elapsedMs = timer.elapsed();
+    QVERIFY2(bs::test::isResponse(expiredResponse),
+             "Expired request should receive an immediate timeout response");
+    QVERIFY2(elapsedMs < 700,
+             qPrintable(QStringLiteral("Expired request waited behind busy worker: %1ms")
+                            .arg(elapsedMs)));
+    const QJsonObject expiredPayload = bs::test::resultPayload(expiredResponse);
+    QCOMPARE(expiredPayload.value(QStringLiteral("status")).toString(), QStringLiteral("timeout"));
+    QCOMPARE(expiredPayload.value(QStringLiteral("fallbackReason")).toString(),
+             QStringLiteral("deadline_exceeded"));
+
+    QTRY_VERIFY_WITH_TIMEOUT(liveCompleted, 5000);
+    QVERIFY(liveResponse.has_value());
+    QVERIFY(bs::test::isResponse(liveResponse.value()));
+}
+
 void TestInferenceServiceIpc::testDeferredRequestCancellationSignalsHealth()
 {
     QTemporaryDir tempHome;
@@ -412,6 +519,91 @@ void TestInferenceServiceIpc::testRebuildAdmissionRespectsLiveInFlightPressure()
     QTRY_VERIFY_WITH_TIMEOUT(liveCompleted, 5000);
     QVERIFY(liveResponse.has_value());
     QVERIFY(bs::test::isResponse(liveResponse.value()));
+}
+
+void TestInferenceServiceIpc::testHealthSnapshotsStayCoherentDuringStateChurn()
+{
+    QTemporaryDir tempHome;
+    QVERIFY(tempHome.isValid());
+
+    const QString dataDir =
+        QDir(tempHome.path()).filePath(QStringLiteral("Library/Application Support/betterspotlight"));
+    QVERIFY(QDir().mkpath(dataDir));
+
+    bs::test::ServiceProcessHarness harness(
+        QStringLiteral("inference"), QStringLiteral("betterspotlight-inference"));
+    bs::test::ServiceLaunchConfig launch;
+    launch.homeDir = tempHome.path();
+    launch.dataDir = dataDir;
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_DETERMINISTIC_STARTUP"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_PLACEHOLDER_WORKERS"), QStringLiteral("1"));
+    launch.env.insert(QStringLiteral("BS_TEST_INFERENCE_REQUEST_DELAY_MS"), QStringLiteral("40"));
+    launch.startTimeoutMs = 20000;
+    launch.connectTimeoutMs = 30000;
+    launch.readyTimeoutMs = 30000;
+    QVERIFY2(harness.start(launch), "Failed to start inference service");
+
+    bs::SocketClient liveClient;
+    QVERIFY2(bs::test::waitForSocketConnection(liveClient, harness.socketPath(), 5000),
+             "Failed to connect live inference client");
+    bs::SocketClient healthClient;
+    QVERIFY2(bs::test::waitForSocketConnection(healthClient, harness.socketPath(), 5000),
+             "Failed to connect health inference client");
+
+    constexpr int kRequestCount = 24;
+    int completed = 0;
+    int failedCallbacks = 0;
+    for (int i = 0; i < kRequestCount; ++i) {
+        QJsonObject params;
+        params[QStringLiteral("query")] = QStringLiteral("state-churn-%1").arg(i);
+        params[QStringLiteral("requestId")] = QStringLiteral("state-churn-id-%1").arg(i);
+        liveClient.sendRequestAsync(
+            QStringLiteral("embed_query"),
+            params,
+            5000,
+            [&](const std::optional<QJsonObject>& response) {
+                if (!response.has_value() || !bs::test::isResponse(response.value())) {
+                    ++failedCallbacks;
+                }
+                ++completed;
+            });
+    }
+
+    int healthSnapshots = 0;
+    QElapsedTimer timer;
+    timer.start();
+    while (completed < kRequestCount && timer.elapsed() < 7000) {
+        const QJsonObject healthResponse =
+            bs::test::requestOrFailWithDiagnostics(healthClient,
+                                                   QStringLiteral("get_inference_health"),
+                                                   {},
+                                                   1000,
+                                                   harness.socketPath());
+        QVERIFY(bs::test::isResponse(healthResponse));
+        const QJsonObject health = bs::test::resultPayload(healthResponse);
+        const QJsonObject roleStatusByModel =
+            health.value(QStringLiteral("roleStatusByModel")).toObject();
+        const QJsonObject roleStateReasonByModel =
+            health.value(QStringLiteral("roleStateReasonByModel")).toObject();
+        const QJsonObject admissionByModel =
+            health.value(QStringLiteral("roleAdmissionByModel")).toObject();
+
+        QVERIFY(roleStatusByModel.contains(QStringLiteral("bi-encoder")));
+        QVERIFY(roleStateReasonByModel.contains(QStringLiteral("bi-encoder")));
+        QVERIFY(admissionByModel.contains(QStringLiteral("bi-encoder")));
+        QVERIFY(!roleStatusByModel.value(QStringLiteral("bi-encoder")).toString().isEmpty());
+        QVERIFY(!roleStateReasonByModel.value(QStringLiteral("bi-encoder")).toString().isEmpty());
+        ++healthSnapshots;
+
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+        QTest::qWait(10);
+    }
+
+    QTRY_COMPARE_WITH_TIMEOUT(completed, kRequestCount, 7000);
+    QCOMPARE(failedCallbacks, 0);
+    QVERIFY2(healthSnapshots >= 3,
+             qPrintable(QStringLiteral("Expected at least 3 concurrent health snapshots, got %1")
+                            .arg(healthSnapshots)));
 }
 
 QTEST_MAIN(TestInferenceServiceIpc)

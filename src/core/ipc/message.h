@@ -3,6 +3,7 @@
 #include "core/shared/ipc_messages.h"
 #include <QByteArray>
 #include <QJsonObject>
+#include <QString>
 #include <optional>
 
 namespace bs {
@@ -18,7 +19,22 @@ public:
         QJsonObject json;
         int bytesConsumed = 0;
     };
+
+    enum class DecodeStatus {
+        Complete,
+        Incomplete,
+        Invalid,
+    };
+
+    struct DecodeAttempt {
+        DecodeStatus status = DecodeStatus::Incomplete;
+        std::optional<DecodeResult> result;
+        QString error;
+    };
+
+    static DecodeAttempt decodeFrame(const QByteArray& buffer);
     static std::optional<DecodeResult> decode(const QByteArray& buffer);
+    static std::optional<QString> validate(const QJsonObject& json);
 
     // Helper: build request JSON
     static QJsonObject makeRequest(uint64_t id, const QString& method, const QJsonObject& params = {});

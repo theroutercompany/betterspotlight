@@ -196,6 +196,18 @@ SocketClient* Supervisor::clientFor(const QString& serviceName)
         qCWarning(bsIpc, "No service registered with name '%s'", qPrintable(serviceName));
         return nullptr;
     }
+    if (!svc->client) {
+        svc->client = std::make_unique<SocketClient>(this);
+    }
+    if (!svc->client->isConnected()
+        && svc->process
+        && svc->process->state() == QProcess::Running) {
+        const QString path = ServiceBase::socketPath(svc->info.name);
+        if (svc->client->connectToServer(path, kHeartbeatConnectTimeoutMs)) {
+            qCInfo(bsIpc, "Reconnected to service '%s' for foreground request",
+                   qPrintable(svc->info.name));
+        }
+    }
     return svc->client.get();
 }
 

@@ -12,6 +12,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -30,6 +31,13 @@ class InferenceService final : public ServiceBase {
 public:
     explicit InferenceService(QObject* parent = nullptr);
     ~InferenceService() override;
+
+#ifdef BETTERSPOTLIGHT_ENABLE_TEST_HOOKS
+    QJsonObject dispatchForTest(const QJsonObject& request)
+    {
+        return handleRequest(request);
+    }
+#endif
 
 protected:
     QJsonObject handleRequest(const QJsonObject& request) override;
@@ -74,6 +82,7 @@ private:
         QString roleName;
         std::thread thread;
         std::mutex mutex;
+        mutable std::mutex stateMutex;
         std::condition_variable cv;
         std::deque<std::shared_ptr<Task>> liveQueue;
         std::deque<std::shared_ptr<Task>> rebuildQueue;
@@ -87,9 +96,13 @@ private:
         bool available = false;
         bool degraded = false;
         bool placeholder = false;
+        bool warmupRequired = false;
+        bool warmupCompleted = false;
+        qint64 warmupElapsedMs = -1;
         int consecutiveFailures = 0;
         int restartAttempts = 0;
         QString stateReason;
+        QString warmupFailureReason;
         QJsonObject lastAdmission;
 
         std::atomic<qint64> submitted{0};
@@ -103,12 +116,27 @@ private:
         std::atomic<qint64> timeoutCleanup{0};
     };
 
+    struct WorkerStateSnapshot {
+        bool available = false;
+        bool degraded = false;
+        bool placeholder = false;
+        bool warmupRequired = false;
+        bool warmupCompleted = false;
+        qint64 warmupElapsedMs = -1;
+        int consecutiveFailures = 0;
+        int restartAttempts = 0;
+        QString stateReason;
+        QString warmupFailureReason;
+        QJsonObject lastAdmission;
+    };
+
     void initWorkers();
     void startWorkerThread(Worker& worker);
     void stopWorkers();
     void workerLoop(Worker& worker);
 
     bool initializeWorkerModel(Worker& worker);
+    bool warmupWorkerModel(Worker& worker, QString* failureReason, qint64* elapsedMs);
     void maybeRecoverWorker(Worker& worker);
 
     static QString roleToString(Role role);
@@ -138,15 +166,16 @@ private:
                                const QJsonObject& params,
                                const std::shared_ptr<Task>& task);
 
-    static RequestEnvelope parseEnvelope(const QJsonObject& params);
+    RequestEnvelope parseEnvelope(const QJsonObject& params);
     static QJsonObject makeStatusPayload(const QString& status,
                                          const QString& modelRole,
                                          const QString& modelId,
                                          qint64 elapsedMs,
                                          const QJsonObject& result = {},
                                          const QString& fallbackReason = QString());
-    static QString effectiveWorkerState(const Worker& worker);
-    static QString effectiveWorkerStateReason(const Worker& worker);
+    static WorkerStateSnapshot snapshotWorkerState(const Worker& worker);
+    static QString effectiveWorkerState(const WorkerStateSnapshot& state);
+    static QString effectiveWorkerStateReason(const WorkerStateSnapshot& state);
 
     bool isCancelled(const QString& cancelToken) const;
     void markCancelled(const QString& cancelToken);

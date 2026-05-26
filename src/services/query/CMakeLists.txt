@@ -1,7 +1,10 @@
 add_executable(betterspotlight-query
     main.cpp
+    behavior_event_payload_utils.cpp
+    embedding_response_utils.cpp
     query_service.cpp
     query_service_m2.cpp
+    rerank_score_utils.cpp
 )
 
 target_compile_definitions(betterspotlight-query PRIVATE

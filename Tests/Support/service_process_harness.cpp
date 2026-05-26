@@ -1,6 +1,7 @@
 #include "service_process_harness.h"
 
 #include "ipc_test_utils.h"
+#include "relevance_harness.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -75,6 +76,42 @@ int timeoutForMethod(const QString& method, int fallbackTimeoutMs)
     return defaultTimeoutMs;
 }
 
+bool maybeInjectLightweightModels(const bs::test::ServiceLaunchConfig& config,
+                                  QProcessEnvironment& env)
+{
+    if (!bs::test::envFlagEnabled(qEnvironmentVariable("BS_TEST_USE_LIGHTWEIGHT_MODELS"))) {
+        return true;
+    }
+    if (config.env.contains(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"))) {
+        return true;
+    }
+
+    const QString sourceModelsDir = bs::test::resolveModelsDirForTests();
+    if (sourceModelsDir.isEmpty()) {
+        qWarning() << "Failed to resolve source models dir for lightweight test setup";
+        return false;
+    }
+
+    const QString targetRoot = !config.homeDir.isEmpty()
+        ? config.homeDir
+        : QDir::tempPath();
+    const QString targetModelsDir =
+        QDir(targetRoot).filePath(QStringLiteral("lightweight-models"));
+    QString error;
+    const QString lightweightModelsDir =
+        bs::test::prepareLightweightModelsDirForTests(sourceModelsDir,
+                                                      targetModelsDir,
+                                                      &error);
+    if (lightweightModelsDir.isEmpty()) {
+        qWarning() << "Failed to prepare lightweight test models:" << error;
+        return false;
+    }
+
+    env.remove(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"));
+    env.insert(QStringLiteral("BETTERSPOTLIGHT_MODELS_DIR"), lightweightModelsDir);
+    return true;
+}
+
 } // namespace
 
 namespace bs::test {
@@ -106,13 +143,22 @@ bool ServiceProcessHarness::start(const ServiceLaunchConfig& config)
         return false;
     }
 
-    m_socketPath = ServiceBase::socketPath(m_serviceName);
-    m_socketPath = QDir::cleanPath(m_socketDir.path() + QLatin1Char('/') + m_serviceName
+    const QString configuredSocketDir =
+        config.env.value(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR")).trimmed();
+    const QString effectiveSocketDir = configuredSocketDir.isEmpty()
+        ? m_socketDir.path()
+        : configuredSocketDir;
+    if (!QDir().mkpath(effectiveSocketDir)) {
+        stop();
+        return false;
+    }
+
+    m_socketPath = QDir::cleanPath(effectiveSocketDir + QLatin1Char('/') + m_serviceName
                                    + QStringLiteral(".sock"));
     QFile::remove(m_socketPath);
 
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"), m_socketDir.path());
+    env.insert(QStringLiteral("BETTERSPOTLIGHT_SOCKET_DIR"), effectiveSocketDir);
     if (!config.homeDir.isEmpty()) {
         env.insert(QStringLiteral("HOME"), config.homeDir);
         env.insert(QStringLiteral("CFFIXED_USER_HOME"), config.homeDir);
@@ -124,6 +170,10 @@ bool ServiceProcessHarness::start(const ServiceLaunchConfig& config)
         if (!xdgDataHome.isEmpty()) {
             env.insert(QStringLiteral("XDG_DATA_HOME"), xdgDataHome);
         }
+    }
+    if (!maybeInjectLightweightModels(config, env)) {
+        stop();
+        return false;
     }
     for (auto it = config.env.constBegin(); it != config.env.constEnd(); ++it) {
         env.insert(it.key(), it.value());
@@ -223,12 +273,27 @@ QJsonObject ServiceProcessHarness::request(const QString& method,
     const int effectiveTimeoutMs = timeoutMs > 0
         ? timeoutMs
         : timeoutForMethod(method, m_requestDefaultTimeoutMs);
-    return requestOrFailWithDiagnostics(
+    if (!m_client.isConnected()) {
+        waitForSocketConnection(m_client, m_socketPath, std::min(effectiveTimeoutMs, 1000));
+    }
+
+    QJsonObject response = requestOrFailWithDiagnostics(
         m_client,
         method,
         params,
         effectiveTimeoutMs,
         m_socketPath);
+    if (!m_client.isConnected()
+        && QFileInfo::exists(m_socketPath)
+        && waitForSocketConnection(m_client, m_socketPath, std::min(effectiveTimeoutMs, 1000))) {
+        response = requestOrFailWithDiagnostics(
+            m_client,
+            method,
+            params,
+            effectiveTimeoutMs,
+            m_socketPath);
+    }
+    return response;
 }
 
 } // namespace bs::test
