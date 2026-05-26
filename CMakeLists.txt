@@ -134,30 +134,146 @@ add_custom_target(betterspotlight-benchmark-semantic-shortlist
 
 find_package(Tesseract QUIET)
 find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(POPPLER_QT6 QUIET poppler-qt6)
-    if(NOT POPPLER_QT6_FOUND)
-        pkg_check_modules(POPPLER_CPP QUIET poppler-cpp)
+
+function(bs_unset_pkg_module prefix)
+    foreach(suffix
+            FOUND
+            INCLUDE_DIRS
+            LIBRARIES
+            LIBRARY_DIRS
+            LINK_LIBRARIES
+            CFLAGS
+            CFLAGS_OTHER
+            LDFLAGS
+            LDFLAGS_OTHER
+            VERSION
+            PREFIX)
+        unset(${prefix}_${suffix})
+        unset(${prefix}_${suffix} CACHE)
+    endforeach()
+endfunction()
+
+function(bs_validate_poppler_module prefix main_library header_candidates out_valid out_reason)
+    set(_valid FALSE)
+    set(_reason "")
+
+    if(NOT ${prefix}_FOUND)
+        set(_reason "pkg-config module not found")
+    else()
+        set(_existing_include_dirs)
+        foreach(_include_dir IN LISTS ${prefix}_INCLUDE_DIRS)
+            if(EXISTS "${_include_dir}")
+                list(APPEND _existing_include_dirs "${_include_dir}")
+            endif()
+        endforeach()
+
+        set(_headers "${header_candidates}")
+        set(_header_found FALSE)
+        foreach(_include_dir IN LISTS _existing_include_dirs)
+            foreach(_header IN LISTS _headers)
+                if(EXISTS "${_include_dir}/${_header}")
+                    set(_header_found TRUE)
+                    break()
+                endif()
+            endforeach()
+            if(_header_found)
+                break()
+            endif()
+        endforeach()
+
+        if(NOT _header_found)
+            set(_reason "required headers not found in pkg-config include dirs")
+        else()
+            set(_resolved_main_library "")
+            foreach(_lib_entry IN LISTS ${prefix}_LINK_LIBRARIES ${prefix}_LIBRARIES)
+                if(IS_ABSOLUTE "${_lib_entry}"
+                   AND EXISTS "${_lib_entry}"
+                   AND _lib_entry MATCHES "(^|/)lib${main_library}(\\.|$)")
+                    set(_resolved_main_library "${_lib_entry}")
+                    break()
+                endif()
+            endforeach()
+
+            if(NOT _resolved_main_library)
+                find_library(_resolved_main_library
+                    NAMES "${main_library}"
+                    HINTS ${${prefix}_LIBRARY_DIRS}
+                    NO_DEFAULT_PATH
+                )
+            endif()
+
+            if(NOT _resolved_main_library)
+                set(_reason "backend library '${main_library}' not resolvable")
+            else()
+                set(_valid TRUE)
+            endif()
+        endif()
     endif()
-endif()
+
+    set(${out_valid} ${_valid} PARENT_SCOPE)
+    set(${out_reason} "${_reason}" PARENT_SCOPE)
+endfunction()
 
 set(BETTERSPOTLIGHT_POPPLER_BACKEND "none")
-if(POPPLER_QT6_FOUND)
-    set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-qt6")
-elseif(POPPLER_CPP_FOUND)
-    set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-cpp")
+set(BETTERSPOTLIGHT_POPPLER_BACKEND_REASON "pkg-config unavailable")
+if(PkgConfig_FOUND)
+    set(BETTERSPOTLIGHT_POPPLER_BACKEND_REASON "no validated backend")
+
+    bs_unset_pkg_module(POPPLER_QT6)
+    pkg_check_modules(POPPLER_QT6 QUIET poppler-qt6)
+    bs_validate_poppler_module(
+        POPPLER_QT6
+        "poppler-qt6"
+        "poppler-qt6.h;poppler/qt6/poppler-qt6.h"
+        _bs_poppler_qt6_valid
+        _bs_poppler_qt6_reason
+    )
+
+    if(_bs_poppler_qt6_valid)
+        bs_unset_pkg_module(POPPLER_QT6)
+        pkg_check_modules(POPPLER_QT6 QUIET IMPORTED_TARGET poppler-qt6)
+        set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-qt6")
+        set(BETTERSPOTLIGHT_POPPLER_BACKEND_REASON "validated poppler-qt6")
+        bs_unset_pkg_module(POPPLER_CPP)
+    else()
+        bs_unset_pkg_module(POPPLER_QT6)
+
+        bs_unset_pkg_module(POPPLER_CPP)
+        pkg_check_modules(POPPLER_CPP QUIET poppler-cpp)
+        bs_validate_poppler_module(
+            POPPLER_CPP
+            "poppler-cpp"
+            "poppler-document.h;poppler/cpp/poppler-document.h"
+            _bs_poppler_cpp_valid
+            _bs_poppler_cpp_reason
+        )
+
+        if(_bs_poppler_cpp_valid)
+            bs_unset_pkg_module(POPPLER_CPP)
+            pkg_check_modules(POPPLER_CPP QUIET IMPORTED_TARGET poppler-cpp)
+            set(BETTERSPOTLIGHT_POPPLER_BACKEND "poppler-cpp")
+            set(BETTERSPOTLIGHT_POPPLER_BACKEND_REASON "validated poppler-cpp")
+        else()
+            bs_unset_pkg_module(POPPLER_CPP)
+            set(BETTERSPOTLIGHT_POPPLER_BACKEND_REASON
+                "poppler-qt6 rejected: ${_bs_poppler_qt6_reason}; poppler-cpp rejected: ${_bs_poppler_cpp_reason}")
+        endif()
+    endif()
 endif()
 
 if(BETTERSPOTLIGHT_REQUIRE_POPPLER AND BETTERSPOTLIGHT_POPPLER_BACKEND STREQUAL "none")
     message(FATAL_ERROR
         "Poppler was not detected, but BETTERSPOTLIGHT_REQUIRE_POPPLER=ON.\n"
         "Supported macOS/dev flows require PDF extraction capability.\n"
-        "Install Poppler (for example via Homebrew) and ensure pkg-config can find it,\n"
+        "Detection details: ${BETTERSPOTLIGHT_POPPLER_BACKEND_REASON}\n"
+        "Install Poppler and ensure pkg-config exposes a valid poppler-qt6 or poppler-cpp backend,\n"
         "or use -DBETTERSPOTLIGHT_REQUIRE_POPPLER=OFF only for unsupported local forensics."
     )
 endif()
 
-message(STATUS "BetterSpotlight PDF backend: ${BETTERSPOTLIGHT_POPPLER_BACKEND}")
+message(STATUS
+    "BetterSpotlight PDF backend: ${BETTERSPOTLIGHT_POPPLER_BACKEND} "
+    "(${BETTERSPOTLIGHT_POPPLER_BACKEND_REASON})")
 
 if(BETTERSPOTLIGHT_WITH_ONNX)
     find_package(ONNXRuntime QUIET)

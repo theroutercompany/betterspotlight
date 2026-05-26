@@ -46,6 +46,30 @@ cmake_args=(
 if [[ -n "${QT_PREFIX}" ]]; then
     cmake_args+=(-DCMAKE_PREFIX_PATH="${QT_PREFIX}")
 fi
+if [[ -n "${QT_PREFIX}" ]]; then
+    IFS=';' read -r -a qt_prefix_entries <<< "${QT_PREFIX}"
+    for qt_prefix_entry in "${qt_prefix_entries[@]}"; do
+        [[ -n "${qt_prefix_entry}" ]] || continue
+        for qt_component in Qml Quick QuickControls2; do
+            qt_component_dir="${qt_prefix_entry}/lib/cmake/Qt6${qt_component}"
+            if [[ -d "${qt_component_dir}" ]]; then
+                cmake_args+=("-DQt6${qt_component}_DIR=${qt_component_dir}")
+            fi
+        done
+    done
+fi
+if [[ -n "${PKG_CONFIG_BIN:-}" ]]; then
+    cmake_args+=("-DPKG_CONFIG_EXECUTABLE=${PKG_CONFIG_BIN}")
+fi
+if [[ -n "${PKG_CONFIG_ARGN:-}" ]]; then
+    cmake_args+=("-DPKG_CONFIG_ARGN=${PKG_CONFIG_ARGN}")
+fi
+if [[ -n "${ONNXRuntime_INCLUDE_DIR:-}" ]]; then
+    cmake_args+=("-DONNXRuntime_INCLUDE_DIR=${ONNXRuntime_INCLUDE_DIR}")
+fi
+if [[ -n "${ONNXRuntime_LIBRARY:-}" ]]; then
+    cmake_args+=("-DONNXRuntime_LIBRARY=${ONNXRuntime_LIBRARY}")
+fi
 cmake "${cmake_args[@]}"
 
 CPU_COUNT="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"

@@ -1,20 +1,72 @@
-%PDF-FAKE-1.0
-Tax Return Summary 2025
-Filing Status: Single
-Adjusted Gross Income: 143200
-Federal Tax Withheld: 26400
-State Tax Withheld: 8100
-
-Deductions
-- Mortgage interest
-- Charitable contributions
-- Student loan interest
-
-Attachments
-- W-2 forms
-- 1099-INT
-- Brokerage summary
-
-Notes
-Prepared by accounting software export.
-Retain for seven years.
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 622 >>
+stream
+BT
+/F1 12 Tf
+72 760 Td
+(Tax Return Summary 2025) Tj
+0 -16 Td
+(Filing Status: Single) Tj
+0 -16 Td
+(Adjusted Gross Income: 143200) Tj
+0 -16 Td
+(Federal Tax Withheld: 26400) Tj
+0 -16 Td
+(State Tax Withheld: 8100) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Deductions) Tj
+0 -16 Td
+(- Mortgage interest) Tj
+0 -16 Td
+(- Charitable contributions) Tj
+0 -16 Td
+(- Student loan interest) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Attachments) Tj
+0 -16 Td
+(- W-2 forms) Tj
+0 -16 Td
+(- 1099-INT) Tj
+0 -16 Td
+(- Brokerage summary) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Notes) Tj
+0 -16 Td
+(Prepared by accounting software export.) Tj
+0 -16 Td
+(Retain for seven years.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000913 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+983
+%%EOF

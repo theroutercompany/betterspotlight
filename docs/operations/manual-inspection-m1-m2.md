@@ -4,7 +4,7 @@
 > provider diagnostics (`CoreML` vs `CPU`), and migration health fields (`vectorMigration.*`,
 > `vectorGeneration.*`, `memory.aggregateRssMb`).
 
-Last validated against repo state: 2026-02-08 (post-fixes)
+Last validated against repo state: 2026-04-13 (Poppler/query/M2 fix pass)
 
 This guide is based on:
 
@@ -25,12 +25,16 @@ It is intentionally practical: each step has concrete commands, expected outcome
 
 2. Some M2 features are partially wired in code but not fully integrated into runtime flows. This guide calls those out explicitly.
 
-3. The service/database paths used by the current binaries are:
+3. Supported manual/dev flow uses `scripts/dev/build_launch.sh` in isolated runtime mode (default). Use the exported paths from `.build/dev-runtime/current-session.sh`:
 
-- Socket directory: `/tmp/betterspotlight-$(id -u)/`
-- Database: `$HOME/Library/Application Support/betterspotlight/index.db`
-- App settings (runtime): `$HOME/Library/Application Support/betterspotlight/BetterSpotlight/settings.json`
-- Additional settings file used by services/onboarding logic: `$HOME/Library/Application Support/betterspotlight/settings.json`
+- Runtime root: `/tmp/betterspotlight-$(id -u)/dev-*`
+- Socket directory: `$SOCKET_DIR`
+- Database: `$DATA_DIR/index.db` (isolated by default)
+- App settings (runtime): `$DATA_DIR/BetterSpotlight/settings.json`
+- Additional settings file used by services/onboarding logic: `$DATA_DIR/settings.json`
+- Logs: `$LOG_DIR/{app,indexer,extractor,query,inference}.log`
+
+4. `--allow-degraded` / `--allow-degraded-pdf` are for unsupported local forensics only, not supported acceptance/manual verification.
 
 ---
 
@@ -52,12 +56,21 @@ Run the canonical verification preflight/build gate (this prints capability matr
 
 ```bash
 ./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
+```
+
+Built app binary reference:
+
+```bash
+build-stabilize/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
 ```
 
 Expected:
 
 - Environment validation succeeds.
 - Capability matrix reports required supported capabilities as `ready` for `core-hermetic`.
+- In the supported profile, `pdf=ready` is mandatory. Do not continue with `--allow-degraded` or `--allow-degraded-pdf` for manual acceptance.
 - Default verification labels pass before manual UI checks.
 
 ---
@@ -66,12 +79,15 @@ Expected:
 
 ```bash
 ./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
 ```
 
 Expected:
 
 - Build succeeds.
 - Default verification gate passes (unit, integration, service IPC, docs lint, relevance).
+- Launch succeeds in isolated runtime mode and writes `.build/dev-runtime/current-session.sh`.
 
 If tests fail, stop and fix build/test issues before manual UI verification.
 
@@ -88,12 +104,13 @@ ctest --test-dir build-stabilize --output-on-failure --timeout 300 -L '^relevanc
 ### Gate A: App QML startup
 
 ```bash
-build-stabilize/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
 ```
 
 Expected:
 
-- App starts and remains running.
+- App and helpers start and remain running in isolated runtime.
 - No QML component load failures.
 
 If startup fails with QML errors, use Troubleshooting T1 (Section 12).
@@ -101,7 +118,8 @@ If startup fails with QML errors, use Troubleshooting T1 (Section 12).
 ### Gate B: Schema sanity for M2 tables
 
 ```bash
-DB="$HOME/Library/Application Support/betterspotlight/index.db"
+source .build/dev-runtime/current-session.sh
+DB="$DATA_DIR/index.db"
 sqlite3 "$DB" ".tables" | tr ' ' '\n' | rg '^(items|search_index|feedback|frequencies|vector_map|interactions)$'
 ```
 
@@ -124,7 +142,7 @@ Expected: `3`
 
 If `interactions` is missing or schema version is `< 3`, run Troubleshooting T2.
 
-### Gate C: Semantic model assets
+### Gate C: Semantic model assets and PDF backend
 
 Query service expects model assets near its executable:
 
@@ -149,6 +167,21 @@ ls -l build-stabilize/src/services/Resources/models/bge-small-en-v1.5-int8.onnx
 ls -l build-stabilize/src/services/Resources/models/vocab.txt
 ```
 
+Validate supported PDF backend wiring from the same shell:
+
+```bash
+source .build/dev-env.sh
+echo "$BS_DEV_PDF_CAPABILITY"
+echo "$BS_DEV_POPPLER_PREFIX"
+pkg-config --exists poppler-qt6 || pkg-config --exists poppler-cpp
+```
+
+Expected:
+
+- `BS_DEV_PDF_CAPABILITY` is `ready`
+- `BS_DEV_POPPLER_PREFIX` is non-empty and points to a valid Poppler prefix
+- `pkg-config` resolves `poppler-qt6` or `poppler-cpp`
+
 ---
 
 ## 5. UI Manual Verification (M1 + onboarding/settings)
@@ -157,10 +190,11 @@ Run this section only after Gate A is fixed.
 
 ### Step 5.1: Launch and tray/hotkey smoke test
 
-1. Start app:
+1. Start app and helpers via isolated runtime launcher:
 
 ```bash
-build-stabilize/src/app/betterspotlight.app/Contents/MacOS/betterspotlight
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
 ```
 
 2. Verify:
@@ -199,7 +233,8 @@ Inside search panel:
 To force onboarding:
 
 ```bash
-rm -f "$HOME/Library/Application Support/betterspotlight/BetterSpotlight/settings.json"
+source .build/dev-runtime/current-session.sh
+rm -f "$DATA_DIR/BetterSpotlight/settings.json"
 ```
 
 Restart app and verify:
@@ -211,7 +246,7 @@ Restart app and verify:
 After finishing onboarding, verify persisted keys:
 
 ```bash
-cat "$HOME/Library/Application Support/betterspotlight/BetterSpotlight/settings.json"
+cat "$DATA_DIR/BetterSpotlight/settings.json"
 ```
 
 Expected keys include:
@@ -244,70 +279,40 @@ Important current implementation notes:
 
 Use this when UI is blocked or when you need reproducible checks.
 
-### Step 6.1: Create IPC helper
+### Step 6.1: Load the active isolated runtime and define IPC helper
 
 ```bash
-cat > /tmp/bs_ipc.py <<'PY'
-#!/usr/bin/env python3
-import json, os, socket, struct, sys
-
-def call(service, method, params):
-    sock_path = f"/tmp/betterspotlight-{os.getuid()}/{service}.sock"
-    req = {"type": "request", "id": 1, "method": method, "params": params}
-    payload = json.dumps(req, separators=(",", ":")).encode()
-    msg = struct.pack(">I", len(payload)) + payload
-
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(sock_path)
-    s.sendall(msg)
-
-    header = s.recv(4)
-    if len(header) != 4:
-        raise RuntimeError("short header")
-    n = struct.unpack(">I", header)[0]
-
-    body = b""
-    while len(body) < n:
-        chunk = s.recv(n - len(body))
-        if not chunk:
-            raise RuntimeError("socket closed early")
-        body += chunk
-    s.close()
-    print(json.dumps(json.loads(body.decode()), indent=2))
-
-if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("usage: bs_ipc.py <service> <method> [json-params]")
-        sys.exit(2)
-    service = sys.argv[1]
-    method = sys.argv[2]
-    params = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
-    call(service, method, params)
-PY
-chmod +x /tmp/bs_ipc.py
+source .build/dev-runtime/current-session.sh
+bs_ipc() {
+  local service="$1"
+  local method="$2"
+  local params="${3:-{}}"
+  ./scripts/dev/ipc_call.py \
+    --socket "${SOCKET_DIR}/${service}.sock" \
+    --method "${method}" \
+    --params "${params}" \
+    --timeout-ms 4000
+}
 ```
 
-### Step 6.2: Start services
+### Step 6.2: Ensure services are running in isolated mode
 
 ```bash
-rm -f /tmp/betterspotlight-$(id -u)/indexer.sock /tmp/betterspotlight-$(id -u)/query.sock
-BUILD_DIR="/Users/rexliu/betterspotlight/build-stabilize"
-HELPERS_DIR="$BUILD_DIR/src/app/betterspotlight.app/Contents/Helpers"
-"$HELPERS_DIR/betterspotlight-indexer" > /tmp/bs-indexer.log 2>&1 &
-"$HELPERS_DIR/betterspotlight-query" > /tmp/bs-query.log 2>&1 &
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
 ```
 
 Verify sockets:
 
 ```bash
-ls -l /tmp/betterspotlight-$(id -u)/*.sock
+ls -l "$SOCKET_DIR"/*.sock
 ```
 
 Ping both services:
 
 ```bash
-/tmp/bs_ipc.py indexer ping
-/tmp/bs_ipc.py query ping
+bs_ipc indexer ping
+bs_ipc query ping
 ```
 
 ---
@@ -316,31 +321,30 @@ Ping both services:
 
 Use fixture:
 
-- `/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1`
+- `/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1`
 
-### Step 7.1: Backup your live DB first
+Assumes `bs_ipc` from Step 6.1 is defined in your current shell.
+
+### Step 7.1: Reset to a fresh isolated data dir
 
 ```bash
-DATA_DIR="$HOME/Library/Application Support/betterspotlight"
-BACKUP_DIR="$DATA_DIR/manual-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$BACKUP_DIR"
-for f in index.db index.db-wal index.db-shm; do
-  [ -f "$DATA_DIR/$f" ] && cp -f "$DATA_DIR/$f" "$BACKUP_DIR/$f"
-  rm -f "$DATA_DIR/$f"
-done
-echo "Backed up DB files to: $BACKUP_DIR"
+./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean
+source .build/dev-runtime/current-session.sh
+echo "Using isolated data dir: $DATA_DIR"
 ```
+
+If you intentionally launched with `--shared-user-data`, back up your live DB before continuing.
 
 ### Step 7.2: Start indexing fixture root
 
 ```bash
-/tmp/bs_ipc.py indexer startIndexing '{"roots":["/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1"]}'
+bs_ipc indexer startIndexing '{"roots":["/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1"]}'
 ```
 
 Poll queue status:
 
 ```bash
-/tmp/bs_ipc.py indexer getQueueStatus
+bs_ipc indexer getQueueStatus
 ```
 
 ### Step 7.3: Commit visibility check for small datasets
@@ -348,7 +352,7 @@ Poll queue status:
 The pipeline now flushes transactions when the queue drains, including small batches. After indexing completes, run:
 
 ```bash
-/tmp/bs_ipc.py query getHealth
+bs_ipc query getHealth
 ```
 
 Expected:
@@ -359,7 +363,7 @@ Expected:
 ### Step 7.4: Verify DB content
 
 ```bash
-DB="$HOME/Library/Application Support/betterspotlight/index.db"
+DB="$DATA_DIR/index.db"
 sqlite3 "$DB" "SELECT COUNT(*) AS items FROM items;"
 sqlite3 "$DB" "SELECT COUNT(*) AS chunks FROM content;"
 sqlite3 "$DB" "SELECT COUNT(*) AS fts_rows FROM search_index;"
@@ -373,9 +377,9 @@ Expected:
 ### Step 7.5: Verify lexical search
 
 ```bash
-/tmp/bs_ipc.py query search '{"query":"useEffect","limit":5}'
-/tmp/bs_ipc.py query search '{"query":"kubectl apply","limit":5}'
-/tmp/bs_ipc.py query search '{"query":"verifyJWT","limit":5}'
+bs_ipc query search '{"query":"useEffect","limit":5}'
+bs_ipc query search '{"query":"kubectl apply","limit":5}'
+bs_ipc query search '{"query":"verifyJWT","limit":5}'
 ```
 
 Expected:
@@ -388,7 +392,7 @@ Run a larger fixture/root and poll queue telemetry:
 
 ```bash
 for i in $(seq 1 50); do
-  /tmp/bs_ipc.py indexer getQueueStatus | python3 -c '
+  bs_ipc indexer getQueueStatus | python3 -c '
 import json,sys
 r=json.load(sys.stdin).get("result",{})
 print(f"pending={r.get(\"pending\",0)} processing={r.get(\"processing\",0)} preparing={r.get(\"preparing\",0)} writing={r.get(\"writing\",0)} prepWorkers={r.get(\"prepWorkers\",0)} writerBatchDepth={r.get(\"writerBatchDepth\",0)} staleDropped={r.get(\"staleDropped\",0)}")
@@ -410,18 +414,18 @@ Note: very small corpora may complete too fast to observe `preparing > 1`.
 Create a same-path event storm while indexing is active:
 
 ```bash
-RACE_FILE="/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop/manual-race.txt"
+RACE_FILE="/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1/Desktop/manual-race.txt"
 for i in $(seq 1 150); do
   echo "race-$i" > "$RACE_FILE"
 done
 rm -f "$RACE_FILE"
-/tmp/bs_ipc.py indexer reindexPath '{"path":"/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop"}'
+bs_ipc indexer reindexPath '{"path":"/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1/Desktop"}'
 ```
 
 Poll status:
 
 ```bash
-/tmp/bs_ipc.py indexer getQueueStatus
+bs_ipc indexer getQueueStatus
 ```
 
 Expected:
@@ -437,7 +441,7 @@ Expected:
 Use a temp file under fixture root:
 
 ```bash
-TEST_FILE="/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop/manual-incremental-check.txt"
+TEST_FILE="/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1/Desktop/manual-incremental-check.txt"
 echo "alpha-token-123" > "$TEST_FILE"
 ```
 
@@ -446,22 +450,22 @@ Restart indexer service if needed, then start indexing fixture root again.
 Search token:
 
 ```bash
-/tmp/bs_ipc.py query search '{"query":"alpha-token-123","limit":5}'
+bs_ipc query search '{"query":"alpha-token-123","limit":5}'
 ```
 
 Modify file:
 
 ```bash
 echo "beta-token-456" >> "$TEST_FILE"
-/tmp/bs_ipc.py query search '{"query":"beta-token-456","limit":5}'
+bs_ipc query search '{"query":"beta-token-456","limit":5}'
 ```
 
 Delete file:
 
 ```bash
 rm -f "$TEST_FILE"
-/tmp/bs_ipc.py indexer reindexPath '{"path":"/Users/rexliu/betterspotlight/tests/Fixtures/standard_home_v1/Desktop"}'
-/tmp/bs_ipc.py query search '{"query":"alpha-token-123","limit":5}'
+bs_ipc indexer reindexPath '{"path":"/Users/rexliu/betterspotlight/Tests/Fixtures/standard_home_v1/Desktop"}'
+bs_ipc query search '{"query":"alpha-token-123","limit":5}'
 ```
 
 Expected:
@@ -500,13 +504,13 @@ Check classification behavior by indexing files under those paths and confirming
 2. Record feedback:
 
 ```bash
-/tmp/bs_ipc.py query recordFeedback '{"itemId":123,"action":"open","query":"useEffect","position":0}'
+bs_ipc query recordFeedback '{"itemId":123,"action":"open","query":"useEffect","position":0}'
 ```
 
 3. Check frequency:
 
 ```bash
-/tmp/bs_ipc.py query getFrequency '{"itemId":123}'
+bs_ipc query getFrequency '{"itemId":123}'
 ```
 
 Expected:
@@ -517,11 +521,11 @@ Expected:
 ### Step 10.2: Interaction/path/type APIs
 
 ```bash
-/tmp/bs_ipc.py query record_interaction '{"query":"useEffect","selectedItemId":123,"selectedPath":"/path/to/file","matchType":"content","resultPosition":1,"frontmostApp":"com.microsoft.VSCode"}'
-/tmp/bs_ipc.py query get_path_preferences '{"limit":10}'
-/tmp/bs_ipc.py query get_file_type_affinity '{}'
-/tmp/bs_ipc.py query run_aggregation '{}'
-/tmp/bs_ipc.py query export_interaction_data '{}'
+bs_ipc query record_interaction '{"query":"useEffect","selectedItemId":123,"selectedPath":"/path/to/file","matchType":"content","resultPosition":1,"frontmostApp":"com.microsoft.VSCode"}'
+bs_ipc query get_path_preferences '{"limit":10}'
+bs_ipc query get_file_type_affinity '{}'
+bs_ipc query run_aggregation '{}'
+bs_ipc query export_interaction_data '{}'
 ```
 
 If `record_interaction` fails with `no such table: interactions`, use T2 (legacy DB not migrated).
@@ -537,7 +541,7 @@ If model/vocab are missing, query logs should show semantic disabled and lexical
 Check logs:
 
 ```bash
-rg -n "EmbeddingManager unavailable|tokenizer vocab not loaded|semantic search disabled" /tmp/bs-query.log
+rg -n "EmbeddingManager unavailable|tokenizer vocab not loaded|semantic search disabled" "$LOG_DIR/query.log"
 ```
 
 Expected:
@@ -555,7 +559,7 @@ Preconditions:
 Conceptual query check:
 
 ```bash
-/tmp/bs_ipc.py query search '{"query":"settings","limit":5}'
+bs_ipc query search '{"query":"settings","limit":5}'
 ```
 
 Expected (when semantic is fully wired and populated):
@@ -614,7 +618,7 @@ Fix:
   - `./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch --no-clean`
 - Reconfigure/rebuild with ONNX Runtime detected.
 
-### T4. `tests/relevance/run_relevance_test.sh` hangs or is unusable
+### T4. `Tests/relevance/run_relevance_test.sh` hangs or is unusable
 
 Symptoms:
 
@@ -643,7 +647,7 @@ Cause:
 Fix:
 
 - Confirm both sockets are alive (`query.sock`, `indexer.sock`), then click Refresh again.
-- Check `/tmp/bs-query.log` and `/tmp/bs-indexer.log` for IPC errors.
+- Check `$LOG_DIR/query.log` and `$LOG_DIR/indexer.log` for IPC errors.
 
 ### T6. Settings actions appear to do nothing
 
@@ -658,7 +662,7 @@ Cause:
 Fix:
 
 - Verify all services are connected (`indexer`, `query`, `extractor`) before triggering actions.
-- Check `/tmp/bs-indexer.log`, `/tmp/bs-query.log`, `/tmp/bs-extractor.log` for the corresponding RPC error.
+- Check `$LOG_DIR/indexer.log`, `$LOG_DIR/query.log`, `$LOG_DIR/extractor.log` for the corresponding RPC error.
 
 ### T7. Small fixture indexed, but search/health stay empty
 
@@ -679,15 +683,17 @@ Workaround:
 
 Symptom:
 
-- PDF extraction failures in logs (`Poppler not found`).
+- PDF extraction unavailable in setup/preflight output (`BS_DEV_PDF_CAPABILITY!=ready`) or query/indexer logs.
 
 Cause:
 
-- Poppler dependency not detected at build/runtime.
+- Poppler dependency was not resolved by `pkg-config` in the same shell/toolchain used for setup+build.
 
 Fix:
 
-- Install Poppler Qt6 development/runtime libs and rebuild.
+- Re-run `./scripts/dev/setup_env.sh --check-only` and confirm `pdf=ready`.
+- Re-run `./scripts/dev/verify_pipeline.sh --build-dir build-stabilize --skip-launch`.
+- Launch via `./scripts/dev/build_launch.sh --build-dir build-stabilize --no-clean` (supported path).
 
 ### T9. OCR failures on image fixtures
 
@@ -729,7 +735,7 @@ Cause:
 
 Fix:
 
-- Use backup/delete/restore DB procedure in Section 7.
+- Relaunch the isolated runtime (Section 7.1) to get a fresh per-run DB, or restore backup if you opted into `--shared-user-data`.
 
 ### T12. `preparing` never exceeds `1`
 
@@ -784,24 +790,17 @@ Fix:
 
 ## 13. Cleanup and Restore
 
-Stop services:
+Stop app/services from the active isolated session:
 
 ```bash
-pkill -f betterspotlight-indexer || true
-pkill -f betterspotlight-query || true
-pkill -f betterspotlight-extractor || true
-```
-
-If you ran controlled DB tests, restore backup:
-
-```bash
-DATA_DIR="$HOME/Library/Application Support/betterspotlight"
-BACKUP_DIR="<the backup dir you created>"
-rm -f "$DATA_DIR/index.db" "$DATA_DIR/index.db-wal" "$DATA_DIR/index.db-shm"
-for f in index.db index.db-wal index.db-shm; do
-  [ -f "$BACKUP_DIR/$f" ] && mv -f "$BACKUP_DIR/$f" "$DATA_DIR/$f"
+source .build/dev-runtime/current-session.sh
+kill "$APP_PID" 2>/dev/null || true
+for pid in $SERVICE_PIDS; do
+  kill "$pid" 2>/dev/null || true
 done
 ```
+
+If you intentionally ran with `--shared-user-data`, restore your backup DB before resuming normal usage.
 
 ---
 

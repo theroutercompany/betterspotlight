@@ -1,26 +1,84 @@
-%PDF-FAKE-1.0
-Title: BetterSpotlight Expansion Proposal
-Author: Product Strategy
-
-Executive summary
-This proposal outlines a phased rollout for semantic relevance improvements.
-The focus is reliability, maintainability, and measurable user outcomes.
-
-Section 1: Problem Statement
-Users can find exact filenames quickly, but conceptual search lags.
-Current ranking fails on intent-heavy queries.
-
-Section 2: Scope and timeline
-- Phase A: corpus and fixture setup
-- Phase B: merge tuning and offline eval
-- Phase C: rollout and monitor
-Estimated timeline is eight weeks.
-
-Section 3: Resourcing
-Engineering: 3 FTE
-Design: 1 FTE
-QA: 1 FTE
-
-Section 4: budget allocation
-Budget allocation prioritizes infra test coverage and onboarding analytics.
-Contingency reserved for extraction edge cases.
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 1142 >>
+stream
+BT
+/F1 12 Tf
+72 760 Td
+(Title: BetterSpotlight Expansion Proposal) Tj
+0 -16 Td
+(Author: Product Strategy) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Executive summary) Tj
+0 -16 Td
+(This proposal outlines a phased rollout for semantic relevance improvements.) Tj
+0 -16 Td
+(The focus is reliability, maintainability, and measurable user outcomes.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Section 1: Problem Statement) Tj
+0 -16 Td
+(Users can find exact filenames quickly, but conceptual search lags.) Tj
+0 -16 Td
+(Current ranking fails on intent-heavy queries.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Section 2: Scope and timeline) Tj
+0 -16 Td
+(- Phase A: corpus and fixture setup) Tj
+0 -16 Td
+(- Phase B: merge tuning and offline eval) Tj
+0 -16 Td
+(- Phase C: rollout and monitor) Tj
+0 -16 Td
+(Estimated timeline is eight weeks.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Section 3: Resourcing) Tj
+0 -16 Td
+(Engineering: 3 FTE) Tj
+0 -16 Td
+(Design: 1 FTE) Tj
+0 -16 Td
+(QA: 1 FTE) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Section 4: budget allocation) Tj
+0 -16 Td
+(Budget allocation prioritizes infra test coverage and onboarding analytics.) Tj
+0 -16 Td
+(Contingency reserved for extraction edge cases.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001434 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1504
+%%EOF

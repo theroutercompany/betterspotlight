@@ -1,11 +1,19 @@
 { pkgs }:
 
+let
+  pkgConfig = pkgs.pkg-config;
+  poppler = pkgs.qt6Packages.poppler;
+  popplerDev = pkgs.lib.getDev poppler;
+  popplerRuntime = pkgs.lib.getLib poppler;
+  popplerPkgConfigPath =
+    "${popplerDev}/lib/pkgconfig:${popplerDev}/share/pkgconfig:"
+    + "${popplerRuntime}/lib/pkgconfig:${popplerRuntime}/share/pkgconfig";
+in
 pkgs.mkShell {
   packages = with pkgs; [
     bash
     cmake
     ninja
-    pkg-config
     git
     jq
     python3
@@ -15,7 +23,9 @@ pkgs.mkShell {
     qt6.qtbase
     qt6.qtdeclarative
     qt6.qttools
+    pkgConfig
     poppler
+    popplerDev
     tesseract
     leptonica
     onnxruntime
@@ -53,6 +63,21 @@ pkgs.mkShell {
 
     export ONNXRuntime_INCLUDE_DIR="${pkgs.onnxruntime.dev}/include"
     export ONNXRuntime_LIBRARY="${pkgs.onnxruntime}/lib/libonnxruntime.dylib"
+    export PKG_CONFIG_BIN="${pkgConfig}/bin/pkg-config"
+    export BS_DEV_POPPLER_PREFIX="${popplerDev}"
+    export BS_DEV_POPPLER_RUNTIME_PREFIX="${popplerRuntime}"
+    export BS_REQUIRE_POPPLER="ON"
+
+    if [[ -n "${popplerPkgConfigPath}" ]]; then
+      export PKG_CONFIG_PATH="${popplerPkgConfigPath}''${PKG_CONFIG_PATH:+:''${PKG_CONFIG_PATH}}"
+    fi
+    if "''${PKG_CONFIG_BIN}" --exists poppler-qt6; then
+      export BS_DEV_POPPLER_BACKEND="poppler-qt6"
+    elif "''${PKG_CONFIG_BIN}" --exists poppler-cpp; then
+      export BS_DEV_POPPLER_BACKEND="poppler-cpp"
+    else
+      export BS_DEV_POPPLER_BACKEND="none"
+    fi
 
     if [[ -d "''${qt_base}/lib/qt-6/plugins" ]]; then
       export QT_PLUGIN_PATH="''${qt_base}/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:''${QT_PLUGIN_PATH}}"

@@ -511,12 +511,12 @@ src/app/
 
 **Deliverables:**
 ```
-tests/relevance/
+Tests/relevance/
   test_corpus.json           - 50 queries (from relevance-testing.md Section 3)
   run_relevance_test.sh      - Test runner script
   baselines.json             - Initial baseline (empty, populated on first run)
 
-tests/fixtures/
+Tests/Fixtures/
   standard_home_v1/          - Controlled fixture (~500 files, ~50MB)
   generate_standard_home.sh  - Fixture regeneration script
 ```

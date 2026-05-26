@@ -1,20 +1,72 @@
-%PDF-FAKE-1.0
-Paper: Efficient Retrieval Augmentation for Desktop Search
-Authors: Internal Research Group
-
-Abstract
-We evaluate retrieval quality under constrained local compute.
-The study compares lexical retrieval, semantic retrieval, and hybrid scoring.
-
-Method
-A controlled corpus with deterministic content is indexed in SQLite FTS5.
-Semantic vectors are generated with quantized embedding models.
-
-Results
-Hybrid retrieval outperforms lexical-only systems on conceptual tasks.
-Latency remains acceptable with bounded candidate expansion.
-
-Conclusion
-High-precision lexical matching should be preserved.
-Semantic scoring should augment, not replace, deterministic ranking.
-# note line 1
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 961 >>
+stream
+BT
+/F1 12 Tf
+72 760 Td
+(Paper: Efficient Retrieval Augmentation for Desktop Search) Tj
+0 -16 Td
+(Authors: Internal Research Group) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Abstract) Tj
+0 -16 Td
+(We evaluate retrieval quality under constrained local compute.) Tj
+0 -16 Td
+(The study compares lexical retrieval, semantic retrieval, and hybrid scoring.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Method) Tj
+0 -16 Td
+(A controlled corpus with deterministic content is indexed in SQLite FTS5.) Tj
+0 -16 Td
+(Semantic vectors are generated with quantized embedding models.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Results) Tj
+0 -16 Td
+(Hybrid retrieval outperforms lexical-only systems on conceptual tasks.) Tj
+0 -16 Td
+(Latency remains acceptable with bounded candidate expansion.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Conclusion) Tj
+0 -16 Td
+(High-precision lexical matching should be preserved.) Tj
+0 -16 Td
+(Semantic scoring should augment, not replace, deterministic ranking.) Tj
+0 -16 Td
+(# note line 1) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001252 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1322
+%%EOF

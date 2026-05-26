@@ -534,7 +534,7 @@ Recommendation: group in the app layer first (lowest risk) and keep QueryService
 
 ### 6.1 Corpus architecture
 
-Single source of truth: `tests/relevance/baselines.json`.
+Single source of truth: `Tests/relevance/baselines.json`.
 
 - Corpus size: 100 deterministic cases.
 - Composition: `exact 20`, `typo_auto 20`, `typo_strict 10`, `phrase 15`, `semantic_probe 20`, `noise 15`.
@@ -551,7 +551,7 @@ Promotion plan
 
 1. Keep deterministic gate at `gatePassRate=90.0` while expanding/tuning.
 2. Require 3 consecutive clean runs of `test-query-service-relevance-fixture` on the 100-case corpus.
-3. Promote `gatePassRate` to `95.0` in `tests/relevance/baselines.json`.
+3. Promote `gatePassRate` to `95.0` in `Tests/relevance/baselines.json`.
 
 ### 6.3 Semantic coverage in deterministic fixture
 

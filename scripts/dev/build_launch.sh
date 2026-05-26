@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SETUP_SCRIPT="${ROOT_DIR}/scripts/dev/setup_env.sh"
 IPC_CALL_SCRIPT="${ROOT_DIR}/scripts/dev/ipc_call.py"
+PREFLIGHT_SCRIPT="${ROOT_DIR}/scripts/dev/verify_preflight.py"
 ENV_FILE="${ROOT_DIR}/.build/dev-env.sh"
 RUNTIME_ROOT_DIR="${ROOT_DIR}/.build/dev-runtime"
 BUILD_DIR_DEFAULT="${ROOT_DIR}/build-dev"
@@ -14,8 +15,14 @@ CLEAN_BUILD=1
 FETCH_BOOTSTRAP_MODELS=1
 BUILD_PIPELINE_TESTS=0
 ALLOW_DEGRADED_PDF=0
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    USE_LAUNCHCTL_ASUSER="${BS_DEV_USE_LAUNCHCTL_ASUSER:-1}"
+else
+    USE_LAUNCHCTL_ASUSER="${BS_DEV_USE_LAUNCHCTL_ASUSER:-0}"
+fi
 
 DATA_DIR=""
+SETTINGS_DIR=""
 SHARED_USER_DATA=0
 START_INDEX=0
 REBUILD_VECTORS=0
@@ -30,6 +37,10 @@ APP_READY_TIMEOUT_SEC="${BS_DEV_APP_READY_TIMEOUT_SEC:-45}"
 INDEX_WAIT_TIMEOUT_SEC="${BS_DEV_INDEX_WAIT_TIMEOUT_SEC:-3600}"
 EMBED_WAIT_TIMEOUT_SEC="${BS_DEV_EMBED_WAIT_TIMEOUT_SEC:-3600}"
 LAST_IPC_ERROR=""
+LAST_QUERY_HEALTH_ERROR_PAYLOAD=""
+LAST_QUERY_HEALTH_OVERALL_STATUS=""
+LAST_QUERY_HEALTH_STATUS_REASON=""
+LAST_QUERY_HEALTH_SNAPSHOT_STATE=""
 
 usage() {
     cat <<'EOF'
@@ -69,6 +80,20 @@ fail() {
     exit 1
 }
 
+sha256_file() {
+    local path="$1"
+    shasum -a 256 "${path}" | awk '{print $1}'
+}
+
+absolute_path() {
+    local path="$1"
+    if [[ "${path}" == /* ]]; then
+        printf '%s\n' "${path}"
+    else
+        printf '%s\n' "${ROOT_DIR}/${path}"
+    fi
+}
+
 trim() {
     local value="$1"
     value="${value#"${value%%[![:space:]]*}"}"
@@ -95,6 +120,8 @@ append_roots_arg() {
     for part in "${parsed[@]}"; do
         part="$(trim "${part}")"
         [[ -n "${part}" ]] || continue
+        part="$(absolute_path "${part}")"
+        [[ -d "${part}" ]] || fail "index root does not exist: ${part}"
         if ! array_contains "${part}" "${ROOTS[@]}"; then
             ROOTS+=("${part}")
         fi
@@ -154,6 +181,27 @@ kill_if_owned() {
         return 0
     fi
     kill_if_alive "${pid}"
+}
+
+remove_launchctl_label() {
+    local label="$1"
+    [[ -n "${label}" ]] || return 0
+    if [[ "$(uname -s)" != "Darwin" || ! -x "/bin/launchctl" ]]; then
+        return 0
+    fi
+    /bin/launchctl asuser "$(id -u)" /bin/launchctl remove "${label}" >/dev/null 2>&1 \
+        || /bin/launchctl remove "${label}" >/dev/null 2>&1 \
+        || true
+}
+
+launchctl_pid_for_label() {
+    local label="$1"
+    [[ -n "${label}" ]] || return 1
+    if [[ "$(uname -s)" != "Darwin" || ! -x "/bin/launchctl" ]]; then
+        return 1
+    fi
+    /bin/launchctl print "gui/$(id -u)/${label}" 2>/dev/null \
+        | awk -F= '/^[[:space:]]*pid =/{gsub(/[[:space:]]/, "", $2); print $2; exit}'
 }
 
 wait_for_path() {
@@ -261,6 +309,69 @@ raise SystemExit(0)
 PY
 }
 
+is_ipc_error_response() {
+    local response_json="$1"
+    python3 - "${response_json}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+raise SystemExit(0 if payload.get("type") == "error" else 1)
+PY
+}
+
+is_query_health_response() {
+    local response_json="$1"
+    python3 - "${response_json}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+result = payload.get("result")
+index_health = result.get("indexHealth") if isinstance(result, dict) else None
+required = (
+    isinstance(index_health, dict)
+    and isinstance(index_health.get("overallStatus"), str)
+    and isinstance(index_health.get("healthStatusReason"), str)
+    and isinstance(index_health.get("queryHealthSnapshotState"), str)
+)
+if not required:
+    raise SystemExit(1)
+
+overall_status = index_health.get("overallStatus", "").strip().lower()
+semantically_acceptable = overall_status in {"healthy", "rebuilding"}
+raise SystemExit(0 if semantically_acceptable else 1)
+PY
+}
+
+query_health_status_fields() {
+    local response_json="$1"
+    python3 - "${response_json}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+result = payload.get("result")
+index_health = result.get("indexHealth") if isinstance(result, dict) else None
+if not isinstance(index_health, dict):
+    print("unknown\tunknown\tunknown")
+    raise SystemExit(0)
+
+overall_status = index_health.get("overallStatus")
+health_status_reason = index_health.get("healthStatusReason")
+snapshot_state = index_health.get("queryHealthSnapshotState")
+
+if not isinstance(overall_status, str) or not overall_status.strip():
+    overall_status = "unknown"
+if not isinstance(health_status_reason, str) or not health_status_reason.strip():
+    health_status_reason = "unknown"
+if not isinstance(snapshot_state, str) or not snapshot_state.strip():
+    snapshot_state = "unknown"
+
+print(f"{overall_status}\t{health_status_reason}\t{snapshot_state}")
+PY
+}
+
 wait_for_service_ping() {
     local name="$1"
     local socket_path="$2"
@@ -301,6 +412,10 @@ wait_for_query_health() {
     local elapsed=0
     local response_file
     response_file="$(mktemp "${RUNTIME_ROOT_DIR}/ipc-query-health.XXXXXX")"
+    LAST_QUERY_HEALTH_ERROR_PAYLOAD=""
+    LAST_QUERY_HEALTH_OVERALL_STATUS=""
+    LAST_QUERY_HEALTH_STATUS_REASON=""
+    LAST_QUERY_HEALTH_SNAPSHOT_STATE=""
 
     while (( elapsed < timeout_sec )); do
         local response=""
@@ -308,8 +423,21 @@ wait_for_query_health() {
             response="$(<"${response_file}")"
         fi
         if [[ -n "${response}" ]] && is_ipc_success_response "${response}"; then
+            read -r LAST_QUERY_HEALTH_OVERALL_STATUS \
+                LAST_QUERY_HEALTH_STATUS_REASON \
+                LAST_QUERY_HEALTH_SNAPSHOT_STATE < <(
+                query_health_status_fields "${response}"
+            )
+            if is_query_health_response "${response}"; then
+                LAST_QUERY_HEALTH_ERROR_PAYLOAD=""
+                rm -f "${response_file}"
+                return 0
+            fi
+        fi
+        if [[ -n "${response}" ]] && is_ipc_error_response "${response}"; then
+            LAST_QUERY_HEALTH_ERROR_PAYLOAD="${response}"
             rm -f "${response_file}"
-            return 0
+            return 1
         fi
         sleep 1
         elapsed=$((elapsed + 1))
@@ -387,16 +515,21 @@ stop_previous_session() {
     local state_file="${RUNTIME_ROOT_DIR}/current-session.sh"
     local previous_app_pid=""
     local previous_service_pids=""
+    local previous_service_labels=""
     local previous_app_binary=""
     local previous_helpers_dir=""
 
     if [[ -f "${state_file}" ]]; then
         previous_app_pid="$(grep -E '^export APP_PID=' "${state_file}" | head -n 1 | cut -d'"' -f2 || true)"
         previous_service_pids="$(grep -E '^export SERVICE_PIDS=' "${state_file}" | head -n 1 | cut -d'"' -f2 || true)"
+        previous_service_labels="$(grep -E '^export SERVICE_LABELS=' "${state_file}" | head -n 1 | cut -d'"' -f2 || true)"
         previous_app_binary="$(grep -E '^export APP_BINARY=' "${state_file}" | head -n 1 | cut -d'"' -f2 || true)"
         previous_helpers_dir="$(grep -E '^export HELPERS_DIR=' "${state_file}" | head -n 1 | cut -d'"' -f2 || true)"
 
         kill_if_owned "${previous_app_pid}" "${previous_app_binary}" "${previous_helpers_dir}"
+        for label in ${previous_service_labels}; do
+            remove_launchctl_label "${label}"
+        done
         for pid in ${previous_service_pids}; do
             kill_if_owned "${pid}" "${previous_app_binary}" "${previous_helpers_dir}"
         done
@@ -409,6 +542,7 @@ write_session_state() {
 #!/usr/bin/env bash
 export APP_PID="${APP_PID}"
 export SERVICE_PIDS="${SERVICE_PIDS}"
+export SERVICE_LABELS="${SERVICE_LABELS}"
 export BUILD_DIR="${BUILD_DIR}"
 export BUILD_TYPE="${BUILD_TYPE}"
 export APP_BUNDLE="${APP_BUNDLE}"
@@ -421,8 +555,105 @@ export SOCKET_DIR="${SOCKET_DIR}"
 export PID_DIR="${PID_DIR}"
 export DATA_DIR="${DATA_DIR}"
 export BETTERSPOTLIGHT_DATA_DIR="${DATA_DIR}"
+export SETTINGS_DIR="${SETTINGS_DIR}"
+export BETTERSPOTLIGHT_SETTINGS_DIR="${SETTINGS_DIR}"
 EOF
     chmod +x "${state_file}"
+}
+
+read_app_pid_from_metadata() {
+    local metadata_path="$1"
+    python3 - "${metadata_path}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+
+pid = payload.get("app_pid")
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+PY
+}
+
+verify_runtime_bundle_helper_parity() {
+    local helpers_dir="$1"
+    local service_name bundle_binary standalone_binary bundle_sha standalone_sha
+    for service_name in indexer extractor query inference; do
+        bundle_binary="${helpers_dir}/betterspotlight-${service_name}"
+        standalone_binary="${BUILD_DIR}/src/services/${service_name}/betterspotlight-${service_name}"
+
+        [[ -x "${bundle_binary}" ]] \
+            || fail "helper binary missing from bundle: ${bundle_binary}"
+        [[ -x "${standalone_binary}" ]] \
+            || fail "standalone helper binary missing: ${standalone_binary}"
+
+        if ! cmp -s "${bundle_binary}" "${standalone_binary}"; then
+            bundle_sha="$(sha256_file "${bundle_binary}")"
+            standalone_sha="$(sha256_file "${standalone_binary}")"
+            fail "runtime parity mismatch for ${service_name}: bundled=${bundle_sha} standalone=${standalone_sha}"
+        fi
+    done
+}
+
+codesign_dev_bundle() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return 0
+    fi
+
+    local codesign_bin="/usr/bin/codesign"
+    [[ -x "${codesign_bin}" ]] || return 0
+
+    log "Ad-hoc signing BetterSpotlight dev bundle for macOS privacy identity..."
+    for service_name in indexer extractor query inference; do
+        "${codesign_bin}" --force --sign - --timestamp=none \
+            "${HELPERS_DIR}/betterspotlight-${service_name}" >/dev/null 2>&1 \
+            || fail "failed to ad-hoc sign helper: ${HELPERS_DIR}/betterspotlight-${service_name}"
+    done
+
+    "${codesign_bin}" --force --sign - --timestamp=none "${APP_BINARY}" >/dev/null 2>&1 \
+        || fail "failed to ad-hoc sign app executable: ${APP_BINARY}"
+    "${codesign_bin}" --force --sign - --timestamp=none "${APP_BUNDLE}" >/dev/null 2>&1 \
+        || fail "failed to ad-hoc sign app bundle: ${APP_BUNDLE}"
+
+    local identifier
+    identifier="$("${codesign_bin}" -dv --verbose=4 "${APP_BUNDLE}" 2>&1 \
+        | awk -F= '/^Identifier=/{print $2; exit}')"
+    [[ "${identifier}" == "com.betterspotlight.app" ]] \
+        || fail "dev bundle signed with unexpected identifier '${identifier:-unknown}'"
+}
+
+register_app_bundle_with_launchservices() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        return 0
+    fi
+
+    local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    [[ -x "${lsregister}" ]] || return 0
+
+    if ! "${lsregister}" -f "${APP_BUNDLE}" >/dev/null 2>&1; then
+        log "Warning: Launch Services registration failed for ${APP_BUNDLE}"
+    fi
+}
+
+launch_app_bundle_with_launchservices() {
+    local attempt
+    for attempt in 1 2; do
+        if "${open_cmd[@]}" >"${LOG_DIR}/open.log" 2>&1; then
+            return 0
+        fi
+
+        if [[ "${attempt}" -lt 2 ]]; then
+            log "Launch Services open attempt ${attempt} failed; refreshing registration and retrying..."
+            register_app_bundle_with_launchservices
+            sleep 1
+        fi
+    done
+    return 1
 }
 
 launch_service() {
@@ -431,6 +662,7 @@ launch_service() {
     local wait_timeout="$3"
     local log_file="${LOG_DIR}/${name}.log"
     local socket_path="${SOCKET_DIR}/${name}.sock"
+    local label="com.betterspotlight.dev.${INSTANCE_ID}.${name}"
 
     [[ -x "${binary}" ]] || fail "service binary is not executable: ${binary}"
 
@@ -448,9 +680,20 @@ launch_service() {
         common_env+=("BETTERSPOTLIGHT_DATA_DIR=${DATA_DIR}")
     fi
 
-    nohup env "${common_env[@]}" "${binary}" >"${log_file}" 2>&1 < /dev/null &
-    local pid=$!
-    SERVICE_PIDS+=" ${pid}"
+    if [[ "${USE_LAUNCHCTL_ASUSER}" == "1" && "$(uname -s)" == "Darwin" && -x "/bin/launchctl" ]]; then
+        remove_launchctl_label "${label}"
+        /bin/launchctl asuser "$(id -u)" /bin/launchctl submit \
+            -l "${label}" \
+            -o "${log_file}" \
+            -e "${log_file}" \
+            -- /usr/bin/env "${common_env[@]}" "${binary}" \
+            || fail "failed to submit launchd job for service '${name}'"
+        SERVICE_LABELS+=" ${label}"
+    else
+        nohup env "${common_env[@]}" "${binary}" >"${log_file}" 2>&1 < /dev/null &
+        local pid=$!
+        SERVICE_PIDS+=" ${pid}"
+    fi
 
     if ! wait_for_path "${socket_path}" "${wait_timeout}"; then
         tail_log_on_failure "${log_file}"
@@ -463,6 +706,13 @@ launch_service() {
             log "Last IPC probe error for ${name}: ${LAST_IPC_ERROR}"
         fi
         fail "service '${name}' did not respond to ping in ${wait_timeout}s"
+    fi
+
+    if [[ "${USE_LAUNCHCTL_ASUSER}" == "1" && "$(uname -s)" == "Darwin" && -x "/bin/launchctl" ]]; then
+        local pid
+        pid="$(launchctl_pid_for_label "${label}" || true)"
+        [[ -n "${pid}" ]] || fail "service '${name}' launchd job did not report a pid"
+        SERVICE_PIDS+=" ${pid}"
     fi
 }
 
@@ -741,8 +991,11 @@ fi
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 
-if [[ "${ALLOW_DEGRADED_PDF}" -eq 0 && "${BS_DEV_PDF_CAPABILITY:-degraded}" != "available" ]]; then
+if [[ "${ALLOW_DEGRADED_PDF}" -eq 0 && "${BS_DEV_PDF_CAPABILITY:-degraded}" != "ready" ]]; then
     fail "Supported manual-run profile requires PDF capability; rerun with --allow-degraded-pdf only for unsupported local forensics"
+fi
+if [[ "${ALLOW_DEGRADED_PDF}" -eq 0 ]]; then
+    "${PREFLIGHT_SCRIPT}" capabilities --profile core-hermetic --root-dir "${ROOT_DIR}"
 fi
 
 mkdir -p "${RUNTIME_ROOT_DIR}"
@@ -781,7 +1034,13 @@ else
 fi
 "${ROOT_DIR}/scripts/ci/build.sh" "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
 
-APP_BUNDLE="${BUILD_DIR}/src/app/betterspotlight.app"
+if [[ "${ALLOW_DEGRADED_PDF}" -eq 0 ]]; then
+    "${PREFLIGHT_SCRIPT}" build-contract --build-dir "${BUILD_DIR}" --profile core-hermetic --root-dir "${ROOT_DIR}"
+    "${PREFLIGHT_SCRIPT}" link-health --build-dir "${BUILD_DIR}"
+    "${PREFLIGHT_SCRIPT}" runtime-parity --build-dir "${BUILD_DIR}"
+fi
+
+APP_BUNDLE="$(absolute_path "${BUILD_DIR}/src/app/betterspotlight.app")"
 APP_BINARY="${APP_BUNDLE}/Contents/MacOS/betterspotlight"
 HELPERS_DIR="${APP_BUNDLE}/Contents/Helpers"
 
@@ -790,6 +1049,9 @@ for service_name in indexer extractor query inference; do
     [[ -x "${HELPERS_DIR}/betterspotlight-${service_name}" ]] \
         || fail "helper binary missing from bundle: ${HELPERS_DIR}/betterspotlight-${service_name}"
 done
+verify_runtime_bundle_helper_parity "${HELPERS_DIR}"
+codesign_dev_bundle
+register_app_bundle_with_launchservices
 
 INSTANCE_ID="dev-$(date +%Y%m%d-%H%M%S)-$$"
 RUNTIME_DIR="/tmp/betterspotlight-$(id -u)/${INSTANCE_ID}"
@@ -798,6 +1060,7 @@ PID_DIR="${RUNTIME_DIR}/pids"
 LOG_DIR="${RUNTIME_ROOT_DIR}/${INSTANCE_ID}"
 APP_LOG="${LOG_DIR}/app.log"
 SERVICE_PIDS=""
+SERVICE_LABELS=""
 APP_PID=""
 
 if [[ "${SHARED_USER_DATA}" -eq 1 ]]; then
@@ -807,6 +1070,8 @@ else
         DATA_DIR="${RUNTIME_ROOT_DIR}/${INSTANCE_ID}/data"
     fi
     mkdir -p "${DATA_DIR}"
+    SETTINGS_DIR="${DATA_DIR}/settings"
+    mkdir -p "${SETTINGS_DIR}"
 fi
 
 mkdir -p "${SOCKET_DIR}" "${PID_DIR}" "${LOG_DIR}"
@@ -818,6 +1083,9 @@ trap '
     for pid in ${SERVICE_PIDS:-}; do
         kill_if_alive "${pid}"
     done
+    for label in ${SERVICE_LABELS:-}; do
+        remove_launchctl_label "${label}"
+    done
 ' ERR INT TERM
 
 log "Starting helper services..."
@@ -828,7 +1096,13 @@ launch_service "inference" "${HELPERS_DIR}/betterspotlight-inference" "${INFEREN
 
 if ! wait_for_query_health "${SOCKET_DIR}/query.sock" "${SERVICE_READY_TIMEOUT_SEC}"; then
     tail_log_on_failure "${LOG_DIR}/query.log"
-    fail "query service health endpoint did not become available"
+    if [[ -n "${LAST_QUERY_HEALTH_ERROR_PAYLOAD}" ]]; then
+        fail "query service health endpoint returned IPC error: ${LAST_QUERY_HEALTH_ERROR_PAYLOAD}"
+    fi
+    if [[ -n "${LAST_QUERY_HEALTH_STATUS_REASON}" ]]; then
+        fail "query service health endpoint did not become semantically ready (overallStatus=${LAST_QUERY_HEALTH_OVERALL_STATUS:-unknown}, healthStatusReason=${LAST_QUERY_HEALTH_STATUS_REASON}, queryHealthSnapshotState=${LAST_QUERY_HEALTH_SNAPSHOT_STATE:-unknown})"
+    fi
+    fail "query service health endpoint did not become semantically ready"
 fi
 if ! wait_for_inference_core_roles "${SOCKET_DIR}/inference.sock" "${INFERENCE_READY_TIMEOUT_SEC}"; then
     tail_log_on_failure "${LOG_DIR}/inference.log"
@@ -837,6 +1111,7 @@ fi
 
 log "Launching BetterSpotlight app..."
 common_app_env=(
+    "BETTERSPOTLIGHT_ALLOW_MULTI_INSTANCE=1"
     "BETTERSPOTLIGHT_INSTANCE_ID=${INSTANCE_ID}"
     "BETTERSPOTLIGHT_RUNTIME_DIR=${RUNTIME_DIR}"
     "BETTERSPOTLIGHT_SOCKET_DIR=${SOCKET_DIR}"
@@ -849,8 +1124,36 @@ common_app_env=(
 if [[ -n "${DATA_DIR}" ]]; then
     common_app_env+=("BETTERSPOTLIGHT_DATA_DIR=${DATA_DIR}")
 fi
-nohup env "${common_app_env[@]}" "${APP_BINARY}" >"${APP_LOG}" 2>&1 < /dev/null &
-APP_PID=$!
+if [[ -n "${SETTINGS_DIR}" ]]; then
+    common_app_env+=("BETTERSPOTLIGHT_SETTINGS_DIR=${SETTINGS_DIR}")
+fi
+if [[ "${USE_LAUNCHCTL_ASUSER}" == "1" && "$(uname -s)" == "Darwin" && -x "/bin/launchctl" ]]; then
+    open_cmd=(/bin/launchctl asuser "$(id -u)" /usr/bin/open -n \
+        --stdout "${LOG_DIR}/app.stdout.log" \
+        --stderr "${APP_LOG}")
+else
+    open_cmd=(/usr/bin/open -n \
+        --stdout "${LOG_DIR}/app.stdout.log" \
+        --stderr "${APP_LOG}")
+fi
+for env_value in "${common_app_env[@]}"; do
+    open_cmd+=(--env "${env_value}")
+done
+open_cmd+=("${APP_BUNDLE}")
+
+if ! launch_app_bundle_with_launchservices; then
+    tail_log_on_failure "${LOG_DIR}/open.log"
+    fail "failed to launch app bundle through Launch Services"
+fi
+
+if ! wait_for_path "${RUNTIME_DIR}/instance.json" "10"; then
+    tail_log_on_failure "${LOG_DIR}/open.log"
+    tail_log_on_failure "${APP_LOG}"
+    fail "app did not write runtime metadata after Launch Services launch"
+fi
+
+APP_PID="$(read_app_pid_from_metadata "${RUNTIME_DIR}/instance.json")" \
+    || fail "app runtime metadata did not contain a valid app pid"
 
 if ! wait_for_log_line "${APP_LOG}" "BetterSpotlight ready" "${APP_READY_TIMEOUT_SEC}"; then
     if ! kill -0 "${APP_PID}" 2>/dev/null; then
@@ -873,7 +1176,13 @@ fi
 
 if ! wait_for_query_health "${SOCKET_DIR}/query.sock" "${SERVICE_READY_TIMEOUT_SEC}"; then
     tail_log_on_failure "${LOG_DIR}/query.log"
-    fail "query service health probe failed after app launch"
+    if [[ -n "${LAST_QUERY_HEALTH_ERROR_PAYLOAD}" ]]; then
+        fail "query service health probe returned IPC error after app launch: ${LAST_QUERY_HEALTH_ERROR_PAYLOAD}"
+    fi
+    if [[ -n "${LAST_QUERY_HEALTH_STATUS_REASON}" ]]; then
+        fail "query service health probe failed after app launch (overallStatus=${LAST_QUERY_HEALTH_OVERALL_STATUS:-unknown}, healthStatusReason=${LAST_QUERY_HEALTH_STATUS_REASON}, queryHealthSnapshotState=${LAST_QUERY_HEALTH_SNAPSHOT_STATE:-unknown})"
+    fi
+    fail "query service health probe was not semantically ready after app launch"
 fi
 if ! wait_for_inference_core_roles "${SOCKET_DIR}/inference.sock" "${INFERENCE_READY_TIMEOUT_SEC}"; then
     tail_log_on_failure "${LOG_DIR}/inference.log"

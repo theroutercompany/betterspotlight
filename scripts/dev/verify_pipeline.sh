@@ -102,6 +102,9 @@ source "${ENV_FILE}"
 log "Checking docs parity..."
 "${PREFLIGHT_SCRIPT}" docs-parity --root-dir "${ROOT_DIR}"
 
+log "Checking fixture integrity and path casing..."
+"${PREFLIGHT_SCRIPT}" fixture-integrity --root-dir "${ROOT_DIR}"
+
 log "Running capability/runtime-mode preflight..."
 CAPABILITY_ARGS=(capabilities --root-dir "${ROOT_DIR}" --profile "${PROFILE}")
 if [[ "${ALLOW_DEGRADED}" -eq 1 ]]; then
@@ -138,10 +141,14 @@ log "Building full default verification target..."
 
 log "Checking configured build contract for profile '${PROFILE}'..."
 BUILD_CONTRACT_ARGS=(build-contract --build-dir "${BUILD_DIR}" --profile "${PROFILE}")
+BUILD_CONTRACT_ARGS+=(--root-dir "${ROOT_DIR}")
 if [[ "${ALLOW_DEGRADED}" -eq 1 ]]; then
     BUILD_CONTRACT_ARGS+=(--allow-degraded)
 fi
 "${PREFLIGHT_SCRIPT}" "${BUILD_CONTRACT_ARGS[@]}"
+
+log "Checking runtime helper parity..."
+"${PREFLIGHT_SCRIPT}" runtime-parity --build-dir "${BUILD_DIR}"
 
 log "Checking CTest inventory for missing executables..."
 python3 - "${BUILD_DIR}" <<'PY'

@@ -51,6 +51,19 @@ elif command -v brew >/dev/null 2>&1; then
     fi
 fi
 
+if [[ -n "${PKG_CONFIG_BIN:-}" ]]; then
+    CMAKE_ARGS+=("-DPKG_CONFIG_EXECUTABLE=${PKG_CONFIG_BIN}")
+fi
+if [[ -n "${PKG_CONFIG_ARGN:-}" ]]; then
+    CMAKE_ARGS+=("-DPKG_CONFIG_ARGN=${PKG_CONFIG_ARGN}")
+fi
+if [[ -n "${ONNXRuntime_INCLUDE_DIR:-}" ]]; then
+    CMAKE_ARGS+=("-DONNXRuntime_INCLUDE_DIR=${ONNXRuntime_INCLUDE_DIR}")
+fi
+if [[ -n "${ONNXRuntime_LIBRARY:-}" ]]; then
+    CMAKE_ARGS+=("-DONNXRuntime_LIBRARY=${ONNXRuntime_LIBRARY}")
+fi
+
 if [[ $# -gt 0 ]]; then
     CMAKE_ARGS+=("$@")
 fi

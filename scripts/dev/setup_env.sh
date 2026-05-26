@@ -8,6 +8,8 @@ OUTPUT_PATH="${BS_DEV_ENV_FILE:-${STATE_DIR}/dev-env.sh}"
 CHECK_ONLY=0
 QUIET=0
 ALLOW_DEGRADED_PDF="${BS_DEV_ALLOW_DEGRADED_PDF:-0}"
+SETUP_LOCK_DIR="${STATE_DIR}/setup-env.lock"
+SETUP_LOCK_OWNER=0
 
 usage() {
     cat <<'EOF'
@@ -27,6 +29,29 @@ log() {
 fail() {
     printf '[dev-setup] Error: %s\n' "$*" >&2
     exit 1
+}
+
+release_setup_lock() {
+    if [[ "${SETUP_LOCK_OWNER}" -eq 1 ]]; then
+        rm -rf "${SETUP_LOCK_DIR}"
+    fi
+}
+
+acquire_setup_lock() {
+    local timeout_sec="${BS_DEV_SETUP_LOCK_TIMEOUT_SEC:-180}"
+    local waited=0
+
+    while ! mkdir "${SETUP_LOCK_DIR}" 2>/dev/null; do
+        if (( waited >= timeout_sec )); then
+            fail "timed out waiting for setup lock: ${SETUP_LOCK_DIR}"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    SETUP_LOCK_OWNER=1
+    printf '%s\n' "$$" > "${SETUP_LOCK_DIR}/pid"
+    trap release_setup_lock EXIT
 }
 
 require_cmd() {
@@ -56,8 +81,103 @@ ensure_gcroot_symlink() {
 
     [[ -e "${target_path}" ]] || fail "cannot create gcroot ${root_name}; target missing: ${target_path}"
     mkdir -p "${NIX_GCROOT_DIR}"
+    if [[ -L "${target_path}" ]]; then
+        target_path="$(python3 - "${target_path}" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+    fi
+    if [[ "${target_path}" == "${link_path}" ]]; then
+        printf '%s\n' "${link_path}"
+        return 0
+    fi
     ln -sfn "${target_path}" "${link_path}"
     printf '%s\n' "${link_path}"
+}
+
+prune_broken_gcroot_symlinks() {
+    mkdir -p "${NIX_GCROOT_DIR}"
+
+    local candidate
+    for candidate in "${NIX_GCROOT_DIR}"/*; do
+        [[ -L "${candidate}" && ! -e "${candidate}" ]] || continue
+        rm -f "${candidate}"
+    done
+}
+
+realpath_dirname_up() {
+    local target_path="$1"
+    local levels_up="${2:-0}"
+
+    python3 - "${target_path}" "${levels_up}" <<'PY'
+import os
+import sys
+
+path = os.path.realpath(sys.argv[1])
+levels = int(sys.argv[2])
+current = os.path.dirname(path)
+for _ in range(levels):
+    current = os.path.dirname(current)
+print(current)
+PY
+}
+
+prepend_path_entry() {
+    local entry="$1"
+    local existing="${2:-}"
+
+    [[ -n "${entry}" ]] || {
+        printf '%s\n' "${existing}"
+        return 0
+    }
+
+    if [[ -z "${existing}" ]]; then
+        printf '%s\n' "${entry}"
+        return 0
+    fi
+
+    case ":${existing}:" in
+        *":${entry}:"*)
+            printf '%s\n' "${existing}"
+            ;;
+        *)
+            printf '%s:%s\n' "${entry}" "${existing}"
+            ;;
+    esac
+}
+
+add_pkgconfig_dirs_from_prefix() {
+    local prefix="$1"
+    local current_path="${2:-}"
+    local candidate=""
+
+    for candidate in "${prefix}/lib/pkgconfig" "${prefix}/share/pkgconfig"; do
+        if [[ -d "${candidate}" ]]; then
+            current_path="$(prepend_path_entry "${candidate}" "${current_path}")"
+        fi
+    done
+
+    printf '%s\n' "${current_path}"
+}
+
+is_nix_store_path() {
+    local candidate="$1"
+    [[ -n "${candidate}" && "${candidate}" == /nix/store/* ]]
+}
+
+discard_unusable_provider_prefixes() {
+    if [[ -n "${PROVIDER_POPPLER_PREFIX:-}" \
+       && ( "${PROVIDER_POPPLER_PREFIX}" == "${NIX_GCROOT_DIR}"/* \
+            || ! -d "${PROVIDER_POPPLER_PREFIX}" ) ]]; then
+        PROVIDER_POPPLER_PREFIX=""
+    fi
+    if [[ -n "${PROVIDER_POPPLER_RUNTIME_PREFIX:-}" \
+       && ( "${PROVIDER_POPPLER_RUNTIME_PREFIX}" == "${NIX_GCROOT_DIR}"/* \
+            || ! -d "${PROVIDER_POPPLER_RUNTIME_PREFIX}" ) ]]; then
+        PROVIDER_POPPLER_RUNTIME_PREFIX=""
+    fi
 }
 
 nix_build_flake_output() {
@@ -92,8 +212,24 @@ in
   ${attr}
     " >/dev/null
 
-    [[ -e "${out_link}" ]] || fail "failed to root nix output for ${attr} at ${out_link}"
-    printf '%s\n' "${out_link}"
+    if [[ -e "${out_link}" ]]; then
+        printf '%s\n' "${out_link}"
+        return 0
+    fi
+
+    # Multi-output Nix derivations may append the output name to --out-link
+    # (for example, onnxruntime-dev -> onnxruntime-dev-dev). Return the
+    # rooted output Nix actually created rather than treating it as missing.
+    local output_link
+    for output_link in "${out_link}-dev" "${out_link}-lib" "${out_link}-out" \
+                       "${out_link}-bin" "${out_link}-man" "${out_link}-doc"; do
+        if [[ -e "${output_link}" ]]; then
+            printf '%s\n' "${output_link}"
+            return 0
+        fi
+    done
+
+    fail "failed to root nix output for ${attr} at ${out_link}"
 }
 
 detect_poppler_backend() {
@@ -185,6 +321,8 @@ done
 
 mkdir -p "${STATE_DIR}"
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
+acquire_setup_lock
+prune_broken_gcroot_symlinks
 
 require_cmd git
 require_cmd cmake
@@ -205,12 +343,34 @@ if [[ "${HAS_QMAKE}" -eq 0 && "${HAS_NIX}" -eq 0 ]]; then
     fail "need either qmake/Qt already installed or nix available to hydrate the toolchain"
 fi
 
-PKG_CONFIG_BIN="$(command -v pkg-config 2>/dev/null || true)"
-if [[ -z "${PKG_CONFIG_BIN}" && "${HAS_NIX}" -eq 1 ]]; then
-    PKG_CONFIG_PREFIX="$(nix_build_flake_output "pkgs.pkg-config" "pkg-config")"
-    if [[ -x "${PKG_CONFIG_PREFIX}/bin/pkg-config" ]]; then
+HOST_PKG_CONFIG_BIN="$(command -v pkg-config 2>/dev/null || true)"
+HOST_PKG_CONFIG_PREFIX=""
+if [[ -n "${HOST_PKG_CONFIG_BIN}" ]]; then
+    HOST_PKG_CONFIG_PREFIX="$(realpath_dirname_up "${HOST_PKG_CONFIG_BIN}" 1)"
+fi
+
+PKG_CONFIG_BIN=""
+PKG_CONFIG_PREFIX=""
+if [[ "${HAS_NIX}" -eq 1 ]]; then
+    if [[ -n "${HOST_PKG_CONFIG_PREFIX}" && -d "${HOST_PKG_CONFIG_PREFIX}" \
+          && "${HOST_PKG_CONFIG_PREFIX}" == /nix/store/* ]]; then
+        PKG_CONFIG_PREFIX="$(ensure_gcroot_symlink "pkg-config-host" "${HOST_PKG_CONFIG_PREFIX}")"
+        [[ -x "${PKG_CONFIG_PREFIX}/bin/pkg-config" ]] \
+            || fail "nix-backed host pkg-config prefix does not contain bin/pkg-config: ${PKG_CONFIG_PREFIX}"
+        PKG_CONFIG_BIN="${PKG_CONFIG_PREFIX}/bin/pkg-config"
+    else
+        PKG_CONFIG_PREFIX="$(nix_build_flake_output "pkgs.pkg-config" "pkg-config")"
+        [[ -x "${PKG_CONFIG_PREFIX}/bin/pkg-config" ]] \
+            || fail "rooted nix pkg-config output is missing bin/pkg-config: ${PKG_CONFIG_PREFIX}"
         PKG_CONFIG_BIN="${PKG_CONFIG_PREFIX}/bin/pkg-config"
     fi
+elif [[ -n "${HOST_PKG_CONFIG_PREFIX}" && -d "${HOST_PKG_CONFIG_PREFIX}" ]]; then
+    PKG_CONFIG_PREFIX="$(ensure_gcroot_symlink "pkg-config-host" "${HOST_PKG_CONFIG_PREFIX}")"
+    [[ -x "${PKG_CONFIG_PREFIX}/bin/pkg-config" ]] \
+        || fail "host pkg-config prefix does not contain bin/pkg-config: ${PKG_CONFIG_PREFIX}"
+    PKG_CONFIG_BIN="${PKG_CONFIG_PREFIX}/bin/pkg-config"
+else
+    fail "pkg-config not found and nix is unavailable"
 fi
 
 xcodebuild -version >/dev/null 2>&1 || fail "xcodebuild is installed but not usable"
@@ -330,7 +490,144 @@ if [[ "${ONNX_LIBRARY}" == /nix/store/*/lib/libonnxruntime.dylib ]]; then
 fi
 
 RESOLVED_PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}"
+POPPLER_PREFIX=""
+POPPLER_RUNTIME_PREFIX=""
+POPPLER_BACKEND=""
+POPPLER_SOURCE=""
+
+# Prefer an already-resolvable backend first so setup does not block on a fresh
+# Nix hydrate when Poppler is already installed and working on this machine.
 POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
+if [[ -n "${POPPLER_BACKEND}" ]]; then
+    PROVIDER_POPPLER_PREFIX="${BS_DEV_POPPLER_PREFIX:-}"
+    PROVIDER_POPPLER_RUNTIME_PREFIX="${BS_DEV_POPPLER_RUNTIME_PREFIX:-${PROVIDER_POPPLER_PREFIX}}"
+    discard_unusable_provider_prefixes
+
+    if [[ -z "${PROVIDER_POPPLER_PREFIX}" && -n "${PKG_CONFIG_BIN}" && -x "${PKG_CONFIG_BIN}" ]]; then
+        PROVIDER_MODULE="poppler-qt6"
+        if [[ "${POPPLER_BACKEND}" == "poppler-cpp" ]]; then
+            PROVIDER_MODULE="poppler-cpp"
+        fi
+        PROVIDER_POPPLER_PREFIX="$(
+            PKG_CONFIG_PATH="${RESOLVED_PKG_CONFIG_PATH}" "${PKG_CONFIG_BIN}" --variable=prefix "${PROVIDER_MODULE}" 2>/dev/null || true
+        )"
+        PROVIDER_POPPLER_RUNTIME_PREFIX="${PROVIDER_POPPLER_PREFIX}"
+    fi
+
+    if [[ -n "${PROVIDER_POPPLER_PREFIX}" && -d "${PROVIDER_POPPLER_PREFIX}" ]]; then
+        POPPLER_PREFIX="$(ensure_gcroot_symlink "poppler-provider" "${PROVIDER_POPPLER_PREFIX}")"
+    fi
+    if [[ -n "${PROVIDER_POPPLER_RUNTIME_PREFIX}" && -d "${PROVIDER_POPPLER_RUNTIME_PREFIX}" ]]; then
+        POPPLER_RUNTIME_PREFIX="$(ensure_gcroot_symlink "poppler-provider-runtime" "${PROVIDER_POPPLER_RUNTIME_PREFIX}")"
+    elif [[ -n "${POPPLER_PREFIX}" ]]; then
+        POPPLER_RUNTIME_PREFIX="${POPPLER_PREFIX}"
+    fi
+    POPPLER_SOURCE="provider"
+fi
+
+if [[ -z "${POPPLER_BACKEND}" ]]; then
+    for prefix in /opt/homebrew/opt/poppler /usr/local/opt/poppler; do
+        if [[ -d "${prefix}" ]]; then
+            POPPLER_PREFIX="$(ensure_gcroot_symlink "poppler-host" "${prefix}")"
+            POPPLER_RUNTIME_PREFIX="${POPPLER_PREFIX}"
+            RESOLVED_PKG_CONFIG_PATH="$(add_pkgconfig_dirs_from_prefix "${POPPLER_PREFIX}" "${RESOLVED_PKG_CONFIG_PATH}")"
+            POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
+            if [[ -n "${POPPLER_BACKEND}" ]]; then
+                POPPLER_SOURCE="host-homebrew"
+                break
+            fi
+        fi
+    done
+fi
+
+# If nothing usable is already present, hydrate Poppler from Nix.
+if [[ -z "${POPPLER_BACKEND}" && "${HAS_NIX}" -eq 1 ]]; then
+    NIX_POPPLER_PREFIX="${BS_DEV_POPPLER_PREFIX:-}"
+    NIX_POPPLER_RUNTIME_PREFIX="${BS_DEV_POPPLER_RUNTIME_PREFIX:-}"
+
+    if [[ -n "${NIX_POPPLER_PREFIX}" ]] && ! is_nix_store_path "${NIX_POPPLER_PREFIX}"; then
+        log "Ignoring non-Nix BS_DEV_POPPLER_PREFIX in supported flow: ${NIX_POPPLER_PREFIX}"
+        NIX_POPPLER_PREFIX=""
+    fi
+    if [[ -n "${NIX_POPPLER_RUNTIME_PREFIX}" ]] && ! is_nix_store_path "${NIX_POPPLER_RUNTIME_PREFIX}"; then
+        log "Ignoring non-Nix BS_DEV_POPPLER_RUNTIME_PREFIX in supported flow: ${NIX_POPPLER_RUNTIME_PREFIX}"
+        NIX_POPPLER_RUNTIME_PREFIX=""
+    fi
+
+    if [[ -z "${NIX_POPPLER_PREFIX}" || ! -d "${NIX_POPPLER_PREFIX}" ]]; then
+        NIX_POPPLER_PREFIX="$(nix_build_flake_output "(pkgs.lib.getDev pkgs.qt6Packages.poppler)" "poppler-qt6-dev" || true)"
+    fi
+    if [[ -z "${NIX_POPPLER_RUNTIME_PREFIX}" || ! -d "${NIX_POPPLER_RUNTIME_PREFIX}" ]]; then
+        NIX_POPPLER_RUNTIME_PREFIX="$(nix_build_flake_output "(pkgs.lib.getLib pkgs.qt6Packages.poppler)" "poppler-qt6-runtime" || true)"
+    fi
+
+    if [[ -n "${NIX_POPPLER_PREFIX}" && -d "${NIX_POPPLER_PREFIX}" ]]; then
+        POPPLER_PREFIX="$(ensure_gcroot_symlink "poppler-qt6-dev" "${NIX_POPPLER_PREFIX}")"
+    fi
+    if [[ -n "${NIX_POPPLER_RUNTIME_PREFIX}" && -d "${NIX_POPPLER_RUNTIME_PREFIX}" ]]; then
+        POPPLER_RUNTIME_PREFIX="$(ensure_gcroot_symlink "poppler-qt6-runtime" "${NIX_POPPLER_RUNTIME_PREFIX}")"
+    elif [[ -n "${POPPLER_PREFIX}" ]]; then
+        POPPLER_RUNTIME_PREFIX="${POPPLER_PREFIX}"
+    fi
+
+    if [[ -n "${POPPLER_PREFIX}" || -n "${POPPLER_RUNTIME_PREFIX}" ]]; then
+        RESOLVED_PKG_CONFIG_PATH="$(add_pkgconfig_dirs_from_prefix "${POPPLER_PREFIX}" "${RESOLVED_PKG_CONFIG_PATH}")"
+        RESOLVED_PKG_CONFIG_PATH="$(add_pkgconfig_dirs_from_prefix "${POPPLER_RUNTIME_PREFIX}" "${RESOLVED_PKG_CONFIG_PATH}")"
+        POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
+        if [[ -n "${POPPLER_BACKEND}" ]]; then
+            POPPLER_SOURCE="nix"
+        else
+            POPPLER_PREFIX=""
+            POPPLER_RUNTIME_PREFIX=""
+        fi
+    fi
+fi
+
+if [[ -z "${POPPLER_BACKEND}" && "${ALLOW_DEGRADED_PDF}" -eq 1 ]]; then
+    POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
+    if [[ -n "${POPPLER_BACKEND}" ]]; then
+    PROVIDER_POPPLER_PREFIX="${BS_DEV_POPPLER_PREFIX:-}"
+    PROVIDER_POPPLER_RUNTIME_PREFIX="${BS_DEV_POPPLER_RUNTIME_PREFIX:-${PROVIDER_POPPLER_PREFIX}}"
+    discard_unusable_provider_prefixes
+
+    if [[ -z "${PROVIDER_POPPLER_PREFIX}" && -n "${PKG_CONFIG_BIN}" && -x "${PKG_CONFIG_BIN}" ]]; then
+        PROVIDER_MODULE="poppler-qt6"
+            if [[ "${POPPLER_BACKEND}" == "poppler-cpp" ]]; then
+                PROVIDER_MODULE="poppler-cpp"
+            fi
+            PROVIDER_POPPLER_PREFIX="$(
+                PKG_CONFIG_PATH="${RESOLVED_PKG_CONFIG_PATH}" "${PKG_CONFIG_BIN}" --variable=prefix "${PROVIDER_MODULE}" 2>/dev/null || true
+            )"
+            PROVIDER_POPPLER_RUNTIME_PREFIX="${PROVIDER_POPPLER_PREFIX}"
+        fi
+
+        if [[ -n "${PROVIDER_POPPLER_PREFIX}" && -d "${PROVIDER_POPPLER_PREFIX}" ]]; then
+            POPPLER_PREFIX="$(ensure_gcroot_symlink "poppler-provider" "${PROVIDER_POPPLER_PREFIX}")"
+        fi
+        if [[ -n "${PROVIDER_POPPLER_RUNTIME_PREFIX}" && -d "${PROVIDER_POPPLER_RUNTIME_PREFIX}" ]]; then
+            POPPLER_RUNTIME_PREFIX="$(ensure_gcroot_symlink "poppler-provider-runtime" "${PROVIDER_POPPLER_RUNTIME_PREFIX}")"
+        elif [[ -n "${POPPLER_PREFIX}" ]]; then
+            POPPLER_RUNTIME_PREFIX="${POPPLER_PREFIX}"
+        fi
+
+        POPPLER_SOURCE="degraded-provider"
+    fi
+fi
+
+if [[ -z "${POPPLER_BACKEND}" && "${ALLOW_DEGRADED_PDF}" -eq 1 ]]; then
+    for prefix in /opt/homebrew/opt/poppler /usr/local/opt/poppler; do
+        if [[ -d "${prefix}" ]]; then
+            POPPLER_PREFIX="$(ensure_gcroot_symlink "poppler-host" "${prefix}")"
+            POPPLER_RUNTIME_PREFIX="${POPPLER_PREFIX}"
+            RESOLVED_PKG_CONFIG_PATH="$(add_pkgconfig_dirs_from_prefix "${POPPLER_PREFIX}" "${RESOLVED_PKG_CONFIG_PATH}")"
+            POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
+            if [[ -n "${POPPLER_BACKEND}" ]]; then
+                POPPLER_SOURCE="degraded-homebrew"
+                break
+            fi
+        fi
+    done
+fi
 REQUIRE_POPPLER=1
 if [[ "${ALLOW_DEGRADED_PDF}" -eq 1 ]]; then
     REQUIRE_POPPLER=0
@@ -340,24 +637,11 @@ if [[ "${REQUIRE_POPPLER}" -eq 1 ]]; then
     BS_REQUIRE_POPPLER_VALUE="ON"
 fi
 
-if [[ -z "${POPPLER_BACKEND}" && "${HAS_NIX}" -eq 1 && "${REQUIRE_POPPLER}" -eq 1 ]]; then
-    POPPLER_PREFIX="$(nix_build_flake_output "pkgs.poppler" "poppler")"
-    POPPLER_PKGCONFIG_DIR="${POPPLER_PREFIX}/lib/pkgconfig"
-    if [[ -d "${POPPLER_PKGCONFIG_DIR}" ]]; then
-        if [[ -n "${RESOLVED_PKG_CONFIG_PATH}" ]]; then
-            RESOLVED_PKG_CONFIG_PATH="${POPPLER_PKGCONFIG_DIR}:${RESOLVED_PKG_CONFIG_PATH}"
-        else
-            RESOLVED_PKG_CONFIG_PATH="${POPPLER_PKGCONFIG_DIR}"
-        fi
-        POPPLER_BACKEND="$(detect_poppler_backend "${RESOLVED_PKG_CONFIG_PATH}")"
-    fi
-fi
-
 if [[ "${REQUIRE_POPPLER}" -eq 1 && -z "${POPPLER_BACKEND}" ]]; then
     fail "Poppler backend not detected. Supported macOS/dev flows require PDF extraction capability. Install Poppler so pkg-config can resolve poppler-qt6 or poppler-cpp, or run with --allow-degraded-pdf (or BS_DEV_ALLOW_DEGRADED_PDF=1) only for unsupported local forensics."
 fi
 
-PDF_CAPABILITY="available"
+PDF_CAPABILITY="ready"
 if [[ -z "${POPPLER_BACKEND}" ]]; then
     PDF_CAPABILITY="degraded"
 fi
@@ -382,8 +666,8 @@ if [[ "${BOOTSTRAP_READY}" -eq 0 ]]; then
 fi
 
 OCR_CAPABILITY="missing"
-if command -v pkg-config >/dev/null 2>&1 \
-   && PKG_CONFIG_PATH="${RESOLVED_PKG_CONFIG_PATH}" pkg-config --exists tesseract; then
+if [[ -n "${PKG_CONFIG_BIN}" && -x "${PKG_CONFIG_BIN}" ]] \
+   && PKG_CONFIG_PATH="${RESOLVED_PKG_CONFIG_PATH}" "${PKG_CONFIG_BIN}" --exists tesseract; then
     OCR_CAPABILITY="ready"
 elif command -v tesseract >/dev/null 2>&1; then
     # CLI-only presence is not sufficient for build/link capability.
@@ -420,6 +704,8 @@ export Qt6QuickTemplates2_DIR="${QTDECLARATIVE_PREFIX}/lib/cmake/Qt6QuickTemplat
 export Qt6QmlTools_DIR="${QTDECLARATIVE_PREFIX}/lib/cmake/Qt6QmlTools"
 export ONNXRuntime_INCLUDE_DIR="${ONNX_INCLUDE_DIR}"
 export ONNXRuntime_LIBRARY="${ONNX_LIBRARY}"
+export PKG_CONFIG_BIN="${PKG_CONFIG_BIN}"
+export PKG_CONFIG_ARGN="--define-prefix"
 export BETTERSPOTLIGHT_MODELS_DIR="${MODELS_DIR}"
 export BETTERSPOTLIGHT_ONLINE_RANKER_BOOTSTRAP_DIR="${ONLINE_RANKER_BOOTSTRAP_DIR}"
 export BS_DEV_ONLINE_RANKER_BOOTSTRAP_READY="${ONLINE_RANKER_BOOTSTRAP_READY}"
@@ -428,6 +714,8 @@ export BS_DEV_PDF_CAPABILITY="${PDF_CAPABILITY}"
 export BS_DEV_OCR_CAPABILITY="${OCR_CAPABILITY}"
 export BS_DEV_ONLINE_RANKER_CAPABILITY="${ONLINE_RANKER_CAPABILITY}"
 export BS_DEV_POPPLER_BACKEND="${POPPLER_BACKEND:-none}"
+export BS_DEV_POPPLER_PREFIX="${POPPLER_PREFIX}"
+export BS_DEV_POPPLER_RUNTIME_PREFIX="${POPPLER_RUNTIME_PREFIX}"
 export BS_REQUIRE_POPPLER="${BS_REQUIRE_POPPLER_VALUE}"
 export BS_DEV_QMLIMPORTSCANNER="${QMLIMPORTSCANNER_PATH}"
 export BS_DEV_MACDEPLOYQT="${MACDEPLOYQT_PATH}"
@@ -445,7 +733,11 @@ log "Validated BetterSpotlight development environment."
 log "Toolchain source: ${TOOLCHAIN_SOURCE} (Qt ${QT_VERSION})"
 log "Capability matrix: semantic=${SEMANTIC_CAPABILITY} pdf=${PDF_CAPABILITY} ocr=${OCR_CAPABILITY} online_ranker=${ONLINE_RANKER_CAPABILITY}"
 if [[ -n "${POPPLER_BACKEND}" ]]; then
-    log "PDF extraction backend: ${POPPLER_BACKEND}"
+    if [[ -n "${POPPLER_SOURCE}" ]]; then
+        log "PDF extraction backend: ${POPPLER_BACKEND} (${POPPLER_SOURCE})"
+    else
+        log "PDF extraction backend: ${POPPLER_BACKEND}"
+    fi
 else
     log "PDF extraction backend: unavailable (degraded profile)"
 fi

@@ -1,20 +1,72 @@
-%PDF-FAKE-1.0
-Software License Agreement
-Version: 3.2
-
-1. Grant of License
-The vendor grants a non-exclusive, non-transferable license.
-
-2. Restrictions
-No reverse engineering except where permitted by law.
-No resale without written authorization.
-
-3. Warranty Disclaimer
-Software provided "as is" without implied warranties.
-
-4. Limitation of Liability
-Liability is limited to fees paid in preceding 12 months.
-# note line 1
-# note line 2
-# note line 3
-# note line 4
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 737 >>
+stream
+BT
+/F1 12 Tf
+72 760 Td
+(Software License Agreement) Tj
+0 -16 Td
+(Version: 3.2) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(1. Grant of License) Tj
+0 -16 Td
+(The vendor grants a non-exclusive, non-transferable license.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(2. Restrictions) Tj
+0 -16 Td
+(No reverse engineering except where permitted by law.) Tj
+0 -16 Td
+(No resale without written authorization.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(3. Warranty Disclaimer) Tj
+0 -16 Td
+(Software provided "as is" without implied warranties.) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(4. Limitation of Liability) Tj
+0 -16 Td
+(Liability is limited to fees paid in preceding 12 months.) Tj
+0 -16 Td
+(# note line 1) Tj
+0 -16 Td
+(# note line 2) Tj
+0 -16 Td
+(# note line 3) Tj
+0 -16 Td
+(# note line 4) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001028 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1098
+%%EOF

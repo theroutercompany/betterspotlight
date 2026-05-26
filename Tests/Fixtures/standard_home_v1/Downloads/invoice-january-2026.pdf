@@ -1,20 +1,72 @@
-%PDF-FAKE-1.0
-Invoice Number: INV-2026-0017
-Billing Date: 2026-01-31
-Due Date: 2026-02-15
-
-Vendor: CloudNode Hosting
-Customer: BetterSpotlight LLC
-
-Line Items
-- Compute instances: 1200.00
-- Managed database: 420.00
-- Object storage: 85.00
-- Support plan: 199.00
-
-Total Due: 1904.00 USD
-# note line 1
-# note line 2
-# note line 3
-# note line 4
-# note line 5
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 625 >>
+stream
+BT
+/F1 12 Tf
+72 760 Td
+(Invoice Number: INV-2026-0017) Tj
+0 -16 Td
+(Billing Date: 2026-01-31) Tj
+0 -16 Td
+(Due Date: 2026-02-15) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Vendor: CloudNode Hosting) Tj
+0 -16 Td
+(Customer: BetterSpotlight LLC) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Line Items) Tj
+0 -16 Td
+(- Compute instances: 1200.00) Tj
+0 -16 Td
+(- Managed database: 420.00) Tj
+0 -16 Td
+(- Object storage: 85.00) Tj
+0 -16 Td
+(- Support plan: 199.00) Tj
+0 -16 Td
+() Tj
+0 -16 Td
+(Total Due: 1904.00 USD) Tj
+0 -16 Td
+(# note line 1) Tj
+0 -16 Td
+(# note line 2) Tj
+0 -16 Td
+(# note line 3) Tj
+0 -16 Td
+(# note line 4) Tj
+0 -16 Td
+(# note line 5) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000916 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+986
+%%EOF

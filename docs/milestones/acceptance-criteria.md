@@ -560,11 +560,11 @@ This section describes the tools, scripts, and processes used to verify each cat
 - **Scripts:**
   - `benchmark_indexing.sh`: indexes a standard fixture (500K files, 50GB), measures time and memory
     - Output: CSV with metrics (total time, peak RSS, avg CPU %)
-    - Fixture location: `/tests/fixtures/large_home/` (version-controlled, ~500K files)
+    - Fixture location: `/Tests/Fixtures/large_home/` (version-controlled, ~500K files)
     - Run command: `./benchmark_indexing.sh /path/to/fixture 2>&1 | tee results.log`
   - `benchmark_search.sh`: runs 100 representative queries, measures latency (P50, P95, P99)
     - Output: CSV with query name, latency, result count
-    - Run command: `./benchmark_search.sh --queries /tests/fixtures/queries.csv --iterations 10`
+    - Run command: `./benchmark_search.sh --queries /Tests/Fixtures/queries.csv --iterations 10`
   - `benchmark_memory.sh`: monitors memory (RSS, VSZ) over 24-hour idle and 24-hour active indexing
     - Output: CSV with timestamp, RSS, VSZ, CPU %
     - Run command: `./benchmark_memory.sh --duration 24h --mode idle|active`
@@ -625,7 +625,7 @@ This section describes the tools, scripts, and processes used to verify each cat
 ### Relevance & Search Quality Verification
 
 #### Test Corpus Definition
-- **Location:** `/tests/fixtures/test_corpus.json`
+- **Location:** `/Tests/Fixtures/test_corpus.json`
 - **Format:**
   ```json
   {
@@ -660,7 +660,7 @@ This section describes the tools, scripts, and processes used to verify each cat
   }
   ```
 - **Fixture:** Standardized home directory with 500 representative files
-  - Location: `/tests/fixtures/standard_home_v1/`
+  - Location: `/Tests/Fixtures/standard_home_v1/`
   - Includes: code projects, documents, images, PDFs, configs, media
   - Version-controlled in Git (fixtures stored as TAR or ZIP for efficiency)
 
@@ -671,7 +671,7 @@ This section describes the tools, scripts, and processes used to verify each cat
   - Checks if `expected_file` is in top 3
   - Counts pass/fail
   - Output: CSV with query, expected file, actual top 3, pass/fail, reason if fail
-  - Run command: `./score_relevance.sh --corpus /tests/fixtures/test_corpus.json --output results.csv`
+  - Run command: `./score_relevance.sh --corpus /Tests/Fixtures/test_corpus.json --output results.csv`
 - **Pass criterion:**
   - M1/M2: "Pass" if expected file is in top 3 results
   - M3: Same as M2
@@ -750,7 +750,7 @@ This section describes the tools, scripts, and processes used to verify each cat
 ## Appendix: Fixture & Test Data
 
 ### Standard Test Fixture (500K files, 50GB)
-- **Location:** `/tests/fixtures/large_home/`
+- **Location:** `/Tests/Fixtures/large_home/`
 - **Composition:**
   - Code projects (20): Python, JavaScript, C++, Rust, Go, etc.
   - Documents (50): Word, PDF, Markdown, text files
@@ -763,7 +763,7 @@ This section describes the tools, scripts, and processes used to verify each cat
   - Re-generated annually or when patterns change significantly
 
 ### Test Corpus (100 queries)
-- **Location:** `/tests/fixtures/test_corpus.json`
+- **Location:** `/Tests/Fixtures/test_corpus.json`
 - **Maintained by:** Team lead, updated per milestone
 - **Changes reviewed in:** pull request before merge
 

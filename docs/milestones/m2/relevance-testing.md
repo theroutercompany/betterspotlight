@@ -24,17 +24,17 @@ If the answer to question 2 is "no" on any query category, the semantic system i
 | Property | Value |
 |----------|-------|
 | Name | `standard_home_v1` |
-| Location | `tests/fixtures/standard_home_v1/` |
+| Location | `Tests/Fixtures/standard_home_v1/` |
 | Total files | ~500 (representative, not 500K) |
 | Total size | ~50MB (small enough to version-control) |
 | Purpose | Controlled, deterministic relevance testing |
 
-The fixture is NOT the 500K-file performance benchmark fixture (that lives at `tests/fixtures/large_home/` and is used for latency/throughput testing). The relevance fixture is small, version-controlled, and designed so every query has exactly one correct answer.
+The fixture is NOT the 500K-file performance benchmark fixture (that lives at `Tests/Fixtures/large_home/` and is used for latency/throughput testing). The relevance fixture is small, version-controlled, and designed so every query has exactly one correct answer.
 
 ### 2.2 Directory Structure
 
 ```
-tests/fixtures/standard_home_v1/
+Tests/Fixtures/standard_home_v1/
   Documents/
     budget-2026.xlsx                    # Spreadsheet with financial data
     meeting-notes-jan.md                # Markdown meeting notes
@@ -140,11 +140,11 @@ Every file in the fixture must contain realistic, deterministic content. Specifi
 
 ### 2.4 Fixture Generation
 
-The fixture is hand-created, not procedurally generated. Each file is authored to contain specific keywords and concepts that map to test queries. This ensures exact reproducibility.
+The fixture content is hand-authored, even where some binary assets are generated from deterministic templates. Each file is authored to contain specific keywords and concepts that map to test queries. This ensures exact reproducibility.
 
 The fixture is committed to Git as-is (no tarball needed at 50MB). Binary files (PDF, XLSX, PPTX) are committed as actual files, not placeholders, because the extractors must be able to parse them.
 
-A generation script (`tests/fixtures/generate_standard_home.sh`) is provided to re-create the fixture from templates if needed, but the committed fixture is the source of truth.
+A generation script ([Tests/Fixtures/generate_standard_home.sh](/Users/rexliu/betterspotlight/Tests/Fixtures/generate_standard_home.sh)) is provided to re-create the committed PDF fixture assets from deterministic text templates if needed, but the committed fixture remains the source of truth.
 
 ---
 
@@ -341,7 +341,7 @@ If the second condition fails, semantic search is not providing value and should
 
 ### 5.1 Script
 
-`tests/relevance/run_relevance_test.sh`
+`Tests/relevance/run_relevance_test.sh`
 
 ```
 Usage:
@@ -351,9 +351,9 @@ Options:
   --mode fts5       Run FTS5-only baseline
   --mode semantic   Run FTS5+semantic
   --mode both       Run both and produce comparison (default)
-  --corpus          Path to test_corpus.json (default: tests/relevance/test_corpus.json)
-  --fixture         Path to fixture directory (default: tests/fixtures/standard_home_v1/)
-  --output          Path to results CSV (default: tests/relevance/results.csv)
+  --corpus          Path to test_corpus.json (default: Tests/relevance/test_corpus.json)
+  --fixture         Path to fixture directory (default: Tests/Fixtures/standard_home_v1/)
+  --output          Path to results CSV (default: Tests/relevance/results.csv)
 ```
 
 ### 5.2 Execution Flow
@@ -418,7 +418,7 @@ A/B comparison:
 
 ### 6.1 Baseline File
 
-`tests/relevance/baselines.json`
+`Tests/relevance/baselines.json`
 
 ```json
 {
@@ -491,12 +491,12 @@ Add to `.github/workflows/ci.yml`:
       - name: Index fixture
         run: |
           ./build/bin/betterspotlight-indexer \
-            --root tests/fixtures/standard_home_v1/ \
+            --root Tests/Fixtures/standard_home_v1/ \
             --db /tmp/test-index.db \
             --wait-for-complete
       - name: Run relevance test
         run: |
-          ./tests/relevance/run_relevance_test.sh \
+          ./Tests/relevance/run_relevance_test.sh \
             --mode both \
             --output /tmp/relevance-results.csv
       - name: Upload results
@@ -562,13 +562,13 @@ The M3 fixture expands to `standard_home_v2` with additional directories and fil
 ## 10. File Layout
 
 ```
-tests/relevance/
+Tests/relevance/
   test_corpus.json              # The 50 queries
   run_relevance_test.sh         # Test runner script
   baselines.json                # Historical baseline results
   results.csv                   # Latest run output (gitignored)
 
-tests/fixtures/
+Tests/Fixtures/
   standard_home_v1/             # The controlled fixture (committed)
     Documents/
     Desktop/
