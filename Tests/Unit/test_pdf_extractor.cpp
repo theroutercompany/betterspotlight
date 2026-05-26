@@ -5,7 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
+#include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QVector>
 
@@ -19,6 +19,15 @@ QString fixturePdfPath()
 #else
     return QString();
 #endif
+}
+
+bool requiresSupportedPdfCapability()
+{
+    const QString pdfCapability =
+        QProcessEnvironment::systemEnvironment().value(QStringLiteral("BS_DEV_PDF_CAPABILITY"))
+            .trimmed()
+            .toLower();
+    return pdfCapability == QStringLiteral("ready");
 }
 
 QByteArray escapePdfLiteral(const QString& text)
@@ -87,6 +96,7 @@ class TestPdfExtractor : public QObject {
 private slots:
     void testSupportsAndMissingPath();
     void testExtractsProgrammaticValidPdf();
+    void testFixturePdfInSupportedProfile();
     void testCorruptedAndValidPdf();
 };
 
@@ -146,6 +156,9 @@ void TestPdfExtractor::testExtractsProgrammaticValidPdf()
     const bs::ExtractionResult result = extractor.extract(pdfPath);
 
     if (result.status == bs::ExtractionResult::Status::UnsupportedFormat) {
+        if (requiresSupportedPdfCapability()) {
+            QFAIL("PDF backend unavailable while BS_DEV_PDF_CAPABILITY=ready");
+        }
         QVERIFY(result.errorMessage.has_value());
         QVERIFY(result.errorMessage->contains(QStringLiteral("unavailable"),
                                               Qt::CaseInsensitive));
@@ -156,6 +169,27 @@ void TestPdfExtractor::testExtractsProgrammaticValidPdf()
     QVERIFY(result.content.has_value());
     QVERIFY(result.content->contains(QStringLiteral("BetterSpotlight"),
                                      Qt::CaseInsensitive));
+}
+
+void TestPdfExtractor::testFixturePdfInSupportedProfile()
+{
+    const QString fixturePath = fixturePdfPath();
+    QVERIFY2(!fixturePath.isEmpty(), "PDF fixture path is not configured");
+    QVERIFY2(QFileInfo::exists(fixturePath), "PDF fixture file is missing");
+
+    bs::PdfExtractor extractor;
+    const bs::ExtractionResult result = extractor.extract(fixturePath);
+
+    if (result.status == bs::ExtractionResult::Status::UnsupportedFormat) {
+        if (requiresSupportedPdfCapability()) {
+            QFAIL("PDF fixture extraction is unavailable while BS_DEV_PDF_CAPABILITY=ready");
+        }
+        QSKIP("PDF backend unavailable on this host");
+    }
+
+    QCOMPARE(result.status, bs::ExtractionResult::Status::Success);
+    QVERIFY(result.content.has_value());
+    QVERIFY(!result.content->trimmed().isEmpty());
 }
 
 void TestPdfExtractor::testCorruptedAndValidPdf()
@@ -183,35 +217,10 @@ void TestPdfExtractor::testCorruptedAndValidPdf()
         if (fixture.status == bs::ExtractionResult::Status::Success) {
             QVERIFY(fixture.content.has_value());
             QVERIFY(!fixture.content->trimmed().isEmpty());
+            QVERIFY(fixture.content->contains(QStringLiteral("Total Due"),
+                                             Qt::CaseInsensitive));
         }
     }
-
-    if (!QFileInfo::exists(QStringLiteral("/usr/bin/textutil"))) {
-        QSKIP("textutil is unavailable on this host");
-    }
-
-    const QString seedPath = dir.path() + QStringLiteral("/seed.txt");
-    {
-        QFile seed(seedPath);
-        QVERIFY(seed.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text));
-        seed.write("PDF extractor integration fixture content");
-    }
-
-    const QString pdfPath = dir.path() + QStringLiteral("/fixture.pdf");
-    QProcess convert;
-    convert.start(QStringLiteral("/usr/bin/textutil"),
-                  {QStringLiteral("-convert"), QStringLiteral("pdf"),
-                   QStringLiteral("-output"), pdfPath, seedPath});
-    QVERIFY(convert.waitForFinished(15000));
-    if (convert.exitStatus() != QProcess::NormalExit || convert.exitCode() != 0) {
-        QSKIP("textutil failed to generate PDF fixture");
-    }
-
-    const bs::ExtractionResult ok = extractor.extract(pdfPath);
-    QCOMPARE(ok.status, bs::ExtractionResult::Status::Success);
-    QVERIFY(ok.content.has_value());
-    QVERIFY(ok.content->contains(QStringLiteral("extractor integration fixture"),
-                                 Qt::CaseInsensitive));
 }
 
 QTEST_MAIN(TestPdfExtractor)

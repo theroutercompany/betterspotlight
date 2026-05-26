@@ -57,7 +57,7 @@ int currentProcessRssMb()
 #endif
 }
 
-bool isTransientExtractionFailure(const PreparedWork& prepared)
+bool shouldRetryTransientExtractionFailureImpl(const PreparedWork& prepared)
 {
     if (!prepared.failure.has_value()) {
         return false;
@@ -70,12 +70,12 @@ bool isTransientExtractionFailure(const PreparedWork& prepared)
     switch (status) {
     case ExtractionResult::Status::Inaccessible:
     case ExtractionResult::Status::Timeout:
-    case ExtractionResult::Status::Unknown:
         return true;
     case ExtractionResult::Status::Success:
     case ExtractionResult::Status::CorruptedFile:
     case ExtractionResult::Status::UnsupportedFormat:
     case ExtractionResult::Status::SizeExceeded:
+    case ExtractionResult::Status::Unknown:
     case ExtractionResult::Status::Cancelled:
         return false;
     }
@@ -108,6 +108,11 @@ Pipeline::ActorMode readActorMode()
 }
 
 } // namespace
+
+bool shouldRetryTransientExtractionFailure(const PreparedWork& prepared)
+{
+    return shouldRetryTransientExtractionFailureImpl(prepared);
+}
 
 // ── Construction / destruction ──────────────────────────────
 
@@ -566,16 +571,12 @@ Pipeline::DrainResult Pipeline::waitForPipelineDrain()
 {
     DrainResult lastSnapshot;
     for (int attempt = 0; attempt < m_runtimeConfig.drainPollAttempts; ++attempt) {
-        size_t preparedDepth = 0;
-        {
-            std::lock_guard<std::mutex> preparedLock(m_preparedMutex);
-            preparedDepth = m_preparedLiveQueue.size() + m_preparedRebuildQueue.size();
-        }
+        const size_t pendingDepth = totalPendingDepth();
         lastSnapshot.preparing = m_preparingCount.load();
         lastSnapshot.writing = m_writingCount.load();
-        lastSnapshot.pendingDepth = preparedDepth;
+        lastSnapshot.pendingDepth = pendingDepth;
         lastSnapshot.reason = QStringLiteral("drain_timeout");
-        lastSnapshot.drained = (preparedDepth == 0)
+        lastSnapshot.drained = (pendingDepth == 0)
             && (lastSnapshot.preparing == 0)
             && (lastSnapshot.writing == 0);
         if (lastSnapshot.drained) {
@@ -1179,7 +1180,7 @@ void Pipeline::writerLoop()
             m_processedCount.fetch_add(1);
 
             if (result.status == IndexResult::Status::ExtractionFailed) {
-                const bool shouldRetry = isTransientExtractionFailure(prepared)
+                const bool shouldRetry = shouldRetryTransientExtractionFailure(prepared)
                     && prepared.retryCount < m_runtimeConfig.maxPipelineRetries;
                 if (shouldRetry) {
                     WorkItem retryItem;

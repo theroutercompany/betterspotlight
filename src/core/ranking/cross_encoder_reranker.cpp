@@ -22,6 +22,70 @@
 
 namespace bs {
 
+namespace cross_encoder_detail {
+
+std::optional<std::vector<size_t>> candidateLogitOffsets(const std::vector<int64_t>& shape,
+                                                         int candidateCount,
+                                                         size_t elementCount)
+{
+    if (candidateCount <= 0 || elementCount == 0 || shape.empty()) {
+        return std::nullopt;
+    }
+
+    std::vector<size_t> offsets;
+    offsets.reserve(static_cast<size_t>(candidateCount));
+
+    if (shape.size() == 1) {
+        if (shape[0] < candidateCount) {
+            return std::nullopt;
+        }
+        for (int i = 0; i < candidateCount; ++i) {
+            const size_t offset = static_cast<size_t>(i);
+            if (offset >= elementCount) {
+                return std::nullopt;
+            }
+            offsets.push_back(offset);
+        }
+        return offsets;
+    }
+
+    if (shape.size() == 2) {
+        const int64_t rows = shape[0];
+        const int64_t cols = shape[1];
+        if (rows != candidateCount || cols <= 0) {
+            return std::nullopt;
+        }
+
+        const int64_t scoreColumn = cols > 1 ? 1 : 0;
+        for (int i = 0; i < candidateCount; ++i) {
+            const int64_t rawOffset = static_cast<int64_t>(i) * cols + scoreColumn;
+            if (rawOffset < 0 || static_cast<uint64_t>(rawOffset) >= elementCount) {
+                return std::nullopt;
+            }
+            offsets.push_back(static_cast<size_t>(rawOffset));
+        }
+        return offsets;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<float> sigmoidScoreFromLogit(float logit)
+{
+    if (!std::isfinite(logit)) {
+        return std::nullopt;
+    }
+
+    const double scaled = std::clamp(static_cast<double>(logit), -60.0, 60.0);
+    const double score = 1.0 / (1.0 + std::exp(-scaled));
+    if (!std::isfinite(score)) {
+        return std::nullopt;
+    }
+    return static_cast<float>(std::clamp(score, 0.0, 1.0));
+}
+
+} // namespace cross_encoder_detail
+
 namespace {
 
 #if BS_WITH_ONNX
@@ -207,6 +271,19 @@ int CrossEncoderReranker::rerank(const QString& query,
             return 0;
         }
 
+        const Ort::TensorTypeAndShapeInfo outputInfo = outputs[0].GetTensorTypeAndShapeInfo();
+        const std::vector<int64_t> outputShape = outputInfo.GetShape();
+        const size_t outputElementCount = outputInfo.GetElementCount();
+        const auto logitOffsets =
+            cross_encoder_detail::candidateLogitOffsets(outputShape,
+                                                        candidateCount,
+                                                        outputElementCount);
+        if (!logitOffsets.has_value()) {
+            qWarning() << "CrossEncoderReranker: unsupported logits shape for candidate count"
+                       << candidateCount;
+            return 0;
+        }
+
         const float* logits = outputs[0].GetTensorData<float>();
         if (!logits) {
             return 0;
@@ -214,14 +291,20 @@ int CrossEncoderReranker::rerank(const QString& query,
 
         int boostedCount = 0;
         for (int i = 0; i < candidateCount; ++i) {
-            const float logit = logits[i];
-            const float sigmoid = 1.0f / (1.0f + std::exp(-logit));
+            const float logit = logits[logitOffsets->at(static_cast<size_t>(i))];
+            const std::optional<float> sigmoid =
+                cross_encoder_detail::sigmoidScoreFromLogit(logit);
+            if (!sigmoid.has_value()) {
+                qWarning() << "CrossEncoderReranker: non-finite logit for candidate" << i;
+                continue;
+            }
 
             auto& result = results[static_cast<size_t>(i)];
-            result.crossEncoderScore = sigmoid;
+            result.crossEncoderScore = *sigmoid;
 
-            if (sigmoid >= config.minScoreThreshold) {
-                const double boost = static_cast<double>(config.weight) * static_cast<double>(sigmoid);
+            if (*sigmoid >= config.minScoreThreshold) {
+                const double boost = static_cast<double>(config.weight)
+                    * static_cast<double>(*sigmoid);
                 result.score += boost;
                 result.scoreBreakdown.crossEncoderBoost = boost;
                 ++boostedCount;

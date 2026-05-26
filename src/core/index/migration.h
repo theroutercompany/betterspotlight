@@ -9,6 +9,7 @@ bool applyMigrations(sqlite3* db, int targetVersion);
 
 // Read the current schema_version from the settings table.
 // Returns 0 if the table does not exist yet (fresh database).
+// Returns -1 if the stored schema version is unreadable or malformed.
 int currentSchemaVersion(sqlite3* db);
 
 } // namespace bs

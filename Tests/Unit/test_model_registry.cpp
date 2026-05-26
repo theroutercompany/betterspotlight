@@ -325,6 +325,13 @@ void TestModelRegistry::runGetSessionFallbackCycleStops()
 void TestModelRegistry::runEnsureWritableModelsSeeded()
 {
     QStandardPaths::setTestModeEnabled(true);
+    const auto restoreStandardPaths = qScopeGuard([]() {
+        QStandardPaths::setTestModeEnabled(false);
+    });
+
+    QTemporaryDir dataDir;
+    QVERIFY(dataDir.isValid());
+    ScopedEnvVar dataDirEnv("BETTERSPOTLIGHT_DATA_DIR", dataDir.path().toUtf8());
 
     const QString writable = bs::ModelRegistry::writableModelsDir();
     QDir(writable).removeRecursively();

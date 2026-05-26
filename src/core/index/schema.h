@@ -300,9 +300,9 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('fastEmbeddingEnabled', '1')
 INSERT OR IGNORE INTO settings (key, value) VALUES ('dualEmbeddingFusionEnabled', '1');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('strongEmbeddingTopK', '40');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('fastEmbeddingTopK', '60');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticBudgetMs', '70');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticBudgetMs', '350');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerCascadeEnabled', '1');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankBudgetMs', '120');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankBudgetMs', '600');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerStage1Max', '40');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankerStage2Max', '12');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('personalizedLtrEnabled', '1');

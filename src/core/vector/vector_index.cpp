@@ -10,13 +10,89 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <optional>
 
 namespace bs {
 
 namespace {
 
 constexpr int kMetaVersion = 2;
+constexpr uint64_t kMaxRestoredElements = 10'000'000ULL;
+
+std::optional<int> readIntegerField(const QJsonObject& meta,
+                                    const QString& key,
+                                    std::optional<int> fallback = std::nullopt)
+{
+    const QJsonValue value = meta.value(key);
+    if (value.isUndefined()) {
+        return fallback;
+    }
+
+    bool ok = false;
+    qint64 parsed = 0;
+    if (value.isDouble()) {
+        const double raw = value.toDouble();
+        if (!std::isfinite(raw) || std::floor(raw) != raw
+            || raw < static_cast<double>(std::numeric_limits<int>::min())
+            || raw > static_cast<double>(std::numeric_limits<int>::max())) {
+            return std::nullopt;
+        }
+        parsed = static_cast<qint64>(raw);
+        ok = true;
+    } else if (value.isString()) {
+        parsed = value.toString().trimmed().toLongLong(&ok, 10);
+    }
+
+    if (!ok || parsed < std::numeric_limits<int>::min()
+        || parsed > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(parsed);
+}
+
+std::optional<uint64_t> readUnsignedIntegerField(const QJsonObject& meta,
+                                                 const QString& key,
+                                                 uint64_t fallback)
+{
+    const QJsonValue value = meta.value(key);
+    if (value.isUndefined()) {
+        return fallback;
+    }
+
+    bool ok = false;
+    quint64 parsed = 0;
+    if (value.isDouble()) {
+        const double raw = value.toDouble();
+        if (!std::isfinite(raw) || std::floor(raw) != raw || raw < 0.0
+            || raw > static_cast<double>(std::numeric_limits<quint64>::max())) {
+            return std::nullopt;
+        }
+        parsed = static_cast<quint64>(raw);
+        ok = true;
+    } else if (value.isString()) {
+        parsed = value.toString().trimmed().toULongLong(&ok, 10);
+    }
+
+    if (!ok) {
+        return std::nullopt;
+    }
+    return static_cast<uint64_t>(parsed);
+}
+
+bool vectorValuesAreFinite(const float* values, int dimensions)
+{
+    if (values == nullptr || dimensions <= 0) {
+        return false;
+    }
+    for (int i = 0; i < dimensions; ++i) {
+        if (!std::isfinite(values[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 } // namespace
 
@@ -105,7 +181,9 @@ bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath
     }
 
     const QJsonObject meta = metaDoc.object();
-    const int dimensions = meta.value(QStringLiteral("dimensions")).toInt(-1);
+    const std::optional<int> dimensionsOpt =
+        readIntegerField(meta, QStringLiteral("dimensions"));
+    const int dimensions = dimensionsOpt.value_or(-1);
     if (dimensions <= 0) {
         qCritical() << "VectorIndex::load missing/invalid dimensions in metadata";
         return false;
@@ -117,7 +195,13 @@ bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath
     }
 
     m_metadata.dimensions = dimensions;
-    m_metadata.schemaVersion = meta.value(QStringLiteral("version")).toInt(kMetaVersion);
+    const std::optional<int> versionOpt =
+        readIntegerField(meta, QStringLiteral("version"), kMetaVersion);
+    if (!versionOpt.has_value()) {
+        qCritical() << "VectorIndex::load invalid metadata version";
+        return false;
+    }
+    m_metadata.schemaVersion = *versionOpt;
     m_metadata.modelId = meta.value(QStringLiteral("model_id"))
                              .toString(meta.value(QStringLiteral("model")).toString(QStringLiteral("unknown")))
                              .toStdString();
@@ -128,17 +212,41 @@ bool VectorIndex::load(const std::string& indexPath, const std::string& metaPath
                               .toString(QStringLiteral("cpu"))
                               .toStdString();
 
-    const int efConstruction = meta.value(QStringLiteral("ef_construction")).toInt(kEfConstruction);
-    const int m = meta.value(QStringLiteral("m")).toInt(kM);
+    const std::optional<int> efConstructionOpt =
+        readIntegerField(meta, QStringLiteral("ef_construction"), kEfConstruction);
+    const std::optional<int> mOpt = readIntegerField(meta, QStringLiteral("m"), kM);
+    if (!efConstructionOpt.has_value() || !mOpt.has_value()
+        || *efConstructionOpt <= 0 || *mOpt <= 0) {
+        qCritical() << "VectorIndex::load invalid HNSW metadata parameters";
+        return false;
+    }
+    const int efConstruction = *efConstructionOpt;
+    const int m = *mOpt;
     if (efConstruction != kEfConstruction || m != kM) {
         qWarning() << "VectorIndex::load metadata params differ from compiled defaults"
                    << "ef_construction=" << efConstruction
                    << "m=" << m;
     }
 
-    const uint64_t totalElementsMeta = meta.value(QStringLiteral("total_elements")).toVariant().toULongLong();
-    const uint64_t nextLabelMeta = meta.value(QStringLiteral("next_label")).toVariant().toULongLong();
-    const int deletedElementsMeta = meta.value(QStringLiteral("deleted_elements")).toInt(0);
+    const std::optional<uint64_t> totalElementsOpt =
+        readUnsignedIntegerField(meta, QStringLiteral("total_elements"), 0);
+    const std::optional<uint64_t> nextLabelOpt =
+        readUnsignedIntegerField(meta, QStringLiteral("next_label"), 0);
+    const std::optional<int> deletedElementsOpt =
+        readIntegerField(meta, QStringLiteral("deleted_elements"), 0);
+    if (!totalElementsOpt.has_value() || !nextLabelOpt.has_value()
+        || !deletedElementsOpt.has_value() || *deletedElementsOpt < 0) {
+        qCritical() << "VectorIndex::load invalid element counters in metadata";
+        return false;
+    }
+
+    const uint64_t totalElementsMeta = *totalElementsOpt;
+    const uint64_t nextLabelMeta = *nextLabelOpt;
+    const int deletedElementsMeta = *deletedElementsOpt;
+    if (totalElementsMeta > kMaxRestoredElements || nextLabelMeta > kMaxRestoredElements) {
+        qCritical() << "VectorIndex::load metadata element counters too large";
+        return false;
+    }
 
     uint64_t targetCapacity = static_cast<uint64_t>(kInitialCapacity);
     targetCapacity = std::max(targetCapacity, totalElementsMeta + 1);
@@ -216,6 +324,10 @@ uint64_t VectorIndex::addVector(const float* embedding)
         qWarning() << "VectorIndex::addVector called with unavailable index or null embedding";
         return std::numeric_limits<uint64_t>::max();
     }
+    if (!vectorValuesAreFinite(embedding, m_metadata.dimensions)) {
+        qWarning() << "VectorIndex::addVector rejected non-finite embedding";
+        return std::numeric_limits<uint64_t>::max();
+    }
 
     std::lock_guard<std::mutex> lock(m_writeMutex);
 
@@ -256,6 +368,10 @@ std::vector<VectorIndex::KnnResult> VectorIndex::search(const float* queryVector
 {
     std::vector<KnnResult> results;
     if (!m_index || queryVector == nullptr || k <= 0) {
+        return results;
+    }
+    if (!vectorValuesAreFinite(queryVector, m_metadata.dimensions)) {
+        qWarning() << "VectorIndex::search rejected non-finite query vector";
         return results;
     }
 

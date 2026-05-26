@@ -4,10 +4,38 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace bs {
 
 class ModelRegistry;
+
+namespace qa_extractive_detail {
+
+struct SpanSelection {
+    bool available = false;
+    int startToken = -1;
+    int endToken = -1;
+    double rawScore = 0.0;
+    double confidence = 0.0;
+};
+
+struct OutputNameSelection {
+    bool available = false;
+    std::string startOutputName;
+    std::string endOutputName;
+};
+
+double confidenceForRawScore(double rawScore);
+SpanSelection selectBestSpan(const float* startLogits,
+                             const float* endLogits,
+                             int contextStart,
+                             int contextEnd,
+                             int maxSpanTokens);
+OutputNameSelection selectOutputNames(const std::vector<std::string>& outputNames,
+                                      bool allowSingleOutputFallback);
+
+} // namespace qa_extractive_detail
 
 class QaExtractiveModel {
 public:
@@ -25,6 +53,7 @@ public:
 
     bool initialize();
     bool isAvailable() const;
+    bool warmup() const;
     Answer extract(const QString& query, const QString& context, int maxAnswerChars = 240) const;
 
 private:
@@ -34,4 +63,3 @@ private:
 };
 
 } // namespace bs
-

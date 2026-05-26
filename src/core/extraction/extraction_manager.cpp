@@ -274,12 +274,23 @@ ExtractionResult ExtractionManager::extract(const QString& filePath, ItemKind ki
               qUtf8Printable(filePath),
               qUtf8Printable(itemKindToString(kind)));
 
+    const bool usingMdlsExtractor = (extractor == m_mdlsTextExtractor.get());
+
     if (kind == ItemKind::Image) {
         // Tesseract's API object is mutable and not safe for concurrent calls.
         std::lock_guard<std::mutex> lock(m_ocrMutex);
         result = extractor->extract(filePath);
     } else {
         result = extractor->extract(filePath);
+    }
+
+    if (usingMdlsExtractor
+        && result.status == ExtractionResult::Status::UnsupportedFormat
+        && shouldFallbackToTextByProbe(QFileInfo(filePath), filePath)) {
+        LOG_INFO(bsExtraction,
+                 "Falling back to text extraction after empty metadata for Office-like file: %s",
+                 qUtf8Printable(filePath));
+        result = m_textExtractor->extract(filePath);
     }
 
     // Override duration to include semaphore wait time

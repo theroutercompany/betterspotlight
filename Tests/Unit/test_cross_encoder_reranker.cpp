@@ -11,24 +11,14 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 
+#include <cmath>
+#include <limits>
+
 namespace {
 
 bool prepareCrossEncoderFixtureModelsDir(const QString& modelsDir)
 {
-    const QString sourceDir = bs::test::fixtureModelsSourceDir();
-    if (sourceDir.isEmpty()) {
-        return false;
-    }
-
-    QDir().mkpath(modelsDir);
-    if (!bs::test::linkOrCopyFile(
-            QDir(sourceDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx")),
-            QDir(modelsDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx")))) {
-        return false;
-    }
-    if (!bs::test::linkOrCopyFile(
-            QDir(sourceDir).filePath(QStringLiteral("vocab.txt")),
-            QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
+    if (!bs::test::prepareFixtureRerankModelFiles(modelsDir)) {
         return false;
     }
 
@@ -65,6 +55,8 @@ private slots:
     void testConstructWithoutModel();
     void testRerankWithUnavailableModel();
     void testMaxCandidatesCapping();
+    void testCandidateLogitOffsetsValidateOutputShape();
+    void testSigmoidScoreRejectsNonFiniteLogits();
 };
 
 void TestCrossEncoderReranker::testConstructWithoutModel()
@@ -182,6 +174,58 @@ void TestCrossEncoderReranker::testMaxCandidatesCapping()
     }
     QCOMPARE(results[2].scoreBreakdown.crossEncoderBoost, 0.0);
     QCOMPARE(results[2].score, untouchedScore);
+}
+
+void TestCrossEncoderReranker::testCandidateLogitOffsetsValidateOutputShape()
+{
+    using bs::cross_encoder_detail::candidateLogitOffsets;
+
+    auto flat = candidateLogitOffsets({3}, 3, 3);
+    QVERIFY(flat.has_value());
+    QCOMPARE(flat->at(0), static_cast<size_t>(0));
+    QCOMPARE(flat->at(1), static_cast<size_t>(1));
+    QCOMPARE(flat->at(2), static_cast<size_t>(2));
+
+    auto singleColumn = candidateLogitOffsets({3, 1}, 3, 3);
+    QVERIFY(singleColumn.has_value());
+    QCOMPARE(singleColumn->at(0), static_cast<size_t>(0));
+    QCOMPARE(singleColumn->at(1), static_cast<size_t>(1));
+    QCOMPARE(singleColumn->at(2), static_cast<size_t>(2));
+
+    auto twoClass = candidateLogitOffsets({3, 2}, 3, 6);
+    QVERIFY(twoClass.has_value());
+    QCOMPARE(twoClass->at(0), static_cast<size_t>(1));
+    QCOMPARE(twoClass->at(1), static_cast<size_t>(3));
+    QCOMPARE(twoClass->at(2), static_cast<size_t>(5));
+
+    QVERIFY(!candidateLogitOffsets({1}, 3, 1).has_value());
+    QVERIFY(!candidateLogitOffsets({3, 2}, 3, 5).has_value());
+    QVERIFY(!candidateLogitOffsets({3, 0}, 3, 0).has_value());
+    QVERIFY(!candidateLogitOffsets({-1, 2}, 3, 6).has_value());
+    QVERIFY(!candidateLogitOffsets({3, 1, 1}, 3, 3).has_value());
+}
+
+void TestCrossEncoderReranker::testSigmoidScoreRejectsNonFiniteLogits()
+{
+    using bs::cross_encoder_detail::sigmoidScoreFromLogit;
+
+    const auto zero = sigmoidScoreFromLogit(0.0F);
+    QVERIFY(zero.has_value());
+    QVERIFY(std::abs(*zero - 0.5F) < 0.0001F);
+
+    const auto high = sigmoidScoreFromLogit(120.0F);
+    QVERIFY(high.has_value());
+    QVERIFY(*high <= 1.0F);
+    QVERIFY(*high > 0.999F);
+
+    const auto low = sigmoidScoreFromLogit(-120.0F);
+    QVERIFY(low.has_value());
+    QVERIFY(*low >= 0.0F);
+    QVERIFY(*low < 0.001F);
+
+    QVERIFY(!sigmoidScoreFromLogit(std::numeric_limits<float>::quiet_NaN()).has_value());
+    QVERIFY(!sigmoidScoreFromLogit(std::numeric_limits<float>::infinity()).has_value());
+    QVERIFY(!sigmoidScoreFromLogit(-std::numeric_limits<float>::infinity()).has_value());
 }
 
 QTEST_MAIN(TestCrossEncoderReranker)

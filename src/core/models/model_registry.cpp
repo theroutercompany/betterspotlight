@@ -96,8 +96,15 @@ QStringList modelDirCandidates(bool includeEnvOverride)
 
 bool copyIfMissing(const QString& sourcePath, const QString& destPath)
 {
+    auto ensureOwnerWritable = [](const QString& path) {
+        QFile file(path);
+        const QFileDevice::Permissions permissions = file.permissions();
+        file.setPermissions(permissions | QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    };
+
     const QFileInfo destInfo(destPath);
     if (destInfo.exists() && destInfo.isReadable() && destInfo.size() > 0) {
+        ensureOwnerWritable(destPath);
         return true;
     }
     if (!QFileInfo::exists(sourcePath)) {
@@ -105,7 +112,11 @@ bool copyIfMissing(const QString& sourcePath, const QString& destPath)
     }
     QDir().mkpath(QFileInfo(destPath).absolutePath());
     QFile::remove(destPath);
-    return QFile::copy(sourcePath, destPath);
+    if (!QFile::copy(sourcePath, destPath)) {
+        return false;
+    }
+    ensureOwnerWritable(destPath);
+    return true;
 }
 
 bool copyDirectoryIfMissing(const QString& sourcePath, const QString& destPath)
@@ -154,8 +165,6 @@ ModelRegistry::ModelRegistry(const QString& modelsDir)
     std::optional<ModelManifest> loaded = ModelManifest::loadFromFile(manifestPath);
     if (loaded.has_value()) {
         m_manifest = std::move(loaded.value());
-        LOG_INFO(bsCore, "ModelRegistry: loaded manifest with %zu model(s) from %s",
-                 m_manifest.models.size(), qPrintable(manifestPath));
     } else {
         LOG_WARN(bsCore, "ModelRegistry: failed to load manifest from %s", qPrintable(manifestPath));
     }
@@ -270,6 +279,13 @@ bool ModelRegistry::hasRequiredProductionRoles(QStringList* missingRolesOut) con
 
 QString ModelRegistry::writableModelsDir()
 {
+    const QString dataDir = QProcessEnvironment::systemEnvironment()
+                                .value(QStringLiteral("BETTERSPOTLIGHT_DATA_DIR"))
+                                .trimmed();
+    if (!dataDir.isEmpty()) {
+        return QDir::cleanPath(dataDir + QStringLiteral("/models"));
+    }
+
     return QDir::cleanPath(
         QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
         + QStringLiteral("/models"));

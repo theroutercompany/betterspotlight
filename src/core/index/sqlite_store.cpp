@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <array>
 
 namespace bs {
 
@@ -29,6 +30,73 @@ static int stepWithRetry(sqlite3_stmt* stmt, int maxAttempts = 5)
         rc = sqlite3_step(stmt);
     }
     return rc;
+}
+
+static bool prepareStatement(sqlite3* db, const char* sql, sqlite3_stmt** stmt, const char* context)
+{
+    if (!stmt) {
+        return false;
+    }
+    *stmt = nullptr;
+    const int rc = sqlite3_prepare_v2(db, sql, -1, stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        LOG_ERROR(bsIndex, "%s prepare failed: %s", context, sqlite3_errmsg(db));
+        return false;
+    }
+    return true;
+}
+
+static bool stepDone(sqlite3* db, sqlite3_stmt* stmt, const char* context)
+{
+    const int rc = stepWithRetry(stmt);
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR(bsIndex, "%s step failed: %s", context, sqlite3_errmsg(db));
+        return false;
+    }
+    return true;
+}
+
+static std::array<double, 3> currentBm25Weights(sqlite3* db)
+{
+    constexpr std::array<double, 3> kDefaults = {10.0, 5.0, 0.5};
+    std::array<double, 3> weights = kDefaults;
+
+    const char* sql = R"(
+        SELECT key, value FROM settings
+        WHERE key IN ('bm25WeightName', 'bm25WeightPath', 'bm25WeightContent')
+    )";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return weights;
+    }
+
+    auto parseWeight = [](const char* raw, double fallback) {
+        if (!raw) {
+            return fallback;
+        }
+        bool ok = false;
+        const double parsed = QString::fromUtf8(raw).toDouble(&ok);
+        return (ok && std::isfinite(parsed) && parsed >= 0.0) ? parsed : fallback;
+    };
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* key = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (!key) {
+            continue;
+        }
+        const QString keyString = QString::fromUtf8(key);
+        if (keyString == QLatin1String("bm25WeightName")) {
+            weights[0] = parseWeight(value, weights[0]);
+        } else if (keyString == QLatin1String("bm25WeightPath")) {
+            weights[1] = parseWeight(value, weights[1]);
+        } else if (keyString == QLatin1String("bm25WeightContent")) {
+            weights[2] = parseWeight(value, weights[2]);
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    return weights;
 }
 
 SQLiteStore::~SQLiteStore()
@@ -253,26 +321,50 @@ std::optional<int64_t> SQLiteStore::upsertItem(
 
 bool SQLiteStore::deleteItemByPath(const QString& path)
 {
+    if (!execSql("SAVEPOINT delete_item_by_path")) {
+        return false;
+    }
+
+    auto rollback = [this]() {
+        execSql("ROLLBACK TO SAVEPOINT delete_item_by_path");
+        execSql("RELEASE SAVEPOINT delete_item_by_path");
+    };
+
     // First remove FTS5 entries (virtual tables don't cascade)
     {
         const char* fts = "DELETE FROM search_index WHERE file_path = ?1";
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, fts, -1, &stmt, nullptr);
+        if (!prepareStatement(m_db, fts, &stmt, "deleteItemByPath FTS delete")) {
+            rollback();
+            return false;
+        }
         const QByteArray pathUtf8 = path.toUtf8();
         sqlite3_bind_text(stmt, 1, pathUtf8.constData(), -1, SQLITE_STATIC);
-        stepWithRetry(stmt);
+        const bool ok = stepDone(m_db, stmt, "deleteItemByPath FTS delete");
         sqlite3_finalize(stmt);
+        if (!ok) {
+            rollback();
+            return false;
+        }
     }
 
     // Delete item (cascades to content, tags, failures, feedback, frequencies)
     const char* sql = "DELETE FROM items WHERE path = ?1";
     sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    if (!prepareStatement(m_db, sql, &stmt, "deleteItemByPath item delete")) {
+        rollback();
+        return false;
+    }
     const QByteArray pathUtf8 = path.toUtf8();
     sqlite3_bind_text(stmt, 1, pathUtf8.constData(), -1, SQLITE_STATIC);
-    int rc = stepWithRetry(stmt);
+    const bool ok = stepDone(m_db, stmt, "deleteItemByPath item delete");
     sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE;
+    if (!ok) {
+        rollback();
+        return false;
+    }
+
+    return execSql("RELEASE SAVEPOINT delete_item_by_path");
 }
 
 bool SQLiteStore::updateContentHash(int64_t itemId, const QString& contentHash)
@@ -413,24 +505,43 @@ bool SQLiteStore::insertChunks(
     // both standalone and inside the pipeline's batch transaction.
     if (!execSql("SAVEPOINT insert_chunks")) return false;
 
+    auto rollback = [this]() {
+        execSql("ROLLBACK TO SAVEPOINT insert_chunks");
+        execSql("RELEASE SAVEPOINT insert_chunks");
+    };
+
     // Clear old chunks for this item
     {
         const char* sql = "DELETE FROM content WHERE item_id = ?1";
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+        if (!prepareStatement(m_db, sql, &stmt, "insertChunks content delete")) {
+            rollback();
+            return false;
+        }
         sqlite3_bind_int64(stmt, 1, itemId);
-        stepWithRetry(stmt);
+        const bool ok = stepDone(m_db, stmt, "insertChunks content delete");
         sqlite3_finalize(stmt);
+        if (!ok) {
+            rollback();
+            return false;
+        }
     }
 
     // Clear old FTS5 entries
     {
         const char* sql = "DELETE FROM search_index WHERE file_id = ?1";
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+        if (!prepareStatement(m_db, sql, &stmt, "insertChunks FTS delete")) {
+            rollback();
+            return false;
+        }
         sqlite3_bind_int64(stmt, 1, itemId);
-        stepWithRetry(stmt);
+        const bool ok = stepDone(m_db, stmt, "insertChunks FTS delete");
         sqlite3_finalize(stmt);
+        if (!ok) {
+            rollback();
+            return false;
+        }
     }
 
     // Insert each chunk into content AND search_index
@@ -453,22 +564,18 @@ bool SQLiteStore::insertChunks(
         // Insert into content table
         {
             sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(m_db, contentSql, -1, &stmt, nullptr) != SQLITE_OK) {
-                LOG_ERROR(bsIndex, "content insert prepare: %s", sqlite3_errmsg(m_db));
-                execSql("ROLLBACK TO SAVEPOINT insert_chunks");
-                execSql("RELEASE SAVEPOINT insert_chunks");
+            if (!prepareStatement(m_db, contentSql, &stmt, "insertChunks content insert")) {
+                rollback();
                 return false;
             }
             sqlite3_bind_int64(stmt, 1, itemId);
             sqlite3_bind_int(stmt, 2, chunk.chunkIndex);
             sqlite3_bind_text(stmt, 3, textUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 4, hashUtf8.constData(), -1, SQLITE_STATIC);
-            int rc = stepWithRetry(stmt);
+            const bool ok = stepDone(m_db, stmt, "insertChunks content insert");
             sqlite3_finalize(stmt);
-            if (rc != SQLITE_DONE) {
-                LOG_ERROR(bsIndex, "content insert failed: %s", sqlite3_errmsg(m_db));
-                execSql("ROLLBACK TO SAVEPOINT insert_chunks");
-                execSql("RELEASE SAVEPOINT insert_chunks");
+            if (!ok) {
+                rollback();
                 return false;
             }
         }
@@ -476,10 +583,8 @@ bool SQLiteStore::insertChunks(
         // Insert into FTS5 search_index — MUST succeed for invariant
         {
             sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(m_db, ftsSql, -1, &stmt, nullptr) != SQLITE_OK) {
-                LOG_ERROR(bsIndex, "FTS5 insert prepare: %s", sqlite3_errmsg(m_db));
-                execSql("ROLLBACK TO SAVEPOINT insert_chunks");
-                execSql("RELEASE SAVEPOINT insert_chunks");
+            if (!prepareStatement(m_db, ftsSql, &stmt, "insertChunks FTS insert")) {
+                rollback();
                 return false;
             }
             sqlite3_bind_text(stmt, 1, fileNameUtf8.constData(), -1, SQLITE_STATIC);
@@ -487,12 +592,11 @@ bool SQLiteStore::insertChunks(
             sqlite3_bind_text(stmt, 3, textUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 4, hashUtf8.constData(), -1, SQLITE_STATIC);
             sqlite3_bind_int64(stmt, 5, itemId);
-            int rc = stepWithRetry(stmt);
+            const bool ok = stepDone(m_db, stmt, "insertChunks FTS insert");
             sqlite3_finalize(stmt);
-            if (rc != SQLITE_DONE) {
-                LOG_ERROR(bsIndex, "CRITICAL: FTS5 insert failed: %s", sqlite3_errmsg(m_db));
-                execSql("ROLLBACK TO SAVEPOINT insert_chunks");
-                execSql("RELEASE SAVEPOINT insert_chunks");
+            if (!ok) {
+                LOG_ERROR(bsIndex, "CRITICAL: FTS5 insert failed; rolling back chunk insertion");
+                rollback();
                 return false;
             }
         }
@@ -503,26 +607,49 @@ bool SQLiteStore::insertChunks(
 
 bool SQLiteStore::deleteChunksForItem(int64_t itemId, const QString& filePath)
 {
+    if (!execSql("SAVEPOINT delete_chunks_for_item")) {
+        return false;
+    }
+
+    auto rollback = [this]() {
+        execSql("ROLLBACK TO SAVEPOINT delete_chunks_for_item");
+        execSql("RELEASE SAVEPOINT delete_chunks_for_item");
+    };
+
     // Delete FTS5 entries first (no cascade on virtual tables)
     {
         const char* sql = "DELETE FROM search_index WHERE file_id = ?1";
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+        if (!prepareStatement(m_db, sql, &stmt, "deleteChunksForItem FTS delete")) {
+            rollback();
+            return false;
+        }
         sqlite3_bind_int64(stmt, 1, itemId);
-        stepWithRetry(stmt);
+        const bool ok = stepDone(m_db, stmt, "deleteChunksForItem FTS delete");
         sqlite3_finalize(stmt);
+        if (!ok) {
+            rollback();
+            return false;
+        }
     }
     // Delete content rows (could also cascade from item delete)
     {
         const char* sql = "DELETE FROM content WHERE item_id = ?1";
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+        if (!prepareStatement(m_db, sql, &stmt, "deleteChunksForItem content delete")) {
+            rollback();
+            return false;
+        }
         sqlite3_bind_int64(stmt, 1, itemId);
-        stepWithRetry(stmt);
+        const bool ok = stepDone(m_db, stmt, "deleteChunksForItem content delete");
         sqlite3_finalize(stmt);
+        if (!ok) {
+            rollback();
+            return false;
+        }
     }
     Q_UNUSED(filePath);
-    return true;
+    return execSql("RELEASE SAVEPOINT delete_chunks_for_item");
 }
 
 // ── FTS5 Search ─────────────────────────────────────────────
@@ -1134,9 +1261,14 @@ std::vector<SQLiteStore::FtsJoinedHit> SQLiteStore::searchFts5Joined(
         return {};
     }
 
-    // Build dynamic SQL with JOIN and optional filters
+    const std::array<double, 3> bm25Weights = currentBm25Weights(m_db);
+
+    // Build dynamic SQL with JOIN and optional filters. Use explicit bm25() instead
+    // of the hidden rank column so SQLite does not enter FTS5's recursive sorted
+    // cursor path on small service worker stacks.
     QString sql = QStringLiteral(
-        "SELECT si.file_id, si.chunk_id, si.rank,"
+        "SELECT si.file_id, si.chunk_id,"
+        " bm25(search_index, ?2, ?3, ?4) AS bm25_score,"
         " snippet(search_index, 2, '<b>', '</b>', '...', 32),"
         " i.path, i.name, i.kind, i.size, i.modified_at,"
         " i.parent_path, i.is_pinned, i.content_hash"
@@ -1144,7 +1276,7 @@ std::vector<SQLiteStore::FtsJoinedHit> SQLiteStore::searchFts5Joined(
         " JOIN items i ON i.id = si.file_id"
         " WHERE search_index MATCH ?1");
 
-    int bindIndex = 2;
+    int bindIndex = 5;
     std::vector<QByteArray> boundStrings;
 
     if (options.modifiedAfter.has_value()) {
@@ -1204,7 +1336,7 @@ std::vector<SQLiteStore::FtsJoinedHit> SQLiteStore::searchFts5Joined(
         }
     }
 
-    sql += QStringLiteral(" ORDER BY si.rank LIMIT ?%1").arg(bindIndex);
+    sql += QStringLiteral(" ORDER BY bm25_score LIMIT ?%1").arg(bindIndex);
 
     sqlite3_stmt* stmt = nullptr;
     const QByteArray sqlUtf8 = sql.toUtf8();
@@ -1217,6 +1349,9 @@ std::vector<SQLiteStore::FtsJoinedHit> SQLiteStore::searchFts5Joined(
     int idx = 1;
     const QByteArray queryUtf8 = sanitized.toUtf8();
     sqlite3_bind_text(stmt, idx++, queryUtf8.constData(), -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, idx++, bm25Weights[0]);
+    sqlite3_bind_double(stmt, idx++, bm25Weights[1]);
+    sqlite3_bind_double(stmt, idx++, bm25Weights[2]);
 
     if (options.modifiedAfter.has_value()) {
         sqlite3_bind_double(stmt, idx++, options.modifiedAfter.value());

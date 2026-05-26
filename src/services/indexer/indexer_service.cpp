@@ -68,6 +68,12 @@ int currentProcessRssMb()
 #endif
 }
 
+bool isBsignoreLoaded(const QString& bsignorePath, const PathRules& pathRules)
+{
+    const QFileInfo info(bsignorePath);
+    return info.exists() && info.isFile() && pathRules.bsignoreLoaded();
+}
+
 QJsonObject memoryTelemetry()
 {
     const int rssMb = currentProcessRssMb();
@@ -204,7 +210,8 @@ QJsonObject IndexerService::handleStartIndexing(uint64_t id, const QJsonObject& 
     // Load user-defined exclusion patterns from ~/.bsignore and start watching
     // for live updates so exclusions apply without restarting services.
     m_bsignorePath = QDir::homePath() + QStringLiteral("/.bsignore");
-    m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_bsignoreLoaded = isBsignoreLoaded(m_bsignorePath, m_pathRules);
     m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
     m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
     m_bsignoreLastSignature = bsignoreSignature();
@@ -319,6 +326,10 @@ QJsonObject IndexerService::handleSetUserActive(uint64_t id, const QJsonObject& 
         return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
                                      QStringLiteral("Missing 'active' parameter"));
     }
+    if (!params.value(QStringLiteral("active")).isBool()) {
+        return IpcMessage::makeError(id, IpcErrorCode::InvalidParams,
+                                     QStringLiteral("'active' parameter must be a boolean"));
+    }
 
     const bool active = params.value(QStringLiteral("active")).toBool(false);
     m_pipeline->setUserActive(active);
@@ -424,6 +435,8 @@ QJsonObject IndexerService::handleRebuildAll(uint64_t id)
 
 QJsonObject IndexerService::handleGetQueueStatus(uint64_t id)
 {
+    reloadBsignore();
+
     QJsonArray roots;
     for (const std::string& root : m_currentRoots) {
         roots.append(QString::fromStdString(root));
@@ -628,7 +641,8 @@ void IndexerService::reloadBsignore()
         return;
     }
 
-    m_bsignoreLoaded = m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_pathRules.loadBsignore(m_bsignorePath.toStdString());
+    m_bsignoreLoaded = isBsignoreLoaded(m_bsignorePath, m_pathRules);
     m_bsignorePatternCount = static_cast<int>(m_pathRules.bsignorePatternCount());
     m_bsignoreLastLoadedAtMs = m_pathRules.bsignoreLastLoadedAtMs();
     m_bsignoreLastSignature = currentSignature;
@@ -641,9 +655,11 @@ void IndexerService::reloadBsignore()
 QJsonObject IndexerService::bsignoreStatusJson() const
 {
     QJsonObject status;
+    const QFileInfo info(m_bsignorePath);
+    const bool fileExists = info.exists() && info.isFile();
     status[QStringLiteral("path")] = m_bsignorePath;
-    status[QStringLiteral("fileExists")] = QFileInfo::exists(m_bsignorePath);
-    status[QStringLiteral("loaded")] = m_bsignoreLoaded;
+    status[QStringLiteral("fileExists")] = fileExists;
+    status[QStringLiteral("loaded")] = fileExists && m_bsignoreLoaded;
     status[QStringLiteral("patternCount")] = m_bsignorePatternCount;
     status[QStringLiteral("lastLoadedAtMs")] = m_bsignoreLastLoadedAtMs;
     status[QStringLiteral("lastLoadedAt")] = m_bsignoreLastLoadedAtMs > 0

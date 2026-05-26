@@ -3,6 +3,7 @@
 #include "core/fs/file_monitor.h"
 #include <CoreServices/CoreServices.h>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -25,11 +26,12 @@ public:
     bool isRunning() const override;
     void setLastEventId(uint64_t eventId)
     {
-        m_lastEventId = static_cast<FSEventStreamEventId>(eventId);
+        m_lastEventId.store(static_cast<FSEventStreamEventId>(eventId),
+                            std::memory_order_release);
     }
     uint64_t lastEventId() const
     {
-        return static_cast<uint64_t>(m_lastEventId);
+        return static_cast<uint64_t>(m_lastEventId.load(std::memory_order_acquire));
     }
 
 private:
@@ -62,7 +64,7 @@ private:
     dispatch_queue_t m_queue = nullptr;
     ChangeCallback m_callback;
     std::vector<std::string> m_roots;
-    FSEventStreamEventId m_lastEventId = kFSEventStreamEventIdSinceNow;
+    std::atomic<FSEventStreamEventId> m_lastEventId{kFSEventStreamEventIdSinceNow};
 
     // Debounce buffer: events accumulate here and are delivered
     // kDebounceMs after the last event arrives.
@@ -70,6 +72,12 @@ private:
     std::vector<WorkItem> m_pendingEvents;
     std::mutex m_bufferMutex;
     bool m_deliveryScheduled = false;
+
+    // Tracks delayed debounce flush blocks so stop()/destructor can wait
+    // until all queued blocks have run before releasing this instance.
+    std::mutex m_flushSyncMutex;
+    std::condition_variable m_flushSyncCv;
+    size_t m_pendingFlushTasks = 0;
 };
 
 } // namespace bs

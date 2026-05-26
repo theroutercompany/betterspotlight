@@ -251,6 +251,30 @@ void TestIndexerServiceIpc::testIndexerIpcContract()
     }
     QVERIFY2(!sawSpuriousReload,
              "Unrelated home-directory churn should not trigger .bsignore reload");
+
+    QVERIFY(QFile::remove(bsignorePath));
+
+    bool sawMissingBsignoreState = false;
+    timer.restart();
+    while (timer.elapsed() < 8000) {
+        const QJsonObject queue = requestQueueStatus(2000);
+        if (!bs::test::isResponse(queue)) {
+            QTest::qWait(75);
+            continue;
+        }
+
+        const QJsonObject result = bs::test::resultPayload(queue);
+        const bool fileExists = result.value(QStringLiteral("bsignoreFileExists")).toBool(true);
+        const bool loaded = result.value(QStringLiteral("bsignoreLoaded")).toBool(true);
+        const int patternCount = result.value(QStringLiteral("bsignorePatternCount")).toInt(-1);
+        if (!fileExists && !loaded && patternCount == 0) {
+            sawMissingBsignoreState = true;
+            break;
+        }
+        QTest::qWait(75);
+    }
+    QVERIFY2(sawMissingBsignoreState,
+             "Expected deleted .bsignore to report fileExists=false and loaded=false");
 }
 
 QTEST_MAIN(TestIndexerServiceIpc)

@@ -4,13 +4,25 @@
 
 #include <QString>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace bs {
 
 class ModelRegistry;
+
+namespace cross_encoder_detail {
+
+std::optional<std::vector<size_t>> candidateLogitOffsets(const std::vector<int64_t>& shape,
+                                                         int candidateCount,
+                                                         size_t elementCount);
+std::optional<float> sigmoidScoreFromLogit(float logit);
+
+} // namespace cross_encoder_detail
 
 struct RerankerConfig {
     float weight = 35.0f;           // Soft boost weight (additive)

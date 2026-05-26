@@ -179,18 +179,18 @@ WordPieceTokenizer::PairEncoding WordPieceTokenizer::tokenizePair(
     std::vector<int64_t> tokensA = tokenizeContent(normalize(textA));
     std::vector<int64_t> tokensB = tokenizeContent(normalize(textB));
 
-    // Truncate to fit within kMaxPairContentTokens (room for [CLS] + 2x[SEP])
+    // Truncate the longer side until the pair fits. For search reranking and QA,
+    // textA is usually a short query and textB is the document/context; this keeps
+    // the document from being capped at half the budget when query tokens are few.
     const int budget = kMaxPairContentTokens;
-    const int totalTokens = static_cast<int>(tokensA.size() + tokensB.size());
-    if (totalTokens > budget) {
-        // Truncate B first (to half budget), then A
-        const int halfBudget = budget / 2;
-        if (static_cast<int>(tokensB.size()) > halfBudget) {
-            tokensB.resize(static_cast<size_t>(halfBudget));
+    while (static_cast<int>(tokensA.size() + tokensB.size()) > budget) {
+        if (tokensB.empty() && tokensA.empty()) {
+            break;
         }
-        const int remainingBudget = budget - static_cast<int>(tokensB.size());
-        if (static_cast<int>(tokensA.size()) > remainingBudget) {
-            tokensA.resize(static_cast<size_t>(remainingBudget));
+        if (!tokensB.empty() && (tokensB.size() >= tokensA.size() || tokensA.empty())) {
+            tokensB.pop_back();
+        } else {
+            tokensA.pop_back();
         }
     }
 

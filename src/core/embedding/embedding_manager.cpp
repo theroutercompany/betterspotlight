@@ -21,6 +21,42 @@
 
 namespace bs {
 
+namespace embedding_detail {
+
+std::vector<float> normalizeEmbeddingOrEmpty(std::vector<float> embedding)
+{
+    double sumSquares = 0.0;
+    for (const float value : embedding) {
+        if (!std::isfinite(value)) {
+            return {};
+        }
+
+        const double asDouble = static_cast<double>(value);
+        sumSquares += asDouble * asDouble;
+        if (!std::isfinite(sumSquares)) {
+            return {};
+        }
+    }
+
+    const double norm = std::sqrt(sumSquares);
+    if (!std::isfinite(norm)) {
+        return {};
+    }
+    if (norm <= 0.0) {
+        return embedding;
+    }
+
+    for (float& value : embedding) {
+        value = static_cast<float>(static_cast<double>(value) / norm);
+        if (!std::isfinite(value)) {
+            return {};
+        }
+    }
+    return embedding;
+}
+
+} // namespace embedding_detail
+
 bool EmbeddingCircuitBreaker::isOpen() const
 {
     if (consecutiveFailures.load() < kOpenThreshold) {
@@ -177,20 +213,7 @@ QString EmbeddingManager::semanticAggregationMode() const
 
 std::vector<float> EmbeddingManager::normalizeEmbedding(std::vector<float> embedding) const
 {
-    double sumSquares = 0.0;
-    for (const float value : embedding) {
-        sumSquares += static_cast<double>(value) * static_cast<double>(value);
-    }
-
-    const double norm = std::sqrt(sumSquares);
-    if (norm <= 0.0) {
-        return embedding;
-    }
-
-    for (float& value : embedding) {
-        value = static_cast<float>(static_cast<double>(value) / norm);
-    }
-    return embedding;
+    return embedding_detail::normalizeEmbeddingOrEmpty(std::move(embedding));
 }
 
 std::vector<float> EmbeddingManager::embed(const QString& text)
@@ -292,6 +315,16 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
 
         std::vector<std::vector<float>> embeddings;
         embeddings.reserve(static_cast<size_t>(tokenized.batchSize));
+        const auto appendNormalizedEmbedding = [&](std::vector<float> embedding) -> bool {
+            std::vector<float> normalized = normalizeEmbedding(std::move(embedding));
+            if (normalized.empty() && m_embeddingSize > 0) {
+                qWarning() << "EmbeddingManager inference failed: non-finite embedding output";
+                m_circuitBreaker.recordFailure();
+                return false;
+            }
+            embeddings.push_back(std::move(normalized));
+            return true;
+        };
 
         if (shape.size() == 2 && shape[0] == tokenized.batchSize && shape[1] == m_embeddingSize) {
             for (int i = 0; i < tokenized.batchSize; ++i) {
@@ -300,7 +333,9 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
                 for (int j = 0; j < m_embeddingSize; ++j) {
                     embedding[static_cast<size_t>(j)] = row[static_cast<size_t>(j)];
                 }
-                embeddings.push_back(normalizeEmbedding(std::move(embedding)));
+                if (!appendNormalizedEmbedding(std::move(embedding))) {
+                    return {};
+                }
             }
             m_circuitBreaker.recordSuccess();
             return embeddings;
@@ -316,7 +351,9 @@ std::vector<std::vector<float>> EmbeddingManager::embedBatch(const std::vector<Q
                 for (int j = 0; j < m_embeddingSize; ++j) {
                     embedding[static_cast<size_t>(j)] = cls[static_cast<size_t>(j)];
                 }
-                embeddings.push_back(normalizeEmbedding(std::move(embedding)));
+                if (!appendNormalizedEmbedding(std::move(embedding))) {
+                    return {};
+                }
             }
             m_circuitBreaker.recordSuccess();
             return embeddings;

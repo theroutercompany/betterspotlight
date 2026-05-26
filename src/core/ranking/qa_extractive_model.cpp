@@ -24,6 +24,111 @@
 
 namespace bs {
 
+namespace qa_extractive_detail {
+
+double confidenceForRawScore(double rawScore)
+{
+    if (!std::isfinite(rawScore)) {
+        return 0.0;
+    }
+
+    const double scaled = std::clamp(rawScore / 6.0, -60.0, 60.0);
+    return std::clamp(1.0 / (1.0 + std::exp(-scaled)), 0.0, 1.0);
+}
+
+SpanSelection selectBestSpan(const float* startLogits,
+                             const float* endLogits,
+                             int contextStart,
+                             int contextEnd,
+                             int maxSpanTokens)
+{
+    SpanSelection out;
+    if (!startLogits || !endLogits || contextStart < 0 || contextEnd < contextStart
+        || maxSpanTokens <= 0) {
+        return out;
+    }
+
+    double bestScore = -std::numeric_limits<double>::infinity();
+    int bestStart = -1;
+    int bestEnd = -1;
+
+    for (int s = contextStart; s <= contextEnd; ++s) {
+        const double startScore = static_cast<double>(startLogits[s]);
+        if (!std::isfinite(startScore)) {
+            continue;
+        }
+
+        const int maxEnd = std::min(contextEnd, s + maxSpanTokens - 1);
+        for (int e = s; e <= maxEnd; ++e) {
+            const double endScore = static_cast<double>(endLogits[e]);
+            if (!std::isfinite(endScore)) {
+                continue;
+            }
+
+            const double score = startScore + endScore;
+            if (!std::isfinite(score)) {
+                continue;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestStart = s;
+                bestEnd = e;
+            }
+        }
+    }
+
+    if (bestStart < 0 || bestEnd < bestStart) {
+        return out;
+    }
+
+    out.available = true;
+    out.startToken = bestStart;
+    out.endToken = bestEnd;
+    out.rawScore = bestScore;
+    out.confidence = confidenceForRawScore(bestScore);
+    return out;
+}
+
+OutputNameSelection selectOutputNames(const std::vector<std::string>& outputNames,
+                                      bool allowSingleOutputFallback)
+{
+    OutputNameSelection out;
+    if (outputNames.empty()) {
+        return out;
+    }
+
+    const auto itStart = std::find_if(outputNames.begin(), outputNames.end(),
+                                      [](const std::string& value) {
+                                          return value.find("start") != std::string::npos;
+                                      });
+    const auto itEnd = std::find_if(outputNames.begin(), outputNames.end(),
+                                    [](const std::string& value) {
+                                        return value.find("end") != std::string::npos;
+                                    });
+    if (itStart != outputNames.end() && itEnd != outputNames.end() && itStart != itEnd) {
+        out.available = true;
+        out.startOutputName = *itStart;
+        out.endOutputName = *itEnd;
+        return out;
+    }
+
+    if (outputNames.size() >= 2) {
+        out.available = true;
+        out.startOutputName = outputNames[0];
+        out.endOutputName = outputNames[1];
+        return out;
+    }
+
+    if (allowSingleOutputFallback) {
+        out.available = true;
+        out.startOutputName = outputNames.front();
+        out.endOutputName = outputNames.front();
+    }
+    return out;
+}
+
+} // namespace qa_extractive_detail
+
 namespace {
 
 #if BS_WITH_ONNX
@@ -146,27 +251,13 @@ bool QaExtractiveModel::initialize()
     const bool allowSingleOutputFallback =
         qEnvironmentVariableIsSet("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK")
         && envFlagEnabled(qEnvironmentVariable("BS_TEST_QA_SINGLE_OUTPUT_FALLBACK"));
-    if (outputNames.size() >= 2) {
-        m_impl->startOutputName = outputNames[0];
-        m_impl->endOutputName = outputNames[1];
-    } else if (allowSingleOutputFallback && !outputNames.empty()) {
-        m_impl->startOutputName = outputNames.front();
-        m_impl->endOutputName = outputNames.front();
-    } else {
-        const auto itStart = std::find_if(outputNames.begin(), outputNames.end(),
-                                          [](const std::string& value) {
-                                              return value.find("start") != std::string::npos;
-                                          });
-        const auto itEnd = std::find_if(outputNames.begin(), outputNames.end(),
-                                        [](const std::string& value) {
-                                            return value.find("end") != std::string::npos;
-                                        });
-        if (itStart == outputNames.end() || itEnd == outputNames.end()) {
-            return false;
-        }
-        m_impl->startOutputName = *itStart;
-        m_impl->endOutputName = *itEnd;
+    const qa_extractive_detail::OutputNameSelection outputSelection =
+        qa_extractive_detail::selectOutputNames(outputNames, allowSingleOutputFallback);
+    if (!outputSelection.available) {
+        return false;
     }
+    m_impl->startOutputName = outputSelection.startOutputName;
+    m_impl->endOutputName = outputSelection.endOutputName;
 
     m_impl->available = true;
     return true;
@@ -178,6 +269,100 @@ bool QaExtractiveModel::initialize()
 bool QaExtractiveModel::isAvailable() const
 {
     return m_impl->available;
+}
+
+bool QaExtractiveModel::warmup() const
+{
+#if BS_WITH_ONNX
+    if (!m_impl->available || !m_impl->session || !m_impl->tokenizer) {
+        return false;
+    }
+
+    const WordPieceTokenizer::PairEncoding encoded =
+        m_impl->tokenizer->tokenizePair(
+            QStringLiteral("what is this"),
+            QStringLiteral("this is simple context for answer"));
+    if (encoded.inputIds.empty()) {
+        return false;
+    }
+
+    const int64_t seqLen = static_cast<int64_t>(encoded.inputIds.size());
+    const std::array<int64_t, 2> inputShape = {1, seqLen};
+
+    try {
+        Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(
+            OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault);
+
+        Ort::Value inputIds = Ort::Value::CreateTensor<int64_t>(
+            memoryInfo,
+            const_cast<int64_t*>(encoded.inputIds.data()),
+            encoded.inputIds.size(),
+            inputShape.data(),
+            static_cast<size_t>(inputShape.size()));
+
+        std::vector<Ort::Value> inputTensors;
+        std::vector<const char*> inputNamePtrs;
+        inputTensors.reserve(m_impl->inputNames.size());
+        inputNamePtrs.reserve(m_impl->inputNames.size());
+
+        for (const std::string& inputName : m_impl->inputNames) {
+            if (inputName == "input_ids") {
+                inputTensors.push_back(std::move(inputIds));
+            } else if (inputName == "attention_mask") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(encoded.attentionMask.data()),
+                    encoded.attentionMask.size(),
+                    inputShape.data(),
+                    static_cast<size_t>(inputShape.size())));
+            } else if (inputName == "token_type_ids") {
+                inputTensors.push_back(Ort::Value::CreateTensor<int64_t>(
+                    memoryInfo,
+                    const_cast<int64_t*>(encoded.tokenTypeIds.data()),
+                    encoded.tokenTypeIds.size(),
+                    inputShape.data(),
+                    static_cast<size_t>(inputShape.size())));
+            } else {
+                return false;
+            }
+            inputNamePtrs.push_back(inputName.c_str());
+        }
+
+        const char* outputNamePtrs[2] = {
+            m_impl->startOutputName.c_str(),
+            m_impl->endOutputName.c_str(),
+        };
+
+        std::vector<Ort::Value> outputs = m_impl->session->Run(
+            Ort::RunOptions{nullptr},
+            inputNamePtrs.data(),
+            inputTensors.data(),
+            inputTensors.size(),
+            outputNamePtrs,
+            2);
+
+        if (outputs.size() < 2 || !outputs[0].IsTensor() || !outputs[1].IsTensor()) {
+            return false;
+        }
+
+        const size_t requiredLogitCount = static_cast<size_t>(seqLen);
+        const Ort::TensorTypeAndShapeInfo startInfo =
+            outputs[0].GetTensorTypeAndShapeInfo();
+        const Ort::TensorTypeAndShapeInfo endInfo =
+            outputs[1].GetTensorTypeAndShapeInfo();
+        if (startInfo.GetElementCount() < requiredLogitCount
+            || endInfo.GetElementCount() < requiredLogitCount) {
+            return false;
+        }
+
+        return outputs[0].GetTensorData<float>() != nullptr
+            && outputs[1].GetTensorData<float>() != nullptr;
+    } catch (const Ort::Exception&) {
+        return false;
+    }
+#else
+    return false;
+#endif
 }
 
 QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
@@ -253,6 +438,16 @@ QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
             return out;
         }
 
+        const size_t requiredLogitCount = static_cast<size_t>(seqLen);
+        const Ort::TensorTypeAndShapeInfo startInfo =
+            outputs[0].GetTensorTypeAndShapeInfo();
+        const Ort::TensorTypeAndShapeInfo endInfo =
+            outputs[1].GetTensorTypeAndShapeInfo();
+        if (startInfo.GetElementCount() < requiredLogitCount
+            || endInfo.GetElementCount() < requiredLogitCount) {
+            return out;
+        }
+
         const float* startLogits = outputs[0].GetTensorData<float>();
         const float* endLogits = outputs[1].GetTensorData<float>();
         if (!startLogits || !endLogits) {
@@ -284,29 +479,18 @@ QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
         }
 
         constexpr int kMaxSpanTokens = 30;
-        double bestScore = -std::numeric_limits<double>::infinity();
-        int bestStart = -1;
-        int bestEnd = -1;
-
-        for (int s = contextStart; s <= contextEnd; ++s) {
-            const int maxEnd = std::min(contextEnd, s + kMaxSpanTokens);
-            for (int e = s; e <= maxEnd; ++e) {
-                const double score = static_cast<double>(startLogits[s])
-                    + static_cast<double>(endLogits[e]);
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestStart = s;
-                    bestEnd = e;
-                }
-            }
-        }
-
-        if (bestStart < 0 || bestEnd < bestStart) {
+        const qa_extractive_detail::SpanSelection bestSpan =
+            qa_extractive_detail::selectBestSpan(startLogits,
+                                                 endLogits,
+                                                 contextStart,
+                                                 contextEnd,
+                                                 kMaxSpanTokens);
+        if (!bestSpan.available) {
             return out;
         }
 
         const int contextTokenCount = std::max(1, contextEnd - contextStart + 1);
-        const int centerToken = (bestStart + bestEnd) / 2;
+        const int centerToken = (bestSpan.startToken + bestSpan.endToken) / 2;
         const double relativeCenter = std::clamp(
             static_cast<double>(centerToken - contextStart)
                 / static_cast<double>(std::max(1, contextTokenCount - 1)),
@@ -322,10 +506,10 @@ QaExtractiveModel::Answer QaExtractiveModel::extract(const QString& query,
 
         out.available = true;
         out.answer = answerText;
-        out.rawScore = bestScore;
-        out.confidence = std::clamp(1.0 / (1.0 + std::exp(-(bestScore / 6.0))), 0.0, 1.0);
-        out.startToken = bestStart;
-        out.endToken = bestEnd;
+        out.rawScore = bestSpan.rawScore;
+        out.confidence = bestSpan.confidence;
+        out.startToken = bestSpan.startToken;
+        out.endToken = bestSpan.endToken;
         return out;
     } catch (const Ort::Exception&) {
         return out;

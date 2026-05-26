@@ -47,6 +47,7 @@ class TestPipeline : public QObject {
 private slots:
     void testLifecycleAndBehaviorPaths();
     void testTransientExtractionFailureTriggersBoundedRetriesWithBackoff();
+    void testRetryClassifierTreatsUnknownAsDeterministic();
     void testRebuildAbortsWhenDrainCannotSettle();
     void testUnsupportedActorModesAreCoercedUnlessExplicitlyAllowed();
 };
@@ -138,6 +139,18 @@ void TestPipeline::testLifecycleAndBehaviorPaths()
     pipeline.setUserActive(false);
     QVERIFY(pipeline.queueStatus().prepWorkers >= 2);
 
+    timer.restart();
+    bool idleBeforeRebuild = false;
+    while (timer.elapsed() < 12000) {
+        const bs::QueueStats stats = pipeline.queueStatus();
+        if (stats.depth == 0 && stats.preparing == 0 && stats.writing == 0) {
+            idleBeforeRebuild = true;
+            break;
+        }
+        QTest::qWait(25);
+    }
+    QVERIFY2(idleBeforeRebuild, "Pipeline should be idle before successful rebuildAll path");
+
     const bs::Pipeline::RebuildResult rebuildResult =
         pipeline.rebuildAll({rootPath.toStdString()});
     QCOMPARE(rebuildResult.status, QStringLiteral("queued"));
@@ -223,6 +236,25 @@ void TestPipeline::testTransientExtractionFailureTriggersBoundedRetriesWithBacko
     pipeline.stop();
 }
 
+void TestPipeline::testRetryClassifierTreatsUnknownAsDeterministic()
+{
+    bs::PreparedWork unknownFailure;
+    unknownFailure.failure = bs::PreparedFailure{
+        QStringLiteral("extraction"),
+        QStringLiteral("textutil conversion failed"),
+        bs::ExtractionResult::Status::Unknown
+    };
+    QVERIFY(!bs::shouldRetryTransientExtractionFailure(unknownFailure));
+
+    bs::PreparedWork timeoutFailure;
+    timeoutFailure.failure = bs::PreparedFailure{
+        QStringLiteral("extraction"),
+        QStringLiteral("Timed out waiting for extraction slot"),
+        bs::ExtractionResult::Status::Timeout
+    };
+    QVERIFY(bs::shouldRetryTransientExtractionFailure(timeoutFailure));
+}
+
 void TestPipeline::testRebuildAbortsWhenDrainCannotSettle()
 {
     QTemporaryDir tempDir;
@@ -235,12 +267,7 @@ void TestPipeline::testRebuildAbortsWhenDrainCannotSettle()
 
     const QString rootPath = QDir(tempDir.path()).filePath(QStringLiteral("root"));
     QVERIFY(QDir().mkpath(rootPath));
-    for (int i = 0; i < 200; ++i) {
-        QFile f(QDir(rootPath).filePath(QStringLiteral("fixture_%1.txt").arg(i)));
-        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
-        f.write(QByteArray(2048, 'a'));
-        f.close();
-    }
+    const QString filePath = QDir(rootPath).filePath(QStringLiteral("fixture.txt"));
 
     bs::ExtractionManager extractor;
     bs::PathRules rules;
@@ -258,7 +285,25 @@ void TestPipeline::testRebuildAbortsWhenDrainCannotSettle()
     bs::Pipeline pipeline(store, extractor, rules, cfg);
     pipeline.start({rootPath.toStdString()});
 
-    QTest::qWait(25);
+    {
+        QFile f(filePath);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(QByteArray(2048, 'a'));
+        f.close();
+    }
+
+    pipeline.pause();
+    QVERIFY(pipeline.queueStatus().isPaused);
+    pipeline.reindexPath(filePath);
+
+    QElapsedTimer pendingTimer;
+    pendingTimer.start();
+    while (pendingTimer.elapsed() < 2000 && pipeline.queueStatus().depth == 0) {
+        QTest::qWait(10);
+    }
+    QVERIFY2(pipeline.queueStatus().depth > 0,
+             "Rebuild abort test requires explicit pending work before rebuildAll");
+
     const bs::Pipeline::RebuildResult rebuildResult =
         pipeline.rebuildAll({rootPath.toStdString()});
     QCOMPARE(rebuildResult.status, QStringLiteral("aborted"));

@@ -50,6 +50,8 @@ struct PipelineRuntimeConfig {
     std::function<int()> rssProvider;
 };
 
+bool shouldRetryTransientExtractionFailure(const PreparedWork& prepared);
+
 // Pipeline — top-level indexing orchestrator.
 //
 // Architecture:

@@ -101,4 +101,33 @@ bool prepareFixtureEmbeddingModelFiles(const QString& modelsDir)
     return true;
 }
 
+bool prepareFixtureRerankModelFiles(const QString& modelsDir)
+{
+    const QString sourceDir = fixtureModelsSourceDir();
+    if (sourceDir.isEmpty()) {
+        return false;
+    }
+
+    const QString sourceModel =
+        QDir(sourceDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx"));
+    const QString sourceVocab = QDir(sourceDir).filePath(QStringLiteral("vocab.txt"));
+
+    if (!QFileInfo::exists(sourceModel) || !QFileInfo::exists(sourceVocab)) {
+        return false;
+    }
+
+    QDir().mkpath(modelsDir);
+    if (!linkOrCopyFile(
+            sourceModel,
+            QDir(modelsDir).filePath(QStringLiteral("mxbai-rerank-xsmall-v1-int8.onnx")))) {
+        return false;
+    }
+    if (!linkOrCopyFile(sourceVocab,
+                        QDir(modelsDir).filePath(QStringLiteral("vocab.txt")))) {
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace bs::test

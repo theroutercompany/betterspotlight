@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
+#include <QVector>
 
 namespace {
 
@@ -26,6 +27,64 @@ bool writeTextFile(const QString& path, const QByteArray& payload)
     return true;
 }
 
+QByteArray escapePdfLiteral(const QString& text)
+{
+    const QByteArray utf8 = text.toUtf8();
+    QByteArray escaped;
+    escaped.reserve(utf8.size() * 2);
+    for (char ch : utf8) {
+        if (ch == '\\' || ch == '(' || ch == ')') {
+            escaped.append('\\');
+        }
+        escaped.append(ch);
+    }
+    return escaped;
+}
+
+QByteArray buildSinglePagePdf(const QString& text)
+{
+    const QByteArray literal = escapePdfLiteral(text);
+    const QByteArray contentStream =
+        "BT\n"
+        "/F1 18 Tf\n"
+        "72 720 Td\n"
+        "(" + literal + ") Tj\n"
+        "ET\n";
+
+    QVector<QByteArray> objects;
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>");
+    objects.append("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    objects.append("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                   "/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>");
+    objects.append("<< /Length " + QByteArray::number(contentStream.size())
+                   + " >>\nstream\n" + contentStream + "endstream");
+    objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
+    QByteArray pdf = "%PDF-1.4\n";
+    QVector<int> offsets;
+    offsets.reserve(objects.size());
+
+    for (int i = 0; i < objects.size(); ++i) {
+        offsets.push_back(pdf.size());
+        pdf += QByteArray::number(i + 1) + " 0 obj\n";
+        pdf += objects.at(i);
+        pdf += "\nendobj\n";
+    }
+
+    const int xrefOffset = pdf.size();
+    pdf += "xref\n0 " + QByteArray::number(objects.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (int offset : offsets) {
+        pdf += QByteArray::number(offset).rightJustified(10, '0');
+        pdf += " 00000 n \n";
+    }
+
+    pdf += "trailer\n<< /Size " + QByteArray::number(objects.size() + 1)
+        + " /Root 1 0 R >>\n";
+    pdf += "startxref\n" + QByteArray::number(xrefOffset) + "\n%%EOF\n";
+    return pdf;
+}
+
 } // namespace
 
 class TestIndexer : public QObject {
@@ -35,6 +94,7 @@ private slots:
     void testExcludeAndDeleteLifecycle();
     void testMetadataOnlyRescanAndSkipBranches();
     void testNonExtractableAndExtractionFailurePaths();
+    void testPdfIndexingRequiresSupportedCapability();
 };
 
 void TestIndexer::testExcludeAndDeleteLifecycle()
@@ -237,6 +297,61 @@ void TestIndexer::testNonExtractableAndExtractionFailurePaths()
 
     const bs::IndexResult manualResult = indexer.applyPreparedWork(manualPrepared);
     QCOMPARE(manualResult.status, bs::IndexResult::Status::ExtractionFailed);
+}
+
+void TestIndexer::testPdfIndexingRequiresSupportedCapability()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString dbPath = QDir(tempDir.path()).filePath(QStringLiteral("index.db"));
+    auto storeOpt = bs::SQLiteStore::open(dbPath);
+    QVERIFY(storeOpt.has_value());
+    bs::SQLiteStore store = std::move(storeOpt.value());
+
+    bs::ExtractionManager extractor;
+    bs::PathRules pathRules;
+    bs::Chunker chunker;
+    bs::Indexer indexer(store, extractor, pathRules, chunker);
+
+    const QString pdfPath = QDir(tempDir.path()).filePath(QStringLiteral("supported.pdf"));
+    QFile pdfFile(pdfPath);
+    QVERIFY(pdfFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray payload = buildSinglePagePdf(QStringLiteral("Indexer PDF supported profile"));
+    QVERIFY(pdfFile.write(payload) == payload.size());
+    pdfFile.close();
+
+    bs::WorkItem item;
+    item.type = bs::WorkItem::Type::NewFile;
+    item.filePath = pdfPath.toStdString();
+    const bs::IndexResult result = indexer.processWorkItem(item);
+
+    const QString pdfCapability =
+        qEnvironmentVariable("BS_DEV_PDF_CAPABILITY").trimmed().toLower();
+    const bool supportedPdfCapability = (pdfCapability == QStringLiteral("ready"));
+
+    if (!supportedPdfCapability
+        && result.status == bs::IndexResult::Status::Indexed
+        && result.chunksInserted == 0) {
+        QSKIP("PDF backend unavailable on this host");
+    }
+
+    if (result.status == bs::IndexResult::Status::ExtractionFailed) {
+        if (supportedPdfCapability) {
+            QFAIL("PDF indexing failed while BS_DEV_PDF_CAPABILITY=ready");
+        }
+        QSKIP("PDF backend unavailable on this host");
+    }
+
+    QCOMPARE(result.status, bs::IndexResult::Status::Indexed);
+    QVERIFY(result.chunksInserted > 0);
+
+    const auto row = store.getItemByPath(pdfPath);
+    QVERIFY(row.has_value());
+    const auto availability = store.getItemAvailability(row->id);
+    QVERIFY(availability.has_value());
+    QVERIFY(availability->contentAvailable);
+    QCOMPARE(availability->availabilityStatus, QStringLiteral("available"));
 }
 
 QTEST_MAIN(TestIndexer)

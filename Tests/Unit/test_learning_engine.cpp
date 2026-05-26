@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QTemporaryDir>
 
+#include <cstring>
 #include <sqlite3.h>
 
 namespace {
@@ -86,6 +87,23 @@ void upsertSetting(sqlite3* db, const QString& key, const QString& value)
     sqlite3_bind_text(stmt, 2, valueUtf8.constData(), -1, SQLITE_TRANSIENT);
     QCOMPARE(sqlite3_step(stmt), SQLITE_DONE);
     sqlite3_finalize(stmt);
+}
+
+bool writeInvalidCoreMlBootstrap(const QString& dataDir)
+{
+    const QString invalidBootstrapModelDir = QDir(dataDir).filePath(
+        QStringLiteral("models/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"));
+    if (!QDir().mkpath(invalidBootstrapModelDir)) {
+        return false;
+    }
+
+    QFile invalidBootstrapPayload(
+        QDir(invalidBootstrapModelDir).filePath(QStringLiteral("dummy.bin")));
+    if (!invalidBootstrapPayload.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    return invalidBootstrapPayload.write("invalid-coreml-bootstrap")
+        == static_cast<qint64>(std::strlen("invalid-coreml-bootstrap"));
 }
 
 } // namespace
@@ -939,7 +957,11 @@ void TestLearningEngine::testReplayReservoirCapacityAndSlotsBounded()
                               QStringLiteral("report.md"));
     QVERIFY(itemIdOpt.has_value());
 
-    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    const QString replayRuntimeDataDir =
+        QDir(tempDir.path()).filePath(QStringLiteral("runtime-data"));
+    QVERIFY(writeInvalidCoreMlBootstrap(replayRuntimeDataDir));
+
+    bs::LearningEngine engine(store.rawDb(), replayRuntimeDataDir);
     QVERIFY(engine.initialize());
     QVERIFY(engine.setConsent(true, true, true, {}));
 
@@ -1171,6 +1193,18 @@ void TestLearningEngine::testEndToEndExposureAttributionTrainPromote()
     upsertSetting(store.rawDb(),
                   QStringLiteral("onlineRankerNegativeStaleSeconds"),
                   QStringLiteral("1"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("1000000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("1.0"));
 
     bs::SearchResult positiveResult;
     positiveResult.itemId = positiveItemIdOpt.value();
@@ -1264,13 +1298,7 @@ void TestLearningEngine::testScoreBoostFallsBackWhenModelsMissingOrCorrupt()
     QVERIFY(itemIdOpt.has_value());
 
     const QString runtimeDataDir = QDir(tempDir.path()).filePath(QStringLiteral("runtime-data"));
-    const QString invalidBootstrapModelDir = QDir(runtimeDataDir).filePath(
-        QStringLiteral("models/online-ranker-v1/bootstrap/online_ranker_v1.mlmodelc"));
-    QVERIFY(QDir().mkpath(invalidBootstrapModelDir));
-    QFile invalidBootstrapPayload(QDir(invalidBootstrapModelDir).filePath(QStringLiteral("dummy.bin")));
-    QVERIFY(invalidBootstrapPayload.open(QIODevice::WriteOnly | QIODevice::Truncate));
-    invalidBootstrapPayload.write("invalid-coreml-bootstrap");
-    invalidBootstrapPayload.close();
+    QVERIFY(writeInvalidCoreMlBootstrap(runtimeDataDir));
 
     const QString invalidNativeWeightsPath = QDir(runtimeDataDir).filePath(
         QStringLiteral("models/online-ranker-v1/active/weights.json"));
@@ -1330,12 +1358,28 @@ void TestLearningEngine::testTriggerLearningCyclePromotesModel()
                               QStringLiteral("report.md"));
     QVERIFY(itemIdOpt.has_value());
 
-    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    const QString runtimeDataDir =
+        QDir(tempDir.path()).filePath(QStringLiteral("runtime-data"));
+    QVERIFY(writeInvalidCoreMlBootstrap(runtimeDataDir));
+
+    bs::LearningEngine engine(store.rawDb(), runtimeDataDir);
     QVERIFY(engine.initialize());
     QVERIFY(engine.setConsent(true, true, true, {}));
     upsertSetting(store.rawDb(),
                   QStringLiteral("onlineRankerRolloutMode"),
                   QStringLiteral("blended_ranking"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("1000000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("1.0"));
 
     for (int i = 0; i < 180; ++i) {
         const int label = (i % 2 == 0) ? 1 : 0;
@@ -1374,7 +1418,11 @@ void TestLearningEngine::testTriggerLearningCycleRejectsCandidateNotBetter()
                               QStringLiteral("report.md"));
     QVERIFY(itemIdOpt.has_value());
 
-    bs::LearningEngine engine(store.rawDb(), tempDir.path());
+    const QString runtimeDataDir =
+        QDir(tempDir.path()).filePath(QStringLiteral("runtime-data"));
+    QVERIFY(writeInvalidCoreMlBootstrap(runtimeDataDir));
+
+    bs::LearningEngine engine(store.rawDb(), runtimeDataDir);
     QVERIFY(engine.initialize());
     QVERIFY(engine.setConsent(true, true, true, {}));
     upsertSetting(store.rawDb(),
@@ -1383,6 +1431,18 @@ void TestLearningEngine::testTriggerLearningCycleRejectsCandidateNotBetter()
     upsertSetting(store.rawDb(),
                   QStringLiteral("onlineRankerMinExamples"),
                   QStringLiteral("40"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                  QStringLiteral("1000000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                  QStringLiteral("1000"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                  QStringLiteral("1.0"));
+    upsertSetting(store.rawDb(),
+                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                  QStringLiteral("1.0"));
 
     // First, establish a clearly better active model so the follow-up cycle is
     // competing against a known strong baseline rather than a bootstrap seed.

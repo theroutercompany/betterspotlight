@@ -13,6 +13,12 @@ namespace bs {
 class ModelRegistry;
 class WordPieceTokenizer;
 
+namespace embedding_detail {
+
+std::vector<float> normalizeEmbeddingOrEmpty(std::vector<float> embedding);
+
+} // namespace embedding_detail
+
 struct EmbeddingCircuitBreaker {
     std::atomic<int> consecutiveFailures{0};
     std::atomic<int64_t> lastFailureTime{0};

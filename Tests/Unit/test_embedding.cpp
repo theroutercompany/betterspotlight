@@ -8,6 +8,9 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 
+#include <cmath>
+#include <limits>
+
 namespace {
 
 bool prepareFastEmbeddingFixtureModelsDir(const QString& modelsDir)
@@ -75,6 +78,7 @@ private slots:
     void testQueryPrefixAdded();
     void testEmbedBatchWithoutModel();
     void testInitializeWithBadModel();
+    void testNormalizeRejectsNonFiniteValues();
     void testFastTwoInputModelInitializesAndEmbeds();
 };
 
@@ -125,6 +129,40 @@ void TestEmbedding::testInitializeWithBadModel()
 
     const std::vector<float> embedding = manager.embed(QStringLiteral("test"));
     QVERIFY(embedding.empty());
+}
+
+void TestEmbedding::testNormalizeRejectsNonFiniteValues()
+{
+    using bs::embedding_detail::normalizeEmbeddingOrEmpty;
+
+    const std::vector<float> normalized =
+        normalizeEmbeddingOrEmpty({3.0F, 4.0F});
+    QCOMPARE(static_cast<int>(normalized.size()), 2);
+    QVERIFY(std::abs(normalized[0] - 0.6F) < 0.0001F);
+    QVERIFY(std::abs(normalized[1] - 0.8F) < 0.0001F);
+
+    const std::vector<float> zero =
+        normalizeEmbeddingOrEmpty({0.0F, 0.0F, 0.0F});
+    QCOMPARE(static_cast<int>(zero.size()), 3);
+    QCOMPARE(zero[0], 0.0F);
+    QCOMPARE(zero[1], 0.0F);
+    QCOMPARE(zero[2], 0.0F);
+
+    QVERIFY(normalizeEmbeddingOrEmpty({
+        1.0F,
+        std::numeric_limits<float>::quiet_NaN(),
+    }).empty());
+    QVERIFY(normalizeEmbeddingOrEmpty({
+        1.0F,
+        std::numeric_limits<float>::infinity(),
+    }).empty());
+    const std::vector<float> maxFinite = normalizeEmbeddingOrEmpty({
+        std::numeric_limits<float>::max(),
+        std::numeric_limits<float>::max(),
+    });
+    QCOMPARE(static_cast<int>(maxFinite.size()), 2);
+    QVERIFY(std::isfinite(maxFinite[0]));
+    QVERIFY(std::isfinite(maxFinite[1]));
 }
 
 void TestEmbedding::testFastTwoInputModelInitializesAndEmbeds()

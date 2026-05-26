@@ -4,10 +4,30 @@
 #include <QFileInfo>
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <cmath>
+
 namespace bs {
 
+namespace {
+const void* kFileMonitorQueueSpecificKey = &kFileMonitorQueueSpecificKey;
+
+double normalizedLatencySeconds(double latencySeconds)
+{
+    if (!std::isfinite(latencySeconds) || latencySeconds <= 0.0) {
+        return 0.5;
+    }
+    return std::clamp(latencySeconds, 0.05, 60.0);
+}
+
+bool containsNulByte(const std::string& value)
+{
+    return value.find('\0') != std::string::npos;
+}
+}
+
 FileMonitorMacOS::FileMonitorMacOS(double latencySeconds)
-    : m_latency(latencySeconds)
+    : m_latency(normalizedLatencySeconds(latencySeconds))
 {
 }
 
@@ -34,6 +54,13 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
         return false;
     }
 
+    for (const auto& root : roots) {
+        if (root.empty() || containsNulByte(root)) {
+            LOG_ERROR(bsFs, "FileMonitorMacOS::start called with invalid root path");
+            return false;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
 
     m_callback = std::move(callback);
@@ -53,10 +80,16 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
     for (const auto& root : roots) {
         CFStringRef cfPath = CFStringCreateWithCString(
             kCFAllocatorDefault, root.c_str(), kCFStringEncodingUTF8);
-        if (cfPath) {
-            CFArrayAppendValue(pathsToWatch, cfPath);
-            CFRelease(cfPath);
+        if (!cfPath) {
+            LOG_ERROR(bsFs, "Failed to convert watch path to CFString");
+            CFRelease(pathsToWatch);
+            m_callback = nullptr;
+            m_roots.clear();
+            return false;
         }
+
+        CFArrayAppendValue(pathsToWatch, cfPath);
+        CFRelease(cfPath);
     }
 
     // Create the FSEvents context, passing 'this' as the info pointer.
@@ -77,7 +110,7 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
         &FileMonitorMacOS::fsEventsCallback,
         &context,
         pathsToWatch,
-        m_lastEventId,
+        m_lastEventId.load(std::memory_order_acquire),
         m_latency,
         flags);
 
@@ -101,6 +134,9 @@ bool FileMonitorMacOS::start(const std::vector<std::string>& roots,
         return false;
     }
 
+    dispatch_queue_set_specific(m_queue, kFileMonitorQueueSpecificKey,
+                                const_cast<void*>(kFileMonitorQueueSpecificKey),
+                                nullptr);
     FSEventStreamSetDispatchQueue(m_stream, m_queue);
 
     if (!FSEventStreamStart(m_stream)) {
@@ -155,6 +191,17 @@ void FileMonitorMacOS::stop()
         m_callback = nullptr;
     }
 
+    const bool onMonitorQueue =
+        (dispatch_get_specific(kFileMonitorQueueSpecificKey)
+         == kFileMonitorQueueSpecificKey);
+    if (!onMonitorQueue) {
+        std::unique_lock<std::mutex> lock(m_flushSyncMutex);
+        m_flushSyncCv.wait(lock, [this]() { return m_pendingFlushTasks == 0; });
+    } else {
+        LOG_WARN(bsFs, "FileMonitorMacOS::stop called on monitor queue; "
+                       "skipping debounce drain wait");
+    }
+
     if (queue) {
         dispatch_release(queue);
     }
@@ -176,6 +223,10 @@ void FileMonitorMacOS::fsEventsCallback(
     const FSEventStreamEventId eventIds[])
 {
     auto* self = static_cast<FileMonitorMacOS*>(clientCallBackInfo);
+    if (!self || (numEvents > 0 && (!eventPaths || !eventFlags || !eventIds))) {
+        return;
+    }
+
     auto** paths = static_cast<char**>(eventPaths);
     self->handleEvents(numEvents, paths, eventFlags, eventIds);
 }
@@ -186,16 +237,35 @@ void FileMonitorMacOS::handleEvents(
     const FSEventStreamEventFlags flags[],
     const FSEventStreamEventId eventIds[])
 {
+    if (!m_running.load()) {
+        return;
+    }
+
+    if (numEvents > 0 && (!paths || !flags || !eventIds)) {
+        if (m_errorCallback) {
+            m_errorCallback(QStringLiteral("FSEvents: malformed callback batch"));
+        }
+        return;
+    }
+
     std::vector<WorkItem> items;
     items.reserve(numEvents);
 
     for (size_t i = 0; i < numEvents; ++i) {
         const FSEventStreamEventFlags eventFlags = flags[i];
+        const char* path = paths[i];
+
+        if (!path || path[0] == '\0') {
+            if (m_errorCallback) {
+                m_errorCallback(QStringLiteral("FSEvents: event missing path"));
+            }
+            continue;
+        }
 
         if (eventFlags & kFSEventStreamEventFlagMustScanSubDirs) {
             if (m_errorCallback) {
                 m_errorCallback(QStringLiteral("FSEvents: must rescan subdirs at ") +
-                                QString::fromUtf8(paths[i]));
+                                QString::fromUtf8(path));
             }
         }
         if (eventFlags & kFSEventStreamEventFlagKernelDropped) {
@@ -216,10 +286,10 @@ void FileMonitorMacOS::handleEvents(
 
         // If the root itself changed (e.g., renamed/deleted), emit a rescan.
         if (eventFlags & kFSEventStreamEventFlagRootChanged) {
-            LOG_WARN(bsFs, "Watched root changed: %s", paths[i]);
+            LOG_WARN(bsFs, "Watched root changed: %s", path);
             WorkItem item;
             item.type = WorkItem::Type::RescanDirectory;
-            item.filePath = paths[i];
+            item.filePath = path;
             items.push_back(std::move(item));
             continue;
         }
@@ -232,12 +302,12 @@ void FileMonitorMacOS::handleEvents(
 
         WorkItem item;
         item.type = classifyEvent(eventFlags);
-        item.filePath = paths[i];
+        item.filePath = path;
 
         // For non-delete events, try to stat the file for size/mtime.
         if (item.type != WorkItem::Type::Delete) {
             struct stat st{};
-            if (stat(paths[i], &st) == 0) {
+            if (stat(path, &st) == 0) {
                 item.knownModTime = static_cast<uint64_t>(st.st_mtime);
                 item.knownSize = static_cast<uint64_t>(st.st_size);
 
@@ -258,12 +328,14 @@ void FileMonitorMacOS::handleEvents(
     // Track the latest event ID for persistence
     // (the caller stores this in SQLite settings for restart recovery)
     if (numEvents > 0) {
-        m_lastEventId = eventIds[numEvents - 1];
+        m_lastEventId.store(eventIds[numEvents - 1], std::memory_order_release);
     }
 
     if (items.empty()) {
         return;
     }
+
+    bool shouldScheduleDelivery = false;
 
     // Buffer events and schedule a debounced delivery.
     {
@@ -274,14 +346,49 @@ void FileMonitorMacOS::handleEvents(
 
         if (!m_deliveryScheduled) {
             m_deliveryScheduled = true;
-
-            dispatch_after(
-                dispatch_time(DISPATCH_TIME_NOW,
-                              static_cast<int64_t>(kDebounceMs) * NSEC_PER_MSEC),
-                m_queue,
-                ^{ flushPendingEvents(); });
+            shouldScheduleDelivery = true;
         }
     }
+
+    if (!shouldScheduleDelivery) {
+        return;
+    }
+
+    dispatch_queue_t queue = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        queue = m_queue;
+        if (queue) {
+            dispatch_retain(queue);
+        }
+    }
+
+    if (!queue) {
+        // Stream/queue was torn down between event buffering and schedule.
+        flushPendingEvents();
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_flushSyncMutex);
+        ++m_pendingFlushTasks;
+    }
+
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW,
+                      static_cast<int64_t>(kDebounceMs) * NSEC_PER_MSEC),
+        queue,
+        ^{
+            flushPendingEvents();
+            {
+                std::lock_guard<std::mutex> lock(m_flushSyncMutex);
+                if (m_pendingFlushTasks > 0) {
+                    --m_pendingFlushTasks;
+                }
+            }
+            m_flushSyncCv.notify_all();
+            dispatch_release(queue);
+        });
 }
 
 void FileMonitorMacOS::flushPendingEvents()

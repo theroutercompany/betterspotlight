@@ -20,12 +20,14 @@ private slots:
     void testDeleteVector();
     void testSearchEmptyIndex();
     void testSearchKParameter();
+    void testRejectsNonFiniteVectors();
     void testTotalElements();
     void testNeedsRebuild();
     void testResizeWhenCapacityThresholdReached();
     void testSaveAndLoad();
     void testLoadRejectsDimensionMismatch();
     void testLoadRejectsInvalidMetaFiles();
+    void testLoadRejectsInvalidNumericMetadata();
     void testLoadRejectsCorruptedIndexPayload();
     void testLoadSupportsLegacyModelMetadata();
 
@@ -141,6 +143,35 @@ void TestVectorIndex::testSearchKParameter()
     const std::vector<float> query = makeVector(0);
     const std::vector<bs::VectorIndex::KnnResult> hits = index.search(query.data(), 5);
     QVERIFY(static_cast<int>(hits.size()) <= 5);
+}
+
+void TestVectorIndex::testRejectsNonFiniteVectors()
+{
+    bs::VectorIndex::IndexMetadata meta;
+    meta.dimensions = kTestDimensions;
+    meta.modelId = "unit-test-model";
+    meta.generationId = "v1";
+    bs::VectorIndex index(meta);
+    QVERIFY(index.create());
+
+    std::vector<float> nanVector = makeVector(0);
+    nanVector[5] = std::numeric_limits<float>::quiet_NaN();
+    QCOMPARE(index.addVector(nanVector.data()), std::numeric_limits<uint64_t>::max());
+    QCOMPARE(index.totalElements(), 0);
+
+    std::vector<float> infVector = makeVector(1);
+    infVector[6] = std::numeric_limits<float>::infinity();
+    QCOMPARE(index.addVector(infVector.data()), std::numeric_limits<uint64_t>::max());
+    QCOMPARE(index.totalElements(), 0);
+
+    const std::vector<float> validVector = makeVector(2);
+    const uint64_t validLabel = index.addVector(validVector.data());
+    QVERIFY(validLabel != std::numeric_limits<uint64_t>::max());
+    QCOMPARE(index.totalElements(), 1);
+
+    QVERIFY(index.search(nanVector.data(), 1).empty());
+    QVERIFY(index.search(infVector.data(), 1).empty());
+    QVERIFY(!index.search(validVector.data(), 1).empty());
 }
 
 void TestVectorIndex::testDeleteVector()
@@ -319,6 +350,61 @@ void TestVectorIndex::testLoadRejectsInvalidMetaFiles()
         metaFile.close();
     }
     QVERIFY(!index.load(indexPath.toStdString(), missingDimMetaPath.toStdString()));
+}
+
+void TestVectorIndex::testLoadRejectsInvalidNumericMetadata()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    bs::VectorIndex::IndexMetadata sourceMeta;
+    sourceMeta.dimensions = kTestDimensions;
+    sourceMeta.modelId = "numeric-source";
+    sourceMeta.generationId = "v1";
+
+    bs::VectorIndex source(sourceMeta);
+    QVERIFY(source.create());
+    source.addVector(makeVector(0).data());
+
+    const QString indexPath = tempDir.path() + QStringLiteral("/numeric.bin");
+    const QString metaPath = tempDir.path() + QStringLiteral("/numeric.meta.json");
+    QVERIFY(source.save(indexPath.toStdString(), metaPath.toStdString()));
+
+    QFile metaFile(metaPath);
+    QVERIFY(metaFile.open(QIODevice::ReadOnly));
+    QJsonParseError parseError;
+    const QJsonDocument savedDoc = QJsonDocument::fromJson(metaFile.readAll(), &parseError);
+    metaFile.close();
+    QCOMPARE(parseError.error, QJsonParseError::NoError);
+    QVERIFY(savedDoc.isObject());
+    const QJsonObject savedMeta = savedDoc.object();
+
+    auto writeMeta = [&](const QJsonObject& meta) {
+        QFile out(metaPath);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return false;
+        }
+        out.write(QJsonDocument(meta).toJson(QJsonDocument::Compact));
+        out.close();
+        return true;
+    };
+
+    auto rejectsWith = [&](const QString& key, const QJsonValue& value) {
+        QJsonObject meta = savedMeta;
+        meta.insert(key, value);
+        QVERIFY(writeMeta(meta));
+
+        bs::VectorIndex::IndexMetadata loadMeta;
+        loadMeta.dimensions = kTestDimensions;
+        bs::VectorIndex loaded(loadMeta);
+        QVERIFY(!loaded.load(indexPath.toStdString(), metaPath.toStdString()));
+    };
+
+    rejectsWith(QStringLiteral("next_label"), -1);
+    rejectsWith(QStringLiteral("total_elements"),
+                QStringLiteral("999999999999999999999999999999"));
+    rejectsWith(QStringLiteral("deleted_elements"), -1);
+    rejectsWith(QStringLiteral("dimensions"), 384.5);
 }
 
 void TestVectorIndex::testLoadRejectsCorruptedIndexPayload()

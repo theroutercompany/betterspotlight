@@ -5,6 +5,56 @@
 #include "core/index/schema.h"
 #include "core/shared/chunk.h"
 
+namespace {
+
+bool execRaw(sqlite3* db, const char* sql)
+{
+    return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+int scalarInt(sqlite3* db, const QString& sql)
+{
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return -1;
+    }
+
+    int value = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        value = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+QString scalarText(sqlite3* db, const QString& sql)
+{
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.toUtf8().constData(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return {};
+    }
+
+    QString value;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        value = text ? QString::fromUtf8(text) : QString();
+    }
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+bs::Chunk makeChunk(const QString& path, int index, const QString& content)
+{
+    bs::Chunk chunk;
+    chunk.chunkId = bs::computeChunkId(path, index);
+    chunk.filePath = path;
+    chunk.chunkIndex = index;
+    chunk.content = content;
+    return chunk;
+}
+
+} // namespace
+
 class TestSQLiteStore : public QObject {
     Q_OBJECT
 
@@ -18,6 +68,9 @@ private slots:
     void testInsertChunksAndFts5Search();
     void testFts5SearchNoResults();
     void testDeleteCascadesToContentAndFts5();
+    void testDeleteItemByPathFailsClosedWhenFtsMissing();
+    void testInsertChunksRollsBackWhenFtsMissing();
+    void testDeleteChunksForItemFailsClosedWhenFtsMissing();
     void testRecordAndClearFailure();
     void testIncrementFrequency();
     void testSettings();
@@ -230,6 +283,99 @@ void TestSQLiteStore::testDeleteCascadesToContentAndFts5()
     // FTS5 should be empty now
     auto after = store->searchFts5(QStringLiteral("xyzzy"));
     QVERIFY(after.empty());
+}
+
+void TestSQLiteStore::testDeleteItemByPathFailsClosedWhenFtsMissing()
+{
+    QTemporaryDir dir;
+    const QString dbPath = dir.path() + "/test.db";
+    auto store = bs::SQLiteStore::open(dbPath);
+    QVERIFY(store.has_value());
+
+    const QString path = QStringLiteral("/test/fail-closed-delete.txt");
+    auto id = store->upsertItem(path,
+                                QStringLiteral("fail-closed-delete.txt"),
+                                QStringLiteral("txt"),
+                                bs::ItemKind::Text,
+                                100,
+                                1.0,
+                                2.0);
+    QVERIFY(id.has_value());
+    QVERIFY(execRaw(store->rawDb(), "DROP TABLE search_index;"));
+
+    QVERIFY(!store->deleteItemByPath(path));
+    QVERIFY(store->getItemByPath(path).has_value());
+}
+
+void TestSQLiteStore::testInsertChunksRollsBackWhenFtsMissing()
+{
+    QTemporaryDir dir;
+    const QString dbPath = dir.path() + "/test.db";
+    auto store = bs::SQLiteStore::open(dbPath);
+    QVERIFY(store.has_value());
+
+    const QString path = QStringLiteral("/test/rollback-chunks.txt");
+    auto id = store->upsertItem(path,
+                                QStringLiteral("rollback-chunks.txt"),
+                                QStringLiteral("txt"),
+                                bs::ItemKind::Text,
+                                100,
+                                1.0,
+                                2.0);
+    QVERIFY(id.has_value());
+
+    std::vector<bs::Chunk> initialChunks = {
+        makeChunk(path, 0, QStringLiteral("initial content remains"))
+    };
+    QVERIFY(store->insertChunks(*id, QStringLiteral("rollback-chunks.txt"), path, initialChunks));
+    QCOMPARE(scalarInt(store->rawDb(),
+                       QStringLiteral("SELECT COUNT(*) FROM content WHERE item_id = %1").arg(*id)),
+             1);
+    QVERIFY(execRaw(store->rawDb(), "DROP TABLE search_index;"));
+
+    std::vector<bs::Chunk> replacementChunks = {
+        makeChunk(path, 0, QStringLiteral("replacement content must not commit"))
+    };
+    QVERIFY(!store->insertChunks(*id, QStringLiteral("rollback-chunks.txt"), path, replacementChunks));
+
+    QCOMPARE(scalarInt(store->rawDb(),
+                       QStringLiteral("SELECT COUNT(*) FROM content WHERE item_id = %1").arg(*id)),
+             1);
+    QCOMPARE(scalarText(store->rawDb(),
+                        QStringLiteral("SELECT chunk_text FROM content WHERE item_id = %1").arg(*id)),
+             QStringLiteral("initial content remains"));
+}
+
+void TestSQLiteStore::testDeleteChunksForItemFailsClosedWhenFtsMissing()
+{
+    QTemporaryDir dir;
+    const QString dbPath = dir.path() + "/test.db";
+    auto store = bs::SQLiteStore::open(dbPath);
+    QVERIFY(store.has_value());
+
+    const QString path = QStringLiteral("/test/fail-closed-delete-chunks.txt");
+    auto id = store->upsertItem(path,
+                                QStringLiteral("fail-closed-delete-chunks.txt"),
+                                QStringLiteral("txt"),
+                                bs::ItemKind::Text,
+                                100,
+                                1.0,
+                                2.0);
+    QVERIFY(id.has_value());
+
+    std::vector<bs::Chunk> chunks = {
+        makeChunk(path, 0, QStringLiteral("chunk content remains"))
+    };
+    QVERIFY(store->insertChunks(*id, QStringLiteral("fail-closed-delete-chunks.txt"), path, chunks));
+    QVERIFY(execRaw(store->rawDb(), "DROP TABLE search_index;"));
+
+    QVERIFY(!store->deleteChunksForItem(*id, path));
+    QCOMPARE(scalarInt(store->rawDb(),
+                       QStringLiteral("SELECT COUNT(*) FROM content WHERE item_id = %1").arg(*id)),
+             1);
+    QCOMPARE(scalarText(store->rawDb(),
+                        QStringLiteral("SELECT chunk_text FROM content WHERE item_id = %1").arg(*id)),
+             QStringLiteral("chunk content remains"));
 }
 
 void TestSQLiteStore::testRecordAndClearFailure()

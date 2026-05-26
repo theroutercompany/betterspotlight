@@ -5,6 +5,8 @@
 #include <QTemporaryDir>
 #include <QTextStream>
 
+#include <algorithm>
+
 class TestTokenizer : public QObject {
     Q_OBJECT
 
@@ -18,6 +20,7 @@ private slots:
     void testPaddingAligns();
     void testSpecialCharsHandled();
     void testLongTextTruncated();
+    void testPairTokenizationUsesFullBudgetForLongContext();
 
 private:
     QTemporaryDir m_tempDir;
@@ -115,6 +118,30 @@ void TestTokenizer::testLongTextTruncated()
 
     const bs::TokenizerOutput output = tokenizer.tokenize(longText);
     QVERIFY(output.seqLength <= 512);
+}
+
+void TestTokenizer::testPairTokenizationUsesFullBudgetForLongContext()
+{
+    bs::WordPieceTokenizer tokenizer(m_vocabPath);
+    QVERIFY(tokenizer.isLoaded());
+
+    QString longContext;
+    for (int i = 0; i < 2000; ++i) {
+        longContext += QStringLiteral("world ");
+    }
+
+    const bs::WordPieceTokenizer::PairEncoding output =
+        tokenizer.tokenizePair(QStringLiteral("hello"), longContext);
+
+    QCOMPARE(static_cast<int>(output.inputIds.size()), 512);
+    QCOMPARE(output.inputIds.size(), output.attentionMask.size());
+    QCOMPARE(output.inputIds.size(), output.tokenTypeIds.size());
+
+    const int segmentBTokens =
+        static_cast<int>(std::count(output.tokenTypeIds.begin(),
+                                    output.tokenTypeIds.end(),
+                                    static_cast<int64_t>(1)));
+    QCOMPARE(segmentBTokens, 509);
 }
 
 QTEST_MAIN(TestTokenizer)

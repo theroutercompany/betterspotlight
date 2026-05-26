@@ -42,12 +42,31 @@ bool isUnsupportedExtensionMessage(const std::optional<QString>& errorMessage)
 
 bool isNonRetryableOptionalExtractionFailure(const ExtractionResult& extraction)
 {
-    if (extraction.status != ExtractionResult::Status::UnsupportedFormat) {
+    return isOptionalExtractorUnavailableMessage(extraction.errorMessage)
+        || (extraction.status == ExtractionResult::Status::UnsupportedFormat
+            && isUnsupportedExtensionMessage(extraction.errorMessage));
+}
+
+bool isDeterministicExtractionFailure(const ExtractionResult& extraction)
+{
+    if (isNonRetryableOptionalExtractionFailure(extraction)) {
+        return true;
+    }
+
+    switch (extraction.status) {
+    case ExtractionResult::Status::CorruptedFile:
+    case ExtractionResult::Status::UnsupportedFormat:
+    case ExtractionResult::Status::SizeExceeded:
+    case ExtractionResult::Status::Cancelled:
+        return true;
+    case ExtractionResult::Status::Success:
+    case ExtractionResult::Status::Timeout:
+    case ExtractionResult::Status::Inaccessible:
+    case ExtractionResult::Status::Unknown:
         return false;
     }
 
-    return isOptionalExtractorUnavailableMessage(extraction.errorMessage)
-        || isUnsupportedExtensionMessage(extraction.errorMessage);
+    return false;
 }
 
 } // namespace
@@ -231,7 +250,7 @@ void Indexer::prepareExtractedContent(PreparedWork& prepared,
             && extraction.content.has_value()) {
             break;
         }
-        if (isNonRetryableOptionalExtractionFailure(extraction)) {
+        if (isDeterministicExtractionFailure(extraction)) {
             break;
         }
 

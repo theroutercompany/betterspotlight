@@ -1,40 +1,112 @@
 #include "core/index/migration.h"
+#include "core/index/schema.h"
 #include "core/shared/logging.h"
 #include <sqlite3.h>
+#include <cerrno>
+#include <cctype>
+#include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace bs {
 
+namespace {
+
+bool parseSchemaVersion(const char* raw, int* version)
+{
+    if (!raw || !version) {
+        return false;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const long parsed = std::strtol(raw, &end, 10);
+    if (raw == end || errno == ERANGE || parsed < 0
+        || parsed > std::numeric_limits<int>::max()) {
+        return false;
+    }
+
+    while (end && *end != '\0') {
+        if (!std::isspace(static_cast<unsigned char>(*end))) {
+            return false;
+        }
+        ++end;
+    }
+
+    *version = static_cast<int>(parsed);
+    return true;
+}
+
+bool isMissingSettingsTable(sqlite3* db)
+{
+    if (!db) {
+        return false;
+    }
+
+    const char* err = sqlite3_errmsg(db);
+    return err && std::string(err).find("no such table: settings") != std::string::npos;
+}
+
+} // namespace
+
 int currentSchemaVersion(sqlite3* db)
 {
+    if (!db) {
+        LOG_ERROR(bsIndex, "Cannot read schema version from null database handle");
+        return -1;
+    }
+
     const char* sql = "SELECT value FROM settings WHERE key = 'schema_version'";
     sqlite3_stmt* stmt = nullptr;
     int version = 0;
 
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            if (val) {
-                version = std::stoi(val);
-            }
+    const int prepareRc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (prepareRc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        if (isMissingSettingsTable(db)) {
+            return 0;
         }
+        LOG_ERROR(bsIndex, "Failed to read schema version: %s", sqlite3_errmsg(db));
+        return -1;
     }
+
+    const int stepRc = sqlite3_step(stmt);
+    if (stepRc == SQLITE_ROW) {
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (!parseSchemaVersion(val, &version)) {
+            LOG_ERROR(bsIndex, "Invalid schema_version setting; refusing migration");
+            sqlite3_finalize(stmt);
+            return -1;
+        }
+    } else if (stepRc != SQLITE_DONE) {
+        LOG_ERROR(bsIndex, "Failed to step schema version query: %s", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
     sqlite3_finalize(stmt);
     return version;
 }
 
 bool applyMigrations(sqlite3* db, int targetVersion)
 {
+    if (targetVersion < 1 || targetVersion > kCurrentSchemaVersion) {
+        LOG_ERROR(bsIndex, "Unsupported target schema version %d; app supports up to %d",
+                  targetVersion, kCurrentSchemaVersion);
+        return false;
+    }
+
     int current = currentSchemaVersion(db);
+
+    if (current < 0) {
+        LOG_ERROR(bsIndex, "Schema version is invalid; migration aborted");
+        return false;
+    }
 
     if (current > targetVersion) {
         LOG_ERROR(bsIndex, "Schema version %d is newer than app version %d — downgrade not supported",
                   current, targetVersion);
         return false;
-    }
-
-    if (current == targetVersion) {
-        return true;
     }
 
     auto exec = [db](const char* sql) -> bool {
@@ -291,6 +363,10 @@ bool applyMigrations(sqlite3* db, int targetVersion)
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionLatencyRegressionPctMax', '35');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionPredictionFailureRateMax', '0.05');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerPromotionSaturationRateMax', '0.995');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('semanticBudgetMs', '350');")
+            || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('rerankBudgetMs', '600');")
+            || !exec("UPDATE settings SET value = '350' WHERE key = 'semanticBudgetMs' AND value IN ('70', '180');")
+            || !exec("UPDATE settings SET value = '600' WHERE key = 'rerankBudgetMs' AND value IN ('120', '320');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActiveLatencyUs', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastCandidateLatencyUs', '0');")
             || !exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('onlineRankerLastActivePredictionFailureRate', '0');")

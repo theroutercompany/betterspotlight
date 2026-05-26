@@ -5,6 +5,8 @@
 #include "core/index/schema.h"
 #include "core/shared/chunk.h"
 
+#include <thread>
+
 class TestSQLiteStoreJoined : public QObject {
     Q_OBJECT
 
@@ -15,6 +17,7 @@ private slots:
     void testJoinedSearchPathFilter();
     void testJoinedSearchExcludePath();
     void testJoinedSearchNoFilters();
+    void testJoinedSearchOnWorkerThread();
     void testBatchFrequencies();
     void testBatchFrequenciesEmpty();
 };
@@ -284,6 +287,43 @@ void TestSQLiteStoreJoined::testJoinedSearchNoFilters()
         QVERIFY(!hit.kind.isEmpty());
         QVERIFY(hit.size > 0);
     }
+}
+
+void TestSQLiteStoreJoined::testJoinedSearchOnWorkerThread()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString dbPath = dir.path() + "/test.db";
+    auto store = bs::SQLiteStore::open(dbPath);
+    QVERIFY(store.has_value());
+
+    const int64_t pdfId = insertItemWithContent(*store,
+        QStringLiteral("/docs/breaking-sound-barrier.pdf"),
+        QStringLiteral("breaking-sound-barrier.pdf"),
+        QStringLiteral("pdf"),
+        bs::ItemKind::Pdf, 1024, 1700001000.0,
+        QStringLiteral("breaking sound barrier report"));
+
+    insertItemWithContent(*store,
+        QStringLiteral("/docs/breaking-sound-barrier.txt"),
+        QStringLiteral("breaking-sound-barrier.txt"),
+        QStringLiteral("txt"),
+        bs::ItemKind::Text, 1024, 1700001000.0,
+        QStringLiteral("breaking sound barrier report"));
+
+    bs::SearchOptions opts;
+    opts.fileTypes = {QStringLiteral("pdf")};
+
+    std::vector<bs::SQLiteStore::FtsJoinedHit> hits;
+    std::thread worker([&]() {
+        hits = store->searchFts5Joined(
+            QStringLiteral("breaking sound barrier"), 20, false, opts);
+    });
+    worker.join();
+
+    QCOMPARE(static_cast<int>(hits.size()), 1);
+    QCOMPARE(hits[0].fileId, pdfId);
+    QCOMPARE(hits[0].name, QStringLiteral("breaking-sound-barrier.pdf"));
 }
 
 void TestSQLiteStoreJoined::testBatchFrequencies()
