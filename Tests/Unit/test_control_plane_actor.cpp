@@ -12,6 +12,7 @@ private slots:
     void testLifecycleTransitionsAndIdempotentStop();
     void testSuppressesStatusSignalsAfterShutdownPhase();
     void testConfigureServicesUsesIdempotentRegistration();
+    void testStartAllRejectsEmptyEffectiveServiceConfiguration();
 };
 
 void TestControlPlaneActor::testLifecycleTransitionsAndIdempotentStop()
@@ -78,6 +79,36 @@ void TestControlPlaneActor::testConfigureServicesUsesIdempotentRegistration()
     QCOMPARE(snapshot.size(), 1);
     QCOMPARE(snapshot.first().toObject().value(QStringLiteral("name")).toString(),
              QStringLiteral("indexer"));
+}
+
+void TestControlPlaneActor::testStartAllRejectsEmptyEffectiveServiceConfiguration()
+{
+    bs::ControlPlaneActor actor;
+    actor.initialize();
+
+    QSignalSpy lifecycleSpy(&actor, &bs::ControlPlaneActor::lifecyclePhaseChanged);
+    QSignalSpy servicesSpy(&actor, &bs::ControlPlaneActor::managedServicesUpdated);
+
+    QVariantList descriptors;
+    descriptors.push_back(QVariantMap{
+        {QStringLiteral("name"), QStringLiteral("   ")},
+        {QStringLiteral("binary"), QStringLiteral("/bin/cat")},
+    });
+    descriptors.push_back(QVariantMap{
+        {QStringLiteral("name"), QStringLiteral("query")},
+        {QStringLiteral("binary"), QStringLiteral("   ")},
+    });
+
+    actor.configureServices(descriptors);
+    QCOMPARE(actor.serviceSnapshotSync().size(), 0);
+
+    QVERIFY(!actor.startAll());
+    QCOMPARE(actor.lifecyclePhase(), QStringLiteral("starting"));
+    QCOMPARE(lifecycleSpy.count(), 0);
+    QVERIFY(servicesSpy.count() >= 1);
+    const QJsonArray lastSnapshot =
+        qvariant_cast<QJsonArray>(servicesSpy.takeLast().at(0));
+    QCOMPARE(lastSnapshot.size(), 0);
 }
 
 QTEST_MAIN(TestControlPlaneActor)

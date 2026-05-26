@@ -4,6 +4,8 @@
 #include <QJsonObject>
 #include <QString>
 
+#include <algorithm>
+
 namespace bs {
 
 enum class AppLifecyclePhase {
@@ -81,29 +83,92 @@ inline QString managedServiceStateToString(ManagedServiceState state)
     return QStringLiteral("unknown");
 }
 
-inline ManagedServiceState managedServiceStateFromString(const QString& state)
+inline bool tryManagedServiceStateFromString(const QString& state, ManagedServiceState* out)
 {
     const QString normalized = state.trimmed().toLower();
+    if (normalized == QLatin1String("registered")) {
+        if (out) *out = ManagedServiceState::Registered;
+        return true;
+    }
     if (normalized == QLatin1String("starting")) {
-        return ManagedServiceState::Starting;
+        if (out) *out = ManagedServiceState::Starting;
+        return true;
     }
     if (normalized == QLatin1String("ready") || normalized == QLatin1String("running")) {
-        return ManagedServiceState::Ready;
+        if (out) *out = ManagedServiceState::Ready;
+        return true;
     }
     if (normalized == QLatin1String("degraded")) {
-        return ManagedServiceState::Degraded;
+        if (out) *out = ManagedServiceState::Degraded;
+        return true;
     }
     if (normalized == QLatin1String("backoff")) {
-        return ManagedServiceState::Backoff;
+        if (out) *out = ManagedServiceState::Backoff;
+        return true;
     }
     if (normalized == QLatin1String("crashed")) {
-        return ManagedServiceState::Crashed;
+        if (out) *out = ManagedServiceState::Crashed;
+        return true;
     }
     if (normalized == QLatin1String("stopped")) {
-        return ManagedServiceState::Stopped;
+        if (out) *out = ManagedServiceState::Stopped;
+        return true;
     }
     if (normalized == QLatin1String("giving_up")) {
-        return ManagedServiceState::GivingUp;
+        if (out) *out = ManagedServiceState::GivingUp;
+        return true;
+    }
+    return false;
+}
+
+inline ManagedServiceState managedServiceStateFromString(const QString& state)
+{
+    ManagedServiceState parsed = ManagedServiceState::Registered;
+    if (tryManagedServiceStateFromString(state, &parsed)) {
+        return parsed;
+    }
+    return ManagedServiceState::Registered;
+}
+
+inline bool managedServiceStateImpliesRunning(ManagedServiceState state)
+{
+    switch (state) {
+    case ManagedServiceState::Starting:
+    case ManagedServiceState::Ready:
+    case ManagedServiceState::Degraded:
+        return true;
+    case ManagedServiceState::Registered:
+    case ManagedServiceState::Backoff:
+    case ManagedServiceState::Crashed:
+    case ManagedServiceState::Stopped:
+    case ManagedServiceState::GivingUp:
+        return false;
+    }
+    return false;
+}
+
+inline bool managedServiceStateImpliesReady(ManagedServiceState state)
+{
+    return state == ManagedServiceState::Ready;
+}
+
+inline qint64 nonNegative(qint64 value)
+{
+    return std::max<qint64>(0, value);
+}
+
+inline bool jsonFieldPresent(const QJsonValue& value)
+{
+    return !value.isUndefined() && !value.isNull();
+}
+
+inline ManagedServiceState managedServiceStateFromRuntimeFlags(bool running, bool ready)
+{
+    if (ready) {
+        return ManagedServiceState::Ready;
+    }
+    if (running) {
+        return ManagedServiceState::Starting;
     }
     return ManagedServiceState::Registered;
 }
@@ -111,38 +176,104 @@ inline ManagedServiceState managedServiceStateFromString(const QString& state)
 inline QJsonObject serviceRuntimeStateToJson(const ServiceRuntimeState& service)
 {
     QJsonObject out;
-    out[QStringLiteral("name")] = service.name;
+    out[QStringLiteral("name")] = service.name.trimmed();
     out[QStringLiteral("state")] = managedServiceStateToString(service.state);
     out[QStringLiteral("running")] = service.running;
     out[QStringLiteral("ready")] = service.ready;
-    out[QStringLiteral("crashCount")] = service.crashCount;
-    out[QStringLiteral("pid")] = service.pid;
-    out[QStringLiteral("updatedAtMs")] = service.updatedAtMs;
-    out[QStringLiteral("reason")] = service.reason;
+    out[QStringLiteral("crashCount")] = nonNegative(service.crashCount);
+    out[QStringLiteral("pid")] = nonNegative(service.pid);
+    out[QStringLiteral("updatedAtMs")] = nonNegative(service.updatedAtMs);
+    out[QStringLiteral("reason")] = service.reason.trimmed();
     return out;
 }
 
 inline ServiceRuntimeState serviceRuntimeStateFromJson(const QJsonObject& json)
 {
     ServiceRuntimeState out;
-    out.name = json.value(QStringLiteral("name")).toString();
-    out.state = managedServiceStateFromString(json.value(QStringLiteral("state")).toString());
-    out.running = json.value(QStringLiteral("running")).toBool(false);
-    out.ready = json.value(QStringLiteral("ready")).toBool(false);
-    out.crashCount = json.value(QStringLiteral("crashCount")).toInteger();
-    out.pid = json.value(QStringLiteral("pid")).toInteger();
-    out.updatedAtMs = json.value(QStringLiteral("updatedAtMs")).toInteger();
-    out.reason = json.value(QStringLiteral("reason")).toString();
+    out.name = json.value(QStringLiteral("name")).toString().trimmed();
+    const QJsonValue stateValue = json.value(QStringLiteral("state"));
+    const QJsonValue runningValue = json.value(QStringLiteral("running"));
+    const QJsonValue readyValue = json.value(QStringLiteral("ready"));
+    const bool explicitRunning = runningValue.isBool();
+    const bool explicitReady = readyValue.isBool();
+    const bool running = explicitRunning ? runningValue.toBool(false) : false;
+    const bool ready = explicitReady ? readyValue.toBool(false) : false;
+
+    const bool explicitState = jsonFieldPresent(stateValue)
+        && (!stateValue.isString() || !stateValue.toString().trimmed().isEmpty());
+    bool stateParsed = false;
+    if (stateValue.isString()) {
+        stateParsed = tryManagedServiceStateFromString(stateValue.toString(), &out.state);
+    }
+
+    const bool invalidExplicitState = explicitState && !stateParsed;
+
+    if (invalidExplicitState) {
+        out.state = ManagedServiceState::Degraded;
+        out.running = false;
+        out.ready = false;
+        out.reason = json.value(QStringLiteral("reason")).toString().trimmed();
+        if (out.reason.isEmpty()) {
+            out.reason = QStringLiteral("invalid_service_state");
+        }
+    } else if (!explicitState) {
+        out.state = managedServiceStateFromRuntimeFlags(running, ready);
+        out.running = explicitRunning ? running : managedServiceStateImpliesRunning(out.state);
+        out.ready = explicitReady ? ready : managedServiceStateImpliesReady(out.state);
+    } else {
+        out.running = explicitRunning ? running : managedServiceStateImpliesRunning(out.state);
+        out.ready = explicitReady ? ready : managedServiceStateImpliesReady(out.state);
+    }
+
+    if (out.ready && !out.running) {
+        if (explicitRunning) {
+            out.ready = false;
+        } else {
+            out.running = true;
+        }
+    }
+    if (out.state == ManagedServiceState::Ready && !out.ready) {
+        out.state = out.running ? ManagedServiceState::Starting : ManagedServiceState::Stopped;
+    }
+    if (!invalidExplicitState) {
+        switch (out.state) {
+        case ManagedServiceState::Ready:
+            out.running = true;
+            out.ready = true;
+            break;
+        case ManagedServiceState::Starting:
+        case ManagedServiceState::Degraded:
+            out.running = true;
+            out.ready = false;
+            break;
+        case ManagedServiceState::Registered:
+        case ManagedServiceState::Backoff:
+        case ManagedServiceState::Crashed:
+        case ManagedServiceState::Stopped:
+        case ManagedServiceState::GivingUp:
+            out.running = false;
+            out.ready = false;
+            break;
+        }
+    }
+    out.crashCount = nonNegative(json.value(QStringLiteral("crashCount")).toInteger());
+    out.pid = nonNegative(json.value(QStringLiteral("pid")).toInteger());
+    out.updatedAtMs = nonNegative(json.value(QStringLiteral("updatedAtMs")).toInteger());
+    if (out.reason.isEmpty()) {
+        out.reason = json.value(QStringLiteral("reason")).toString().trimmed();
+    }
     return out;
 }
 
 inline QJsonObject healthComponentToJson(const HealthComponentV2& component)
 {
     QJsonObject out;
-    out[QStringLiteral("state")] = component.state;
-    out[QStringLiteral("reason")] = component.reason;
-    out[QStringLiteral("lastUpdatedMs")] = component.lastUpdatedMs;
-    out[QStringLiteral("stalenessMs")] = component.stalenessMs;
+    const QString state = component.state.trimmed();
+    out[QStringLiteral("state")] =
+        state.isEmpty() ? QStringLiteral("unavailable") : state;
+    out[QStringLiteral("reason")] = component.reason.trimmed();
+    out[QStringLiteral("lastUpdatedMs")] = nonNegative(component.lastUpdatedMs);
+    out[QStringLiteral("stalenessMs")] = nonNegative(component.stalenessMs);
     out[QStringLiteral("metrics")] = component.metrics;
     return out;
 }

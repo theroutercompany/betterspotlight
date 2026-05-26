@@ -69,8 +69,10 @@ private:
     static bool envFlagEnabled(const char* key, bool fallback = false);
     SocketClient* ensureQueryClient(int timeoutMs = 400);
     SocketClient* ensureIndexerClient(int timeoutMs = 250);
+    void sendIndexerUserActive(bool active, int connectTimeoutMs);
 
     void parseSearchResponse(const QJsonObject& response);
+    void clearResultData();
     void rebuildResultRows();
     int resultIndexForRow(int rowIndex) const;
     int firstSelectableRow() const;
@@ -101,6 +103,7 @@ private:
     QString m_lastSystemActivityDigest;
     QString m_lastContextEventId;
     QString m_lastActivityDigest;
+    quint64 m_searchGeneration = 0;
 
     QTimer m_debounceTimer;
     static constexpr int kDebounceMs = 100;

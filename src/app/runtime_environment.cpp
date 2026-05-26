@@ -12,6 +12,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <cerrno>
+
 namespace bs {
 
 namespace {
@@ -52,7 +54,21 @@ bool writeRuntimeMetadata(const RuntimeContext& context, QString* error)
         }
         return false;
     }
-    metadataFile.write(QJsonDocument(metadata).toJson(QJsonDocument::Indented));
+    const QByteArray payload = QJsonDocument(metadata).toJson(QJsonDocument::Indented);
+    if (metadataFile.write(payload) != payload.size()) {
+        if (error) {
+            *error = QStringLiteral("Failed to write complete runtime metadata: %1")
+                         .arg(context.metadataPath);
+        }
+        return false;
+    }
+    if (!metadataFile.flush()) {
+        if (error) {
+            *error = QStringLiteral("Failed to flush runtime metadata: %1")
+                         .arg(context.metadataPath);
+        }
+        return false;
+    }
     metadataFile.close();
     return true;
 }
@@ -78,7 +94,11 @@ bool processIsAlive(qint64 pid)
     if (pid <= 0) {
         return false;
     }
-    return ::kill(static_cast<pid_t>(pid), 0) == 0;
+    errno = 0;
+    if (::kill(static_cast<pid_t>(pid), 0) == 0) {
+        return true;
+    }
+    return errno == EPERM;
 }
 
 void cleanupOrphanRuntimeDirectories(const RuntimeContext& context,

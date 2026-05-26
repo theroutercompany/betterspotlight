@@ -8,14 +8,17 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSaveFile>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 #include <QVariantMap>
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace bs {
 
@@ -41,6 +44,47 @@ QJsonArray defaultIndexRoots()
     return roots;
 }
 
+bool isValidRootMode(const QString& mode)
+{
+    return mode == QLatin1String("index_embed")
+        || mode == QLatin1String("index_only")
+        || mode == QLatin1String("skip");
+}
+
+QString normalizedRootMode(const QString& rawMode, const QString& fallback)
+{
+    const QString mode = rawMode.trimmed().toLower();
+    if (mode == QLatin1String("index")) {
+        return QStringLiteral("index_only");
+    }
+    if (isValidRootMode(mode)) {
+        return mode;
+    }
+    return fallback;
+}
+
+bool isSafeHomeDirectoryName(const QString& name)
+{
+    return !name.isEmpty()
+        && name != QLatin1String(".")
+        && name != QLatin1String("..")
+        && !name.contains(QLatin1Char('/'))
+        && !name.contains(QLatin1Char('\\'));
+}
+
+QString normalizedConfiguredRootPath(const QString& rawPath)
+{
+    QString path = rawPath.trimmed();
+    if (path.startsWith(QStringLiteral("file://"))) {
+        path = QUrl(path).toLocalFile();
+    }
+    path = QDir::cleanPath(path);
+    if (path.isEmpty() || path == QLatin1String(".") || !QDir::isAbsolutePath(path)) {
+        return {};
+    }
+    return path;
+}
+
 QJsonArray indexRootsFromHomeDirectories(const QJsonObject& settings)
 {
     QJsonArray roots;
@@ -52,17 +96,19 @@ QJsonArray indexRootsFromHomeDirectories(const QJsonObject& settings)
             continue;
         }
         const QJsonObject obj = value.toObject();
-        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        const QString mode = normalizedRootMode(
+            obj.value(QStringLiteral("mode")).toString(),
+            QStringLiteral("index_only"));
         if (mode == QLatin1String("skip")) {
             continue;
         }
         const QString name = obj.value(QStringLiteral("name")).toString().trimmed();
-        if (name.isEmpty()) {
+        if (!isSafeHomeDirectoryName(name)) {
             continue;
         }
         roots.append(QJsonObject{
             {QStringLiteral("path"), home + QLatin1Char('/') + name},
-            {QStringLiteral("mode"), mode.isEmpty() ? QStringLiteral("index_only") : mode},
+            {QStringLiteral("mode"), mode},
         });
     }
     return roots;
@@ -92,7 +138,22 @@ QVariantList jsonArrayToVariantList(const QJsonArray& arr)
     QVariantList out;
     out.reserve(arr.size());
     for (const QJsonValue& v : arr) {
-        out.append(v.toObject().toVariantMap());
+        if (!v.isObject()) {
+            continue;
+        }
+        const QJsonObject obj = v.toObject();
+        const QString path = normalizedConfiguredRootPath(
+            obj.value(QStringLiteral("path")).toString());
+        if (path.isEmpty()) {
+            continue;
+        }
+
+        QVariantMap map;
+        map.insert(QStringLiteral("path"), path);
+        map.insert(QStringLiteral("mode"),
+                   normalizedRootMode(obj.value(QStringLiteral("mode")).toString(),
+                                      QStringLiteral("index_embed")));
+        out.append(map);
     }
     return out;
 }
@@ -101,11 +162,21 @@ QJsonArray variantListToJsonArray(const QVariantList& values)
 {
     QJsonArray out;
 
+    QSet<QString> seenPaths;
     for (const QVariant& v : values) {
         const QVariantMap map = v.toMap();
+        const QString path = normalizedConfiguredRootPath(
+            map.value(QStringLiteral("path")).toString());
+        if (path.isEmpty() || seenPaths.contains(path)) {
+            continue;
+        }
+        seenPaths.insert(path);
+
         QJsonObject obj;
-        obj[QStringLiteral("path")] = map.value(QStringLiteral("path")).toString();
-        obj[QStringLiteral("mode")] = map.value(QStringLiteral("mode"), QStringLiteral("index_embed")).toString();
+        obj[QStringLiteral("path")] = path;
+        obj[QStringLiteral("mode")] =
+            normalizedRootMode(map.value(QStringLiteral("mode"), QStringLiteral("index_embed")).toString(),
+                               QStringLiteral("index_embed"));
         out.append(obj);
     }
 
@@ -119,10 +190,81 @@ void ensureDefault(QJsonObject& obj, const QString& key, const QJsonValue& value
     }
 }
 
-void upsertSetting(sqlite3* db, const QString& key, const QString& value)
+QString runtimeDbPath()
+{
+    const QString configuredDataDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_DATA_DIR").trimmed();
+    const QString dataDir = configuredDataDir.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+              + QStringLiteral("/betterspotlight")
+        : configuredDataDir;
+    return QDir(dataDir).filePath(QStringLiteral("index.db"));
+}
+
+QString settingsDataDir()
+{
+    const QString configuredSettingsDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_SETTINGS_DIR").trimmed();
+    if (!configuredSettingsDir.isEmpty()) {
+        return configuredSettingsDir;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+}
+
+QString exportDataDir()
+{
+    const QString configuredExportDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_EXPORT_DIR").trimmed();
+    if (!configuredExportDir.isEmpty()) {
+        return configuredExportDir;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+}
+
+bool openRuntimeDb(sqlite3** db, int flags)
 {
     if (!db) {
-        return;
+        return false;
+    }
+    *db = nullptr;
+
+    const QString dbPath = runtimeDbPath();
+    if ((flags & SQLITE_OPEN_CREATE) != 0) {
+        QDir().mkpath(QFileInfo(dbPath).absolutePath());
+    }
+
+    if (sqlite3_open_v2(dbPath.toUtf8().constData(), db, flags, nullptr) != SQLITE_OK) {
+        if (*db) {
+            sqlite3_close(*db);
+            *db = nullptr;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool ensureSettingsTable(sqlite3* db)
+{
+    if (!db) {
+        return false;
+    }
+    static constexpr const char* kSql =
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)";
+    return sqlite3_exec(db, kSql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+bool execSql(sqlite3* db, const char* sql)
+{
+    if (!db || !sql) {
+        return false;
+    }
+    return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+bool upsertSetting(sqlite3* db, const QString& key, const QString& value)
+{
+    if (!db) {
+        return false;
     }
     static constexpr const char* kSql = R"(
         INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -130,14 +272,83 @@ void upsertSetting(sqlite3* db, const QString& key, const QString& value)
     )";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
-        return;
+        return false;
     }
     const QByteArray keyUtf8 = key.toUtf8();
     const QByteArray valueUtf8 = value.toUtf8();
-    sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, valueUtf8.constData(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
+    bool ok = sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT) == SQLITE_OK
+        && sqlite3_bind_text(stmt, 2, valueUtf8.constData(), -1, SQLITE_TRANSIENT) == SQLITE_OK
+        && sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
+    return ok;
+}
+
+double jsonDoubleValue(const QJsonValue& value, double defaultValue)
+{
+    if (value.isDouble()) {
+        const double parsed = value.toDouble(defaultValue);
+        return std::isfinite(parsed) ? parsed : defaultValue;
+    }
+    if (value.isString()) {
+        bool ok = false;
+        const double parsed = value.toString().trimmed().toDouble(&ok);
+        return ok && std::isfinite(parsed) ? parsed : defaultValue;
+    }
+    return defaultValue;
+}
+
+int boundedJsonInt(const QJsonObject& settings,
+                   const QString& key,
+                   int defaultValue,
+                   int minValue,
+                   int maxValue)
+{
+    double value = jsonDoubleValue(settings.value(key), defaultValue);
+    if (!std::isfinite(value)) {
+        value = defaultValue;
+    }
+    return static_cast<int>(std::clamp(value,
+                                       static_cast<double>(minValue),
+                                       static_cast<double>(maxValue)));
+}
+
+double boundedFiniteDouble(double value,
+                           double defaultValue,
+                           double minValue,
+                           double maxValue)
+{
+    if (!std::isfinite(value)) {
+        value = defaultValue;
+    }
+    return std::clamp(value, minValue, maxValue);
+}
+
+double boundedJsonDouble(const QJsonObject& settings,
+                         const QString& key,
+                         double defaultValue,
+                         double minValue,
+                         double maxValue)
+{
+    return boundedFiniteDouble(jsonDoubleValue(settings.value(key), defaultValue),
+                               defaultValue,
+                               minValue,
+                               maxValue);
+}
+
+double nonNegativeFiniteDouble(double value, double defaultValue)
+{
+    if (!std::isfinite(value)) {
+        value = defaultValue;
+    }
+    return std::max(0.0, value);
+}
+
+double nonNegativeJsonDouble(const QJsonObject& settings,
+                             const QString& key,
+                             double defaultValue)
+{
+    return nonNegativeFiniteDouble(jsonDoubleValue(settings.value(key), defaultValue),
+                                   defaultValue);
 }
 
 QString boolToSqlValue(bool value)
@@ -180,155 +391,356 @@ bool jsonBoolValue(const QJsonValue& value, bool defaultValue)
     return defaultValue;
 }
 
-void syncRuntimeSettingsToDb(const QJsonObject& settings)
+QString normalizedOnlineRankerRolloutMode(const QJsonValue& value)
 {
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
+    const QString mode = value.toString(QStringLiteral("instrumentation_only"))
+        .trimmed()
+        .toLower();
+    if (mode == QLatin1String("instrumentation_only")
+        || mode == QLatin1String("shadow_training")
+        || mode == QLatin1String("blended_ranking")) {
+        return mode;
+    }
+    return QStringLiteral("instrumentation_only");
+}
+
+void normalizeBoolSetting(QJsonObject& settings, const QString& key, bool defaultValue)
+{
+    settings[key] = jsonBoolValue(settings.value(key), defaultValue);
+}
+
+void normalizeBoundedIntSetting(QJsonObject& settings,
+                                const QString& key,
+                                int defaultValue,
+                                int minValue,
+                                int maxValue)
+{
+    settings[key] = boundedJsonInt(settings, key, defaultValue, minValue, maxValue);
+}
+
+void normalizeBoundedDoubleSetting(QJsonObject& settings,
+                                   const QString& key,
+                                   double defaultValue,
+                                   double minValue,
+                                   double maxValue)
+{
+    settings[key] = boundedJsonDouble(settings, key, defaultValue, minValue, maxValue);
+}
+
+void normalizeNonNegativeDoubleSetting(QJsonObject& settings,
+                                       const QString& key,
+                                       double defaultValue)
+{
+    settings[key] = nonNegativeJsonDouble(settings, key, defaultValue);
+}
+
+void normalizeSettings(QJsonObject& settings)
+{
+    const QJsonArray normalizedRoots =
+        variantListToJsonArray(jsonArrayToVariantList(
+            settings.value(QStringLiteral("indexRoots")).toArray()));
+    settings[QStringLiteral("indexRoots")] =
+        normalizedRoots.isEmpty() ? defaultIndexRoots() : normalizedRoots;
+
+    normalizeBoolSetting(settings, QStringLiteral("launchAtLogin"), false);
+    normalizeBoolSetting(settings, QStringLiteral("showInDock"), false);
+    normalizeBoolSetting(settings, QStringLiteral("checkForUpdates"), true);
+    normalizeBoolSetting(settings, QStringLiteral("enablePdf"), true);
+    normalizeBoolSetting(settings, QStringLiteral("enableOcr"), false);
+    normalizeBoolSetting(settings, QStringLiteral("embeddingEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("inferenceServiceEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("inferenceEmbedOffloadEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("inferenceRerankOffloadEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("inferenceQaOffloadEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("inferenceShadowModeEnabled"), false);
+    normalizeBoolSetting(settings, QStringLiteral("queryRouterEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("fastEmbeddingEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("dualEmbeddingFusionEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("rerankerCascadeEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("personalizedLtrEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorStreamEnabled"), false);
+    normalizeBoolSetting(settings, QStringLiteral("learningEnabled"), false);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorCaptureAppActivityEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorCaptureInputActivityEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorCaptureSearchEventsEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorCaptureWindowTitleHashEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("behaviorCaptureBrowserHostHashEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("learningPauseOnUserInput"), true);
+    normalizeBoolSetting(settings, QStringLiteral("autoVectorMigration"), true);
+    normalizeBoolSetting(settings, QStringLiteral("qaSnippetEnabled"), true);
+    normalizeBoolSetting(settings, QStringLiteral("enableFeedbackLogging"), true);
+    normalizeBoolSetting(settings, QStringLiteral("enableInteractionTracking"), true);
+    normalizeBoolSetting(settings, QStringLiteral("clipboardSignalEnabled"), false);
+
+    normalizeBoundedIntSetting(settings, QStringLiteral("maxResults"), 20, 5, 200);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("queryRouterMinConfidence"),
+                                  0.45,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedIntSetting(settings, QStringLiteral("strongEmbeddingTopK"), 40, 1, 200);
+    normalizeBoundedIntSetting(settings, QStringLiteral("fastEmbeddingTopK"), 60, 1, 300);
+    normalizeBoundedIntSetting(settings, QStringLiteral("rerankerStage1Max"), 40, 4, 200);
+    normalizeBoundedIntSetting(settings, QStringLiteral("rerankerStage2Max"), 12, 4, 100);
+    normalizeNonNegativeDoubleSetting(settings, QStringLiteral("bm25WeightName"), 10.0);
+    normalizeNonNegativeDoubleSetting(settings, QStringLiteral("bm25WeightPath"), 5.0);
+    normalizeNonNegativeDoubleSetting(settings, QStringLiteral("bm25WeightContent"), 1.0);
+    normalizeBoundedIntSetting(settings, QStringLiteral("semanticBudgetMs"), 350, 20, 500);
+    normalizeBoundedIntSetting(settings, QStringLiteral("rerankBudgetMs"), 600, 40, 600);
+    normalizeBoundedIntSetting(settings, QStringLiteral("maxFileSizeMB"), 50, 1, 1024);
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("extractionTimeoutMs"),
+                               30000,
+                               1000,
+                               120000);
+    normalizeBoundedIntSetting(settings, QStringLiteral("feedbackRetentionDays"), 90, 7, 365);
+
+    const int maxInt = std::numeric_limits<int>::max();
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("onlineRankerHealthWindowDays"),
+                               7,
+                               1,
+                               maxInt);
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                               50,
+                               1,
+                               maxInt);
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                               80,
+                               1,
+                               maxInt);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                                  0.5,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                                  0.1,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                                  2500.0,
+                                  10.0,
+                                  1000000.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                                  35.0,
+                                  0.0,
+                                  1000.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                                  0.05,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                                  0.995,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerBlendAlpha"),
+                                  0.15,
+                                  0.0,
+                                  1.0);
+    normalizeBoundedDoubleSetting(settings,
+                                  QStringLiteral("onlineRankerNegativeSampleRatio"),
+                                  3.0,
+                                  0.0,
+                                  10.0);
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                               1200,
+                               60,
+                               maxInt);
+    normalizeBoundedIntSetting(settings,
+                               QStringLiteral("behaviorRawRetentionDays"),
+                               30,
+                               1,
+                               maxInt);
+    settings[QStringLiteral("onlineRankerRolloutMode")] =
+        normalizedOnlineRankerRolloutMode(settings.value(QStringLiteral("onlineRankerRolloutMode")));
+}
+
+void syncRuntimeSettingsToDb(const QJsonObject& rawSettings)
+{
+    QJsonObject settings = rawSettings;
+    normalizeSettings(settings);
+
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) {
+        return;
+    }
+    if (!ensureSettingsTable(db)) {
+        sqlite3_close(db);
         return;
     }
 
-    upsertSetting(db, QStringLiteral("embeddingEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("embeddingEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("inferenceServiceEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("inferenceEmbedOffloadEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("inferenceRerankOffloadEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("inferenceQaOffloadEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("inferenceShadowModeEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("inferenceShadowModeEnabled")).toBool(false)));
-    upsertSetting(db, QStringLiteral("queryRouterEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("queryRouterEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("queryRouterMinConfidence"),
-                  QString::number(settings.value(QStringLiteral("queryRouterMinConfidence")).toDouble(0.45), 'f', 2));
-    upsertSetting(db, QStringLiteral("fastEmbeddingEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("dualEmbeddingFusionEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("strongEmbeddingTopK"),
-                  QString::number(settings.value(QStringLiteral("strongEmbeddingTopK")).toInt(40)));
-    upsertSetting(db, QStringLiteral("fastEmbeddingTopK"),
-                  QString::number(settings.value(QStringLiteral("fastEmbeddingTopK")).toInt(60)));
-    upsertSetting(db, QStringLiteral("rerankerCascadeEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("rerankerStage1Max"),
-                  QString::number(settings.value(QStringLiteral("rerankerStage1Max")).toInt(40)));
-    upsertSetting(db, QStringLiteral("rerankerStage2Max"),
-                  QString::number(settings.value(QStringLiteral("rerankerStage2Max")).toInt(12)));
-    upsertSetting(db, QStringLiteral("autoVectorMigration"),
-                  boolToSqlValue(settings.value(QStringLiteral("autoVectorMigration")).toBool(true)));
-    upsertSetting(db, QStringLiteral("bm25WeightName"),
-                  QString::number(settings.value(QStringLiteral("bm25WeightName")).toDouble(10.0), 'g', 17));
-    upsertSetting(db, QStringLiteral("bm25WeightPath"),
-                  QString::number(settings.value(QStringLiteral("bm25WeightPath")).toDouble(5.0), 'g', 17));
-    upsertSetting(db, QStringLiteral("bm25WeightContent"),
-                  QString::number(settings.value(QStringLiteral("bm25WeightContent")).toDouble(1.0), 'g', 17));
-    upsertSetting(db, QStringLiteral("qaSnippetEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("qaSnippetEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("personalizedLtrEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("behaviorStreamEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorStreamEnabled")).toBool(false)));
-    upsertSetting(db, QStringLiteral("learningEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("learningEnabled")).toBool(false)));
-    upsertSetting(db, QStringLiteral("behaviorCaptureAppActivityEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureAppActivityEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("behaviorCaptureInputActivityEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureInputActivityEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("behaviorCaptureSearchEventsEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureSearchEventsEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("behaviorCaptureWindowTitleHashEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureWindowTitleHashEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("behaviorCaptureBrowserHostHashEnabled"),
-                  boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureBrowserHostHashEnabled")).toBool(true)));
-    upsertSetting(db, QStringLiteral("onlineRankerRolloutMode"),
-                  settings.value(QStringLiteral("onlineRankerRolloutMode"))
-                      .toString(QStringLiteral("instrumentation_only"))
-                      .trimmed()
-                      .toLower());
-    upsertSetting(db, QStringLiteral("onlineRankerHealthWindowDays"),
-                  QString::number(std::max(
-                      1, settings.value(QStringLiteral("onlineRankerHealthWindowDays")).toInt(7))));
-    upsertSetting(db, QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
-                  QString::number(std::max(
-                      1, settings.value(QStringLiteral("onlineRankerRecentCycleHistoryLimit")).toInt(50))));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionGateMinPositives"),
-                  QString::number(std::max(
-                      1, settings.value(QStringLiteral("onlineRankerPromotionGateMinPositives")).toInt(80))));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionMinAttributedRate"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionMinAttributedRate")).toDouble(0.5),
-                      0.0,
-                      1.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionMinContextDigestRate")).toDouble(0.1),
-                      0.0,
-                      1.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionLatencyUsMax"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionLatencyUsMax")).toDouble(2500.0),
-                      10.0,
-                      1000000.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax")).toDouble(35.0),
-                      0.0,
-                      1000.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax")).toDouble(0.05),
-                      0.0,
-                      1.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerPromotionSaturationRateMax"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerPromotionSaturationRateMax")).toDouble(0.995),
-                      0.0,
-                      1.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("learningPauseOnUserInput"),
-                  boolToSqlValue(settings.value(QStringLiteral("learningPauseOnUserInput")).toBool(true)));
-    upsertSetting(db, QStringLiteral("onlineRankerBlendAlpha"),
-                  QString::number(settings.value(QStringLiteral("onlineRankerBlendAlpha")).toDouble(0.15), 'g', 17));
-    upsertSetting(db, QStringLiteral("onlineRankerNegativeSampleRatio"),
-                  QString::number(std::clamp(
-                      settings.value(QStringLiteral("onlineRankerNegativeSampleRatio")).toDouble(3.0),
-                      0.0,
-                      10.0),
-                                  'g',
-                                  17));
-    upsertSetting(db, QStringLiteral("onlineRankerMaxTrainingBatchSize"),
-                  QString::number(std::max(
-                      60, settings.value(QStringLiteral("onlineRankerMaxTrainingBatchSize")).toInt(1200))));
-    upsertSetting(db, QStringLiteral("behaviorRawRetentionDays"),
-                  QString::number(settings.value(QStringLiteral("behaviorRawRetentionDays")).toInt(30)));
-    upsertSetting(db, QStringLiteral("semanticBudgetMs"),
-                  QString::number(settings.value(QStringLiteral("semanticBudgetMs")).toInt(70)));
-    upsertSetting(db, QStringLiteral("rerankBudgetMs"),
-                  QString::number(settings.value(QStringLiteral("rerankBudgetMs")).toInt(120)));
-    upsertSetting(db, QStringLiteral("max_file_size"),
-                  QString::number(settings.value(QStringLiteral("maxFileSizeMB")).toInt(50) * 1024 * 1024));
-    upsertSetting(db, QStringLiteral("extraction_timeout_ms"),
-                  QString::number(settings.value(QStringLiteral("extractionTimeoutMs")).toInt(30000)));
+    auto writeSetting = [&](const QString& key, const QString& value) {
+        upsertSetting(db, key, value);
+    };
+
+    writeSetting(QStringLiteral("embeddingEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("embeddingEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("inferenceServiceEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("inferenceEmbedOffloadEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("inferenceRerankOffloadEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("inferenceQaOffloadEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("inferenceShadowModeEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("inferenceShadowModeEnabled")).toBool(false)));
+    writeSetting(QStringLiteral("queryRouterEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("queryRouterEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("queryRouterMinConfidence"),
+                 QString::number(boundedJsonDouble(settings,
+                                                   QStringLiteral("queryRouterMinConfidence"),
+                                                   0.45,
+                                                   0.0,
+                                                   1.0),
+                                 'f',
+                                 2));
+    writeSetting(QStringLiteral("fastEmbeddingEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("dualEmbeddingFusionEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("strongEmbeddingTopK"),
+                 QString::number(settings.value(QStringLiteral("strongEmbeddingTopK")).toInt(40)));
+    writeSetting(QStringLiteral("fastEmbeddingTopK"),
+                 QString::number(settings.value(QStringLiteral("fastEmbeddingTopK")).toInt(60)));
+    writeSetting(QStringLiteral("rerankerCascadeEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("rerankerStage1Max"),
+                 QString::number(settings.value(QStringLiteral("rerankerStage1Max")).toInt(40)));
+    writeSetting(QStringLiteral("rerankerStage2Max"),
+                 QString::number(settings.value(QStringLiteral("rerankerStage2Max")).toInt(12)));
+    writeSetting(QStringLiteral("autoVectorMigration"),
+                 boolToSqlValue(settings.value(QStringLiteral("autoVectorMigration")).toBool(true)));
+    writeSetting(QStringLiteral("bm25WeightName"),
+                 QString::number(nonNegativeJsonDouble(settings,
+                                                       QStringLiteral("bm25WeightName"),
+                                                       10.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("bm25WeightPath"),
+                 QString::number(nonNegativeJsonDouble(settings,
+                                                       QStringLiteral("bm25WeightPath"),
+                                                       5.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("bm25WeightContent"),
+                 QString::number(nonNegativeJsonDouble(settings,
+                                                       QStringLiteral("bm25WeightContent"),
+                                                       1.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("qaSnippetEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("qaSnippetEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("personalizedLtrEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("behaviorStreamEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorStreamEnabled")).toBool(false)));
+    writeSetting(QStringLiteral("learningEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("learningEnabled")).toBool(false)));
+    writeSetting(QStringLiteral("behaviorCaptureAppActivityEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureAppActivityEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("behaviorCaptureInputActivityEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureInputActivityEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("behaviorCaptureSearchEventsEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureSearchEventsEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("behaviorCaptureWindowTitleHashEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureWindowTitleHashEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("behaviorCaptureBrowserHostHashEnabled"),
+                 boolToSqlValue(settings.value(QStringLiteral("behaviorCaptureBrowserHostHashEnabled")).toBool(true)));
+    writeSetting(QStringLiteral("onlineRankerRolloutMode"),
+                 settings.value(QStringLiteral("onlineRankerRolloutMode"))
+                     .toString(QStringLiteral("instrumentation_only"))
+                     .trimmed()
+                     .toLower());
+    writeSetting(QStringLiteral("onlineRankerHealthWindowDays"),
+                 QString::number(std::max(
+                     1, settings.value(QStringLiteral("onlineRankerHealthWindowDays")).toInt(7))));
+    writeSetting(QStringLiteral("onlineRankerRecentCycleHistoryLimit"),
+                 QString::number(std::max(
+                     1, settings.value(QStringLiteral("onlineRankerRecentCycleHistoryLimit")).toInt(50))));
+    writeSetting(QStringLiteral("onlineRankerPromotionGateMinPositives"),
+                 QString::number(std::max(
+                     1, settings.value(QStringLiteral("onlineRankerPromotionGateMinPositives")).toInt(80))));
+    writeSetting(QStringLiteral("onlineRankerPromotionMinAttributedRate"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionMinAttributedRate")).toDouble(0.5),
+                     0.0,
+                     1.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerPromotionMinContextDigestRate"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionMinContextDigestRate")).toDouble(0.1),
+                     0.0,
+                     1.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerPromotionLatencyUsMax"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionLatencyUsMax")).toDouble(2500.0),
+                     10.0,
+                     1000000.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionLatencyRegressionPctMax")).toDouble(35.0),
+                     0.0,
+                     1000.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionPredictionFailureRateMax")).toDouble(0.05),
+                     0.0,
+                     1.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerPromotionSaturationRateMax"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerPromotionSaturationRateMax")).toDouble(0.995),
+                     0.0,
+                     1.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("learningPauseOnUserInput"),
+                 boolToSqlValue(settings.value(QStringLiteral("learningPauseOnUserInput")).toBool(true)));
+    writeSetting(QStringLiteral("onlineRankerBlendAlpha"),
+                 QString::number(settings.value(QStringLiteral("onlineRankerBlendAlpha")).toDouble(0.15), 'g', 17));
+    writeSetting(QStringLiteral("onlineRankerNegativeSampleRatio"),
+                 QString::number(std::clamp(
+                     settings.value(QStringLiteral("onlineRankerNegativeSampleRatio")).toDouble(3.0),
+                     0.0,
+                     10.0),
+                                 'g',
+                                 17));
+    writeSetting(QStringLiteral("onlineRankerMaxTrainingBatchSize"),
+                 QString::number(std::max(
+                     60, settings.value(QStringLiteral("onlineRankerMaxTrainingBatchSize")).toInt(1200))));
+    writeSetting(QStringLiteral("behaviorRawRetentionDays"),
+                 QString::number(settings.value(QStringLiteral("behaviorRawRetentionDays")).toInt(30)));
+    writeSetting(QStringLiteral("semanticBudgetMs"),
+                 QString::number(settings.value(QStringLiteral("semanticBudgetMs")).toInt(350)));
+    writeSetting(QStringLiteral("rerankBudgetMs"),
+                 QString::number(settings.value(QStringLiteral("rerankBudgetMs")).toInt(600)));
+    const qint64 maxFileSizeBytes =
+        static_cast<qint64>(boundedJsonInt(
+            settings, QStringLiteral("maxFileSizeMB"), 50, 1, 1024))
+        * 1024LL * 1024LL;
+    writeSetting(QStringLiteral("max_file_size"), QString::number(maxFileSizeBytes));
+    writeSetting(QStringLiteral("extraction_timeout_ms"),
+                 QString::number(boundedJsonInt(
+                     settings, QStringLiteral("extractionTimeoutMs"), 30000, 1000, 120000)));
     sqlite3_close(db);
 }
 
@@ -359,22 +771,22 @@ QString SettingsController::hotkey() const
 
 bool SettingsController::launchAtLogin() const
 {
-    return m_settings.value(QStringLiteral("launchAtLogin")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("launchAtLogin")), false);
 }
 
 bool SettingsController::showInDock() const
 {
-    return m_settings.value(QStringLiteral("showInDock")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("showInDock")), false);
 }
 
 bool SettingsController::checkForUpdates() const
 {
-    return m_settings.value(QStringLiteral("checkForUpdates")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("checkForUpdates")), true);
 }
 
 int SettingsController::maxResults() const
 {
-    return m_settings.value(QStringLiteral("maxResults")).toInt(20);
+    return boundedJsonInt(m_settings, QStringLiteral("maxResults"), 20, 5, 200);
 }
 
 QVariantList SettingsController::indexRoots() const
@@ -384,137 +796,145 @@ QVariantList SettingsController::indexRoots() const
 
 bool SettingsController::enablePdf() const
 {
-    return m_settings.value(QStringLiteral("enablePdf")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("enablePdf")), true);
 }
 
 bool SettingsController::enableOcr() const
 {
-    return m_settings.value(QStringLiteral("enableOcr")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("enableOcr")), false);
 }
 
 bool SettingsController::embeddingEnabled() const
 {
-    return m_settings.value(QStringLiteral("embeddingEnabled")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("embeddingEnabled")), true);
 }
 
 bool SettingsController::inferenceServiceEnabled() const
 {
-    return m_settings.value(QStringLiteral("inferenceServiceEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("inferenceServiceEnabled")), true);
 }
 
 bool SettingsController::inferenceEmbedOffloadEnabled() const
 {
-    return m_settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("inferenceEmbedOffloadEnabled")), true);
 }
 
 bool SettingsController::inferenceRerankOffloadEnabled() const
 {
-    return m_settings.value(QStringLiteral("inferenceRerankOffloadEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("inferenceRerankOffloadEnabled")), true);
 }
 
 bool SettingsController::inferenceQaOffloadEnabled() const
 {
-    return m_settings.value(QStringLiteral("inferenceQaOffloadEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("inferenceQaOffloadEnabled")), true);
 }
 
 bool SettingsController::inferenceShadowModeEnabled() const
 {
-    return m_settings.value(QStringLiteral("inferenceShadowModeEnabled")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("inferenceShadowModeEnabled")), false);
 }
 
 bool SettingsController::queryRouterEnabled() const
 {
-    return m_settings.value(QStringLiteral("queryRouterEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("queryRouterEnabled")), true);
 }
 
 bool SettingsController::fastEmbeddingEnabled() const
 {
-    return m_settings.value(QStringLiteral("fastEmbeddingEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("fastEmbeddingEnabled")), true);
 }
 
 bool SettingsController::dualEmbeddingFusionEnabled() const
 {
-    return m_settings.value(QStringLiteral("dualEmbeddingFusionEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("dualEmbeddingFusionEnabled")), true);
 }
 
 bool SettingsController::rerankerCascadeEnabled() const
 {
-    return m_settings.value(QStringLiteral("rerankerCascadeEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("rerankerCascadeEnabled")), true);
 }
 
 bool SettingsController::personalizedLtrEnabled() const
 {
-    return m_settings.value(QStringLiteral("personalizedLtrEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("personalizedLtrEnabled")), true);
 }
 
 double SettingsController::queryRouterMinConfidence() const
 {
-    return m_settings.value(QStringLiteral("queryRouterMinConfidence")).toDouble(0.45);
+    return boundedJsonDouble(m_settings,
+                             QStringLiteral("queryRouterMinConfidence"),
+                             0.45,
+                             0.0,
+                             1.0);
 }
 
 int SettingsController::strongEmbeddingTopK() const
 {
-    return m_settings.value(QStringLiteral("strongEmbeddingTopK")).toInt(40);
+    return boundedJsonInt(m_settings, QStringLiteral("strongEmbeddingTopK"), 40, 1, 200);
 }
 
 int SettingsController::fastEmbeddingTopK() const
 {
-    return m_settings.value(QStringLiteral("fastEmbeddingTopK")).toInt(60);
+    return boundedJsonInt(m_settings, QStringLiteral("fastEmbeddingTopK"), 60, 1, 300);
 }
 
 int SettingsController::rerankerStage1Max() const
 {
-    return m_settings.value(QStringLiteral("rerankerStage1Max")).toInt(40);
+    return boundedJsonInt(m_settings, QStringLiteral("rerankerStage1Max"), 40, 4, 200);
 }
 
 int SettingsController::rerankerStage2Max() const
 {
-    return m_settings.value(QStringLiteral("rerankerStage2Max")).toInt(12);
+    return boundedJsonInt(m_settings, QStringLiteral("rerankerStage2Max"), 12, 4, 100);
 }
 
 bool SettingsController::autoVectorMigration() const
 {
-    return m_settings.value(QStringLiteral("autoVectorMigration")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("autoVectorMigration")), true);
 }
 
 double SettingsController::bm25WeightName() const
 {
-    return m_settings.value(QStringLiteral("bm25WeightName")).toDouble(10.0);
+    return nonNegativeJsonDouble(m_settings, QStringLiteral("bm25WeightName"), 10.0);
 }
 
 double SettingsController::bm25WeightPath() const
 {
-    return m_settings.value(QStringLiteral("bm25WeightPath")).toDouble(5.0);
+    return nonNegativeJsonDouble(m_settings, QStringLiteral("bm25WeightPath"), 5.0);
 }
 
 double SettingsController::bm25WeightContent() const
 {
-    return m_settings.value(QStringLiteral("bm25WeightContent")).toDouble(1.0);
+    return nonNegativeJsonDouble(m_settings, QStringLiteral("bm25WeightContent"), 1.0);
 }
 
 bool SettingsController::qaSnippetEnabled() const
 {
-    return m_settings.value(QStringLiteral("qaSnippetEnabled")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("qaSnippetEnabled")), true);
 }
 
 int SettingsController::semanticBudgetMs() const
 {
-    return m_settings.value(QStringLiteral("semanticBudgetMs")).toInt(70);
+    return boundedJsonInt(m_settings, QStringLiteral("semanticBudgetMs"), 350, 20, 500);
 }
 
 int SettingsController::rerankBudgetMs() const
 {
-    return m_settings.value(QStringLiteral("rerankBudgetMs")).toInt(120);
+    return boundedJsonInt(m_settings, QStringLiteral("rerankBudgetMs"), 600, 40, 600);
 }
 
 int SettingsController::maxFileSizeMB() const
 {
-    return m_settings.value(QStringLiteral("maxFileSizeMB")).toInt(50);
+    return boundedJsonInt(m_settings, QStringLiteral("maxFileSizeMB"), 50, 1, 1024);
 }
 
 int SettingsController::extractionTimeoutMs() const
 {
-    return m_settings.value(QStringLiteral("extractionTimeoutMs")).toInt(30000);
+    return boundedJsonInt(m_settings,
+                          QStringLiteral("extractionTimeoutMs"),
+                          30000,
+                          1000,
+                          120000);
 }
 
 QStringList SettingsController::userPatterns() const
@@ -524,22 +944,22 @@ QStringList SettingsController::userPatterns() const
 
 bool SettingsController::enableFeedbackLogging() const
 {
-    return m_settings.value(QStringLiteral("enableFeedbackLogging")).toBool(true);
+    return jsonBoolValue(m_settings.value(QStringLiteral("enableFeedbackLogging")), true);
 }
 
 bool SettingsController::enableInteractionTracking() const
 {
-    return m_settings.value(QStringLiteral("enableInteractionTracking")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("enableInteractionTracking")), true);
 }
 
 bool SettingsController::clipboardSignalEnabled() const
 {
-    return m_settings.value(QStringLiteral("clipboardSignalEnabled")).toBool(false);
+    return jsonBoolValue(m_settings.value(QStringLiteral("clipboardSignalEnabled")), false);
 }
 
 int SettingsController::feedbackRetentionDays() const
 {
-    return m_settings.value(QStringLiteral("feedbackRetentionDays")).toInt(90);
+    return boundedJsonInt(m_settings, QStringLiteral("feedbackRetentionDays"), 90, 7, 365);
 }
 
 QStringList SettingsController::sensitivePaths() const
@@ -584,13 +1004,8 @@ bool SettingsController::runtimeBoolSetting(const QString& key, bool defaultValu
         fallbackValue = jsonBoolValue(m_settings.value(normalizedKey), defaultValue);
     }
 
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READONLY)) {
         return fallbackValue;
     }
 
@@ -860,7 +1275,7 @@ void SettingsController::setPersonalizedLtrEnabled(bool enabled)
 
 void SettingsController::setQueryRouterMinConfidence(double value)
 {
-    const double clamped = std::clamp(value, 0.0, 1.0);
+    const double clamped = boundedFiniteDouble(value, 0.45, 0.0, 1.0);
     if (std::abs(queryRouterMinConfidence() - clamped) < 0.0001) {
         return;
     }
@@ -931,7 +1346,7 @@ void SettingsController::setAutoVectorMigration(bool enabled)
 
 void SettingsController::setBm25WeightName(double value)
 {
-    const double clamped = std::max(0.0, value);
+    const double clamped = nonNegativeFiniteDouble(value, 10.0);
     if (std::abs(bm25WeightName() - clamped) < 0.0001) {
         return;
     }
@@ -943,7 +1358,7 @@ void SettingsController::setBm25WeightName(double value)
 
 void SettingsController::setBm25WeightPath(double value)
 {
-    const double clamped = std::max(0.0, value);
+    const double clamped = nonNegativeFiniteDouble(value, 5.0);
     if (std::abs(bm25WeightPath() - clamped) < 0.0001) {
         return;
     }
@@ -955,7 +1370,7 @@ void SettingsController::setBm25WeightPath(double value)
 
 void SettingsController::setBm25WeightContent(double value)
 {
-    const double clamped = std::max(0.0, value);
+    const double clamped = nonNegativeFiniteDouble(value, 1.0);
     if (std::abs(bm25WeightContent() - clamped) < 0.0001) {
         return;
     }
@@ -1113,84 +1528,147 @@ void SettingsController::setLanguage(const QString& value)
     emit settingsChanged(QStringLiteral("language"));
 }
 
-void SettingsController::clearFeedbackData()
+bool SettingsController::clearFeedbackData()
 {
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
     sqlite3* db = nullptr;
-    if (sqlite3_open(dbPath.toUtf8().constData(), &db) == SQLITE_OK && db) {
-        sqlite3_exec(db, "DELETE FROM feedback", nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "DELETE FROM interactions", nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "DELETE FROM frequencies", nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "DELETE FROM behavior_events_v1", nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "DELETE FROM training_examples_v1", nullptr, nullptr, nullptr);
-        sqlite3_exec(db, "DELETE FROM replay_reservoir_v1", nullptr, nullptr, nullptr);
-        sqlite3_close(db);
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READWRITE)) {
+        setPlatformStatus(QStringLiteral("clearFeedbackData"),
+                          false,
+                          QStringLiteral("Could not open the local index database."));
+        return false;
+    }
+
+    const char* tables[] = {
+        "feedback",
+        "interactions",
+        "frequencies",
+        "behavior_events_v1",
+        "training_examples_v1",
+        "replay_reservoir_v1",
+    };
+
+    bool ok = execSql(db, "SAVEPOINT clear_feedback_data");
+    for (const char* table : tables) {
+        if (!ok) {
+            break;
+        }
+        const QString sql = QStringLiteral("DELETE FROM %1").arg(QString::fromUtf8(table));
+        ok = execSql(db, sql.toUtf8().constData());
+    }
+    ok = ok && execSql(db, "RELEASE clear_feedback_data");
+    if (!ok) {
+        execSql(db, "ROLLBACK TO clear_feedback_data");
+        execSql(db, "RELEASE clear_feedback_data");
+    }
+    sqlite3_close(db);
+
+    if (!ok) {
+        setPlatformStatus(QStringLiteral("clearFeedbackData"),
+                          false,
+                          QStringLiteral("Failed to clear feedback data from the local index database."));
+        return false;
     }
 
     m_settings[QStringLiteral("lastFeedbackAggregation")] = QStringLiteral("");
     saveSettings();
+    setPlatformStatus(QStringLiteral("clearFeedbackData"),
+                      true,
+                      QStringLiteral("Feedback data cleared."));
     emit feedbackDataCleared();
+    return true;
 }
 
-void SettingsController::exportData()
+bool SettingsController::exportData()
 {
-    const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    const QString downloads = exportDataDir();
     if (downloads.isEmpty()) {
-        return;
+        setPlatformStatus(QStringLiteral("exportData"),
+                          false,
+                          QStringLiteral("Download location is unavailable."));
+        return false;
     }
 
     QJsonObject payload;
     payload[QStringLiteral("exportedAt")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
     payload[QStringLiteral("settings")] = m_settings;
 
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK && db) {
-        auto exportTable = [&](const char* tableName) -> QJsonArray {
-            QJsonArray rows;
-            const QString sql = QStringLiteral("SELECT * FROM %1").arg(QString::fromUtf8(tableName));
-            sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(db, sql.toUtf8().constData(), -1, &stmt, nullptr) == SQLITE_OK) {
-                const int colCount = sqlite3_column_count(stmt);
-                while (sqlite3_step(stmt) == SQLITE_ROW) {
-                    QJsonObject row;
-                    for (int c = 0; c < colCount; ++c) {
-                        const QString colName = QString::fromUtf8(sqlite3_column_name(stmt, c));
-                        const int colType = sqlite3_column_type(stmt, c);
-                        if (colType == SQLITE_INTEGER) {
-                            row[colName] = static_cast<qint64>(sqlite3_column_int64(stmt, c));
-                        } else if (colType == SQLITE_FLOAT) {
-                            row[colName] = sqlite3_column_double(stmt, c);
-                        } else if (colType == SQLITE_TEXT) {
-                            row[colName] = QString::fromUtf8(
-                                reinterpret_cast<const char*>(sqlite3_column_text(stmt, c)));
-                        }
-                    }
-                    rows.append(row);
-                }
-                sqlite3_finalize(stmt);
-            }
-            return rows;
-        };
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READONLY)) {
+        setPlatformStatus(QStringLiteral("exportData"),
+                          false,
+                          QStringLiteral("Could not open the local index database."));
+        return false;
+    }
 
-        payload[QStringLiteral("feedback")] = exportTable("feedback");
-        payload[QStringLiteral("interactions")] = exportTable("interactions");
-        payload[QStringLiteral("frequencies")] = exportTable("frequencies");
-        payload[QStringLiteral("behaviorEvents")] = exportTable("behavior_events_v1");
-        payload[QStringLiteral("trainingExamples")] = exportTable("training_examples_v1");
-        payload[QStringLiteral("replayReservoir")] = exportTable("replay_reservoir_v1");
-        sqlite3_close(db);
+    bool exportOk = true;
+    auto exportTable = [&](const char* tableName) -> QJsonArray {
+        QJsonArray rows;
+        const QString sql = QStringLiteral("SELECT * FROM %1").arg(QString::fromUtf8(tableName));
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql.toUtf8().constData(), -1, &stmt, nullptr) == SQLITE_OK) {
+            const int colCount = sqlite3_column_count(stmt);
+            int rc = SQLITE_ROW;
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+                QJsonObject row;
+                for (int c = 0; c < colCount; ++c) {
+                    const QString colName = QString::fromUtf8(sqlite3_column_name(stmt, c));
+                    const int colType = sqlite3_column_type(stmt, c);
+                    if (colType == SQLITE_INTEGER) {
+                        row[colName] = static_cast<qint64>(sqlite3_column_int64(stmt, c));
+                    } else if (colType == SQLITE_FLOAT) {
+                        row[colName] = sqlite3_column_double(stmt, c);
+                    } else if (colType == SQLITE_TEXT) {
+                        row[colName] = QString::fromUtf8(
+                            reinterpret_cast<const char*>(sqlite3_column_text(stmt, c)));
+                    }
+                }
+                rows.append(row);
+            }
+            if (rc != SQLITE_DONE) {
+                exportOk = false;
+            }
+            sqlite3_finalize(stmt);
+        } else {
+            exportOk = false;
+        }
+        return rows;
+    };
+
+    payload[QStringLiteral("feedback")] = exportTable("feedback");
+    payload[QStringLiteral("interactions")] = exportTable("interactions");
+    payload[QStringLiteral("frequencies")] = exportTable("frequencies");
+    payload[QStringLiteral("behaviorEvents")] = exportTable("behavior_events_v1");
+    payload[QStringLiteral("trainingExamples")] = exportTable("training_examples_v1");
+    payload[QStringLiteral("replayReservoir")] = exportTable("replay_reservoir_v1");
+    sqlite3_close(db);
+
+    if (!exportOk) {
+        setPlatformStatus(QStringLiteral("exportData"),
+                          false,
+                          QStringLiteral("Failed to read all export tables from the local index database."));
+        return false;
     }
 
     QSaveFile file(downloads + QStringLiteral("/betterspotlight-data-export.json"));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        return;
+        setPlatformStatus(QStringLiteral("exportData"),
+                          false,
+                          QStringLiteral("Could not create the export file in Downloads."));
+        return false;
     }
 
-    file.write(QJsonDocument(payload).toJson(QJsonDocument::Indented));
-    file.commit();
+    const QByteArray data = QJsonDocument(payload).toJson(QJsonDocument::Indented);
+    if (file.write(data) != data.size() || !file.commit()) {
+        setPlatformStatus(QStringLiteral("exportData"),
+                          false,
+                          QStringLiteral("Failed to write the export file in Downloads."));
+        return false;
+    }
+
+    setPlatformStatus(QStringLiteral("exportData"),
+                      true,
+                      QStringLiteral("Data exported to ~/Downloads/betterspotlight-data-export.json."));
+    return true;
 }
 
 void SettingsController::pauseIndexing()
@@ -1230,21 +1708,17 @@ bool SettingsController::setRuntimeSetting(const QString& key, const QString& va
         return false;
     }
 
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) {
         return false;
     }
 
-    upsertSetting(db, normalizedKey, value);
+    const bool ok = ensureSettingsTable(db) && upsertSetting(db, normalizedKey, value);
     sqlite3_close(db);
-    emit settingsChanged(normalizedKey);
-    return true;
+    if (ok) {
+        emit settingsChanged(normalizedKey);
+    }
+    return ok;
 }
 
 bool SettingsController::removeRuntimeSetting(const QString& key)
@@ -1254,24 +1728,19 @@ bool SettingsController::removeRuntimeSetting(const QString& key)
         return false;
     }
 
-    const QString dbPath = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                           + QStringLiteral("/betterspotlight/index.db");
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(dbPath.toUtf8().constData(), &db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
-        if (db) {
-            sqlite3_close(db);
-        }
+    if (!openRuntimeDb(&db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)) {
         return false;
     }
 
     static constexpr const char* kDeleteSql = "DELETE FROM settings WHERE key = ?1";
     sqlite3_stmt* stmt = nullptr;
     bool ok = false;
-    if (sqlite3_prepare_v2(db, kDeleteSql, -1, &stmt, nullptr) == SQLITE_OK) {
+    if (ensureSettingsTable(db)
+        && sqlite3_prepare_v2(db, kDeleteSql, -1, &stmt, nullptr) == SQLITE_OK) {
         const QByteArray keyUtf8 = normalizedKey.toUtf8();
-        sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
-        ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        ok = sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT) == SQLITE_OK
+            && sqlite3_step(stmt) == SQLITE_DONE;
     }
     sqlite3_finalize(stmt);
     sqlite3_close(db);
@@ -1357,8 +1826,8 @@ void SettingsController::loadSettings()
     ensureDefault(m_settings, QStringLiteral("bm25WeightPath"), 5.0);
     ensureDefault(m_settings, QStringLiteral("bm25WeightContent"), 1.0);
     ensureDefault(m_settings, QStringLiteral("qaSnippetEnabled"), true);
-    ensureDefault(m_settings, QStringLiteral("semanticBudgetMs"), 70);
-    ensureDefault(m_settings, QStringLiteral("rerankBudgetMs"), 120);
+    ensureDefault(m_settings, QStringLiteral("semanticBudgetMs"), 350);
+    ensureDefault(m_settings, QStringLiteral("rerankBudgetMs"), 600);
     ensureDefault(m_settings, QStringLiteral("maxFileSizeMB"), 50);
     ensureDefault(m_settings, QStringLiteral("extractionTimeoutMs"), 30000);
     ensureDefault(m_settings, QStringLiteral("userPatterns"), QJsonArray{});
@@ -1376,6 +1845,7 @@ void SettingsController::loadSettings()
         home + QStringLiteral("/Library/Preferences"),
     });
 
+    normalizeSettings(m_settings);
     saveSettings();
 }
 
@@ -1396,8 +1866,7 @@ void SettingsController::saveSettings()
 
 QString SettingsController::settingsFilePath() const
 {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-           + QStringLiteral("/settings.json");
+    return QDir(settingsDataDir()).filePath(QStringLiteral("settings.json"));
 }
 
 void SettingsController::setPlatformStatus(const QString& key, bool success, const QString& message)

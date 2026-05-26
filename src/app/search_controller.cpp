@@ -9,10 +9,12 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QUrl>
@@ -50,6 +52,22 @@ QString metadataDigest(const QByteArray& seed)
     }
     return QString::fromUtf8(
         QCryptographicHash::hash(seed, QCryptographicHash::Sha256).toHex());
+}
+
+QString trimmedJsonString(const QJsonObject& object, const QString& key)
+{
+    return object.value(key).toString().trimmed();
+}
+
+QString safeAvailabilityStatus(const QJsonObject& object)
+{
+    const QString status = trimmedJsonString(object, QStringLiteral("availabilityStatus"));
+    if (status == QLatin1String("available")
+        || status == QLatin1String("offline_placeholder")
+        || status == QLatin1String("extract_failed")) {
+        return status;
+    }
+    return QStringLiteral("available");
 }
 
 } // namespace
@@ -212,10 +230,16 @@ void SearchController::setQuery(const QString& query)
     emit queryChanged();
 
     if (m_query.trimmed().isEmpty()) {
+        ++m_searchGeneration;
         // Clear results immediately for empty queries
         m_results.clear();
         m_resultRows.clear();
         m_selectedIndex = -1;
+        if (m_isSearching) {
+            m_isSearching = false;
+            emit isSearchingChanged();
+        }
+        sendIndexerUserActive(false, 0);
         emit resultsChanged();
         emit resultRowsChanged();
         emit selectedIndexChanged();
@@ -394,8 +418,10 @@ QVariantMap SearchController::requestAnswerSnippet(int index)
         return responseSummary;
     }
 
+    const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     item[QStringLiteral("answerStatus")] = QStringLiteral("loading");
     item[QStringLiteral("answerSnippet")] = QString();
+    item[QStringLiteral("answerRequestId")] = requestId;
     m_results[resultIndex] = item;
     rebuildResultRows();
     emit resultsChanged();
@@ -409,75 +435,104 @@ QVariantMap SearchController::requestAnswerSnippet(int index)
     params[QStringLiteral("timeoutMs")] = 350;
     params[QStringLiteral("maxChars")] = 240;
 
-    const auto response = client->sendRequest(QStringLiteral("getAnswerSnippet"), params, 1200);
-    if (!response.has_value()) {
-        item[QStringLiteral("answerStatus")] = QStringLiteral("unavailable");
-        item[QStringLiteral("answerSnippet")] = QString();
-        item[QStringLiteral("answerReason")] = QStringLiteral("request_failed");
-        m_results[resultIndex] = item;
-        rebuildResultRows();
-        emit resultsChanged();
-        emit resultRowsChanged();
-        emit selectedIndexChanged();
-        responseSummary[QStringLiteral("reason")] = QStringLiteral("request_failed");
-        return responseSummary;
-    }
+    QPointer<SearchController> self(this);
+    client->sendRequestAsync(
+        QStringLiteral("getAnswerSnippet"),
+        params,
+        1200,
+        [self, requestId, itemId, path, trimmedQuery](const std::optional<QJsonObject>& response) {
+            if (!self || self->m_query.trimmed() != trimmedQuery) {
+                return;
+            }
 
-    const QString type = response->value(QStringLiteral("type")).toString();
-    if (type == QLatin1String("error")) {
-        const QString reason = response->value(QStringLiteral("error"))
-                                   .toObject()
-                                   .value(QStringLiteral("message"))
-                                   .toString(QStringLiteral("request_error"));
-        item[QStringLiteral("answerStatus")] = QStringLiteral("error");
-        item[QStringLiteral("answerSnippet")] = QString();
-        item[QStringLiteral("answerReason")] = reason;
-        m_results[resultIndex] = item;
-        rebuildResultRows();
-        emit resultsChanged();
-        emit resultRowsChanged();
-        emit selectedIndexChanged();
-        responseSummary[QStringLiteral("reason")] = reason;
-        return responseSummary;
-    }
+            int currentIndex = -1;
+            QVariantMap currentItem;
+            for (int i = 0; i < self->m_results.size(); ++i) {
+                const QVariantMap candidate = self->m_results.at(i).toMap();
+                if (candidate.value(QStringLiteral("answerRequestId")).toString() == requestId
+                    && candidate.value(QStringLiteral("itemId")).toLongLong() == itemId
+                    && candidate.value(QStringLiteral("path")).toString() == path) {
+                    currentIndex = i;
+                    currentItem = candidate;
+                    break;
+                }
+            }
+            if (currentIndex < 0) {
+                return;
+            }
 
-    const QJsonObject result = response->value(QStringLiteral("result")).toObject();
-    const bool available = result.value(QStringLiteral("available")).toBool(false);
-    const QString answer = result.value(QStringLiteral("answer")).toString();
-    const QString reason = result.value(QStringLiteral("reason")).toString();
-    item[QStringLiteral("answerSnippet")] = answer;
-    item[QStringLiteral("answerReason")] = reason;
-    item[QStringLiteral("answerConfidence")] = result.value(QStringLiteral("confidence")).toDouble();
-    item[QStringLiteral("answerSource")] = result.value(QStringLiteral("source")).toString();
-    item[QStringLiteral("answerStatus")] = available ? QStringLiteral("ready")
-                                                     : QStringLiteral("no_answer");
+            const auto finish = [&](const QString& status,
+                                    const QString& answer,
+                                    const QString& reason,
+                                    double confidence,
+                                    const QString& source) {
+                currentItem.remove(QStringLiteral("answerRequestId"));
+                currentItem[QStringLiteral("answerStatus")] = status;
+                currentItem[QStringLiteral("answerSnippet")] = answer;
+                currentItem[QStringLiteral("answerReason")] = reason;
+                currentItem[QStringLiteral("answerConfidence")] = confidence;
+                currentItem[QStringLiteral("answerSource")] = source;
+                self->m_results[currentIndex] = currentItem;
+                self->rebuildResultRows();
+                emit self->resultsChanged();
+                emit self->resultRowsChanged();
+                emit self->selectedIndexChanged();
+            };
 
-    m_results[resultIndex] = item;
-    rebuildResultRows();
-    emit resultsChanged();
-    emit resultRowsChanged();
-    emit selectedIndexChanged();
+            if (!response.has_value()) {
+                finish(QStringLiteral("unavailable"),
+                       QString(),
+                       QStringLiteral("request_failed"),
+                       0.0,
+                       QString());
+                return;
+            }
 
-    responseSummary[QStringLiteral("ok")] = available;
-    responseSummary[QStringLiteral("reason")] = reason;
-    responseSummary[QStringLiteral("answer")] = answer;
-    responseSummary[QStringLiteral("confidence")] =
-        result.value(QStringLiteral("confidence")).toDouble();
+            const QString type = response->value(QStringLiteral("type")).toString();
+            if (type == QLatin1String("error")) {
+                const QString reason = response->value(QStringLiteral("error"))
+                                           .toObject()
+                                           .value(QStringLiteral("message"))
+                                           .toString(QStringLiteral("request_error"));
+                finish(QStringLiteral("error"), QString(), reason, 0.0, QString());
+                return;
+            }
+
+            const QJsonObject result = response->value(QStringLiteral("result")).toObject();
+            const bool available = result.value(QStringLiteral("available")).toBool(false);
+            const QString answer = result.value(QStringLiteral("answer")).toString();
+            const QString reason = result.value(QStringLiteral("reason")).toString();
+            finish(available ? QStringLiteral("ready") : QStringLiteral("no_answer"),
+                   answer,
+                   reason,
+                   result.value(QStringLiteral("confidence")).toDouble(),
+                   result.value(QStringLiteral("source")).toString());
+        });
+
+    responseSummary[QStringLiteral("pending")] = true;
+    responseSummary[QStringLiteral("reason")] = QStringLiteral("pending");
     return responseSummary;
 }
 
 void SearchController::clearResults()
 {
+    ++m_searchGeneration;
     m_query.clear();
     m_results.clear();
     m_resultRows.clear();
     m_selectedIndex = -1;
     m_debounceTimer.stop();
+    const bool wasSearching = m_isSearching;
+    m_isSearching = false;
+    sendIndexerUserActive(false, 0);
 
     emit queryChanged();
     emit resultsChanged();
     emit resultRowsChanged();
     emit selectedIndexChanged();
+    if (wasSearching) {
+        emit isSearchingChanged();
+    }
 }
 
 void SearchController::moveSelection(int delta)
@@ -521,6 +576,29 @@ SocketClient* SearchController::ensureIndexerClient(int timeoutMs)
                                          timeoutMs);
     }
     return m_indexerClient.get();
+}
+
+void SearchController::sendIndexerUserActive(bool active, int connectTimeoutMs)
+{
+    SocketClient* indexerClient = nullptr;
+    if (connectTimeoutMs > 0) {
+        indexerClient = ensureIndexerClient(connectTimeoutMs);
+    } else {
+        indexerClient = m_indexerClient.get();
+    }
+
+    if (!indexerClient || !indexerClient->isConnected()) {
+        return;
+    }
+
+    QJsonObject params;
+    params[QStringLiteral("active")] = active;
+    // Best-effort signal: never block the controller path on indexer bookkeeping.
+    indexerClient->sendRequestAsync(
+        QStringLiteral("setUserActive"),
+        params,
+        250,
+        [](const std::optional<QJsonObject>&) {});
 }
 
 QVariantMap SearchController::getHealthSync()
@@ -626,26 +704,24 @@ void SearchController::executeSearch()
         return;
     }
 
+    const quint64 generation = ++m_searchGeneration;
     SocketClient* client = ensureQueryClient(300);
     if (!client || !client->isConnected()) {
         LOG_WARN(bsCore, "SearchController: query service not connected");
+        if (m_isSearching) {
+            m_isSearching = false;
+            emit isSearchingChanged();
+        }
+        sendIndexerUserActive(false, 0);
+        clearResultData();
         return;
     }
 
-    SocketClient* indexerClient = ensureIndexerClient(200);
-    const auto setIndexerActive = [indexerClient](bool active) {
-        if (!indexerClient || !indexerClient->isConnected()) {
-            return;
-        }
-        QJsonObject params;
-        params[QStringLiteral("active")] = active;
-        // Best effort signal: keep timeout short to avoid impacting search UX.
-        indexerClient->sendRequest(QStringLiteral("setUserActive"), params, 250);
-    };
-
-    m_isSearching = true;
-    emit isSearchingChanged();
-    setIndexerActive(true);
+    if (!m_isSearching) {
+        m_isSearching = true;
+        emit isSearchingChanged();
+    }
+    sendIndexerUserActive(true, 80);
 
     LOG_DEBUG(bsCore, "SearchController: searching for '%s'", qPrintable(trimmedQuery));
 
@@ -711,24 +787,40 @@ void SearchController::executeSearch()
         recordBehaviorEvent(behaviorParams);
     }
 
-    auto response = client->sendRequest(QStringLiteral("search"), params, kSearchTimeoutMs);
+    QPointer<SearchController> self(this);
+    client->sendRequestAsync(
+        QStringLiteral("search"),
+        params,
+        kSearchTimeoutMs,
+        [self, trimmedQuery, generation](const std::optional<QJsonObject>& response) {
+            if (!self) {
+                return;
+            }
+            if (self->m_searchGeneration != generation) {
+                LOG_DEBUG(bsCore, "SearchController: discarding superseded search response");
+                return;
+            }
 
-    m_isSearching = false;
-    emit isSearchingChanged();
-    setIndexerActive(false);
+            if (self->m_isSearching) {
+                self->m_isSearching = false;
+                emit self->isSearchingChanged();
+            }
+            self->sendIndexerUserActive(false, 0);
 
-    if (!response) {
-        LOG_WARN(bsCore, "SearchController: search request failed (timeout or disconnected)");
-        return;
-    }
+            if (!response) {
+                LOG_WARN(bsCore, "SearchController: search request failed (timeout or disconnected)");
+                self->clearResultData();
+                return;
+            }
 
-    // Check if the query changed while we were waiting (stale response)
-    if (m_query.trimmed() != trimmedQuery) {
-        LOG_DEBUG(bsCore, "SearchController: discarding stale search results");
-        return;
-    }
+            // Check if the query changed while the async request was in flight.
+            if (self->m_query.trimmed() != trimmedQuery) {
+                LOG_DEBUG(bsCore, "SearchController: discarding stale search results");
+                return;
+            }
 
-    parseSearchResponse(*response);
+            self->parseSearchResponse(*response);
+        });
 }
 
 void SearchController::parseSearchResponse(const QJsonObject& response)
@@ -739,6 +831,7 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
         QString msg = response.value(QStringLiteral("error")).toObject()
                           .value(QStringLiteral("message")).toString();
         LOG_WARN(bsCore, "SearchController: search error: %s", qPrintable(msg));
+        clearResultData();
         return;
     }
 
@@ -748,25 +841,52 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
     QVariantList newResults;
     newResults.reserve(resultsArray.size());
 
+    int skippedMalformedResults = 0;
     for (const auto& val : resultsArray) {
+        if (!val.isObject()) {
+            ++skippedMalformedResults;
+            continue;
+        }
         QJsonObject obj = val.toObject();
+        const QString path = trimmedJsonString(obj, QStringLiteral("path"));
+        if (path.isEmpty()) {
+            ++skippedMalformedResults;
+            continue;
+        }
+
         const QJsonObject metadata = obj.value(QStringLiteral("metadata")).toObject();
+        QString name = trimmedJsonString(obj, QStringLiteral("name"));
+        if (name.isEmpty()) {
+            name = QFileInfo(path).fileName();
+        }
+        if (name.isEmpty()) {
+            ++skippedMalformedResults;
+            continue;
+        }
+
+        QString kind = trimmedJsonString(obj, QStringLiteral("kind"));
+        if (kind.isEmpty()) {
+            kind = QStringLiteral("file");
+        }
 
         QVariantMap item;
-        item[QStringLiteral("itemId")] = obj.value(QStringLiteral("itemId")).toInteger();
-        item[QStringLiteral("path")] = obj.value(QStringLiteral("path")).toString();
-        item[QStringLiteral("name")] = obj.value(QStringLiteral("name")).toString();
-        item[QStringLiteral("kind")] = obj.value(QStringLiteral("kind")).toString();
-        item[QStringLiteral("matchType")] = obj.value(QStringLiteral("matchType")).toString();
-        item[QStringLiteral("score")] = obj.value(QStringLiteral("score")).toDouble();
+        item[QStringLiteral("itemId")] =
+            std::max<qint64>(0, obj.value(QStringLiteral("itemId")).toInteger());
+        item[QStringLiteral("path")] = path;
+        item[QStringLiteral("name")] = name;
+        item[QStringLiteral("kind")] = kind;
+        item[QStringLiteral("matchType")] = trimmedJsonString(obj, QStringLiteral("matchType"));
+        item[QStringLiteral("score")] = std::max(0.0, obj.value(QStringLiteral("score")).toDouble());
         item[QStringLiteral("snippet")] = obj.value(QStringLiteral("snippet")).toString();
-        item[QStringLiteral("fileSize")] = metadata.value(QStringLiteral("fileSize")).toInteger();
-        item[QStringLiteral("modifiedAt")] = metadata.value(QStringLiteral("modificationDate")).toString();
-        item[QStringLiteral("frequency")] = metadata.value(QStringLiteral("frequency")).toInteger();
+        item[QStringLiteral("fileSize")] =
+            std::max<qint64>(0, metadata.value(QStringLiteral("fileSize")).toInteger());
+        item[QStringLiteral("modifiedAt")] =
+            trimmedJsonString(metadata, QStringLiteral("modificationDate"));
+        item[QStringLiteral("frequency")] =
+            std::max<qint64>(0, metadata.value(QStringLiteral("frequency")).toInteger());
         item[QStringLiteral("contentAvailable")] =
             obj.value(QStringLiteral("contentAvailable")).toBool(true);
-        item[QStringLiteral("availabilityStatus")] =
-            obj.value(QStringLiteral("availabilityStatus")).toString(QStringLiteral("available"));
+        item[QStringLiteral("availabilityStatus")] = safeAvailabilityStatus(obj);
         item[QStringLiteral("answerSnippet")] = QString();
         item[QStringLiteral("answerStatus")] = QStringLiteral("idle");
         item[QStringLiteral("answerReason")] = QString();
@@ -774,11 +894,14 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
         item[QStringLiteral("answerSource")] = QString();
 
         // Compute parent path for display
-        QString path = item.value(QStringLiteral("path")).toString();
         int lastSlash = path.lastIndexOf(QLatin1Char('/'));
         item[QStringLiteral("parentPath")] = (lastSlash > 0) ? path.left(lastSlash) : path;
 
         newResults.append(item);
+    }
+    if (skippedMalformedResults > 0) {
+        LOG_WARN(bsCore, "SearchController: skipped %d malformed search result row(s)",
+                 skippedMalformedResults);
     }
 
     m_results = std::move(newResults);
@@ -790,6 +913,27 @@ void SearchController::parseSearchResponse(const QJsonObject& response)
     emit selectedIndexChanged();
 
     LOG_DEBUG(bsCore, "SearchController: got %d results", static_cast<int>(m_results.size()));
+}
+
+void SearchController::clearResultData()
+{
+    const bool shouldEmitResultsChanged = !m_results.isEmpty();
+    const bool shouldEmitRowsChanged = !m_resultRows.isEmpty();
+    const bool shouldEmitSelectedChanged = m_selectedIndex != -1;
+
+    m_results.clear();
+    m_resultRows.clear();
+    m_selectedIndex = -1;
+
+    if (shouldEmitResultsChanged) {
+        emit resultsChanged();
+    }
+    if (shouldEmitRowsChanged) {
+        emit resultRowsChanged();
+    }
+    if (shouldEmitSelectedChanged) {
+        emit selectedIndexChanged();
+    }
 }
 
 void SearchController::rebuildResultRows()
@@ -849,7 +993,7 @@ int SearchController::resultIndexForRow(int rowIndex) const
     }
     bool ok = false;
     const int resultIndex = row.value(QStringLiteral("resultIndex")).toInt(&ok);
-    return ok ? resultIndex : -1;
+    return ok && resultIndex >= 0 && resultIndex < m_results.size() ? resultIndex : -1;
 }
 
 int SearchController::firstSelectableRow() const

@@ -840,7 +840,7 @@ Window {
                                             Layout.fillWidth: true
                                         }
                                         Label {
-                                            text: settingsController ? settingsController.semanticBudgetMs.toString() : "70"
+                                            text: settingsController ? settingsController.semanticBudgetMs.toString() : "350"
                                             font.pixelSize: 13
                                             color: "#1A1A1A"
                                         }
@@ -848,9 +848,9 @@ Window {
                                     Slider {
                                         Layout.fillWidth: true
                                         from: 20
-                                        to: 200
+                                        to: 500
                                         stepSize: 5
-                                        value: settingsController ? settingsController.semanticBudgetMs : 70
+                                        value: settingsController ? settingsController.semanticBudgetMs : 350
                                         onMoved: { if (settingsController) settingsController.semanticBudgetMs = value }
                                     }
                                 }
@@ -868,7 +868,7 @@ Window {
                                             Layout.fillWidth: true
                                         }
                                         Label {
-                                            text: settingsController ? settingsController.rerankBudgetMs.toString() : "120"
+                                            text: settingsController ? settingsController.rerankBudgetMs.toString() : "600"
                                             font.pixelSize: 13
                                             color: "#1A1A1A"
                                         }
@@ -876,9 +876,9 @@ Window {
                                     Slider {
                                         Layout.fillWidth: true
                                         from: 40
-                                        to: 300
+                                        to: 600
                                         stepSize: 5
-                                        value: settingsController ? settingsController.rerankBudgetMs : 120
+                                        value: settingsController ? settingsController.rerankBudgetMs : 600
                                         onMoved: { if (settingsController) settingsController.rerankBudgetMs = value }
                                     }
                                 }
@@ -1072,9 +1072,17 @@ Window {
                                 property bool paused: false
                                 text: paused ? qsTr("Resume Indexing") : qsTr("Pause Indexing")
                                 onClicked: {
-                                    if (settingsController) {
+                                    var ok = false
+                                    if (serviceManager) {
+                                        ok = paused
+                                            ? serviceManager.resumeIndexing()
+                                            : serviceManager.pauseIndexing()
+                                    } else if (settingsController) {
                                         if (paused) settingsController.resumeIndexing()
                                         else settingsController.pauseIndexing()
+                                        ok = true
+                                    }
+                                    if (ok) {
                                         paused = !paused
                                     }
                                 }
@@ -1388,7 +1396,11 @@ Window {
                                         text: qsTr("Export My Data")
                                         onClicked: {
                                             if (settingsController) {
-                                                settingsController.exportData()
+                                                var ok = settingsController.exportData()
+                                                exportConfirmLabel.text = ok
+                                                    ? qsTr("Data exported to ~/Downloads/betterspotlight-data-export.json")
+                                                    : qsTr("Data export failed.")
+                                                exportConfirmLabel.color = ok ? "#2E7D32" : "#C62828"
                                                 exportConfirmLabel.visible = true
                                                 exportConfirmTimer.start()
                                             }
@@ -2916,7 +2928,11 @@ Window {
         title: qsTr("Clear Feedback Data")
         text: qsTr("Are you sure you want to clear all feedback data? This will remove all search history and ranking adjustments. This action cannot be undone.")
         buttons: MessageDialog.Ok | MessageDialog.Cancel
-        onAccepted: { if (settingsController) settingsController.clearFeedbackData() }
+        onAccepted: {
+            if (settingsController) {
+                settingsController.clearFeedbackData()
+            }
+        }
     }
 
     MessageDialog {

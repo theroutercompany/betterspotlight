@@ -1,5 +1,8 @@
 #include "onboarding_controller.h"
 
+#include "core/shared/fda_check.h"
+
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -7,10 +10,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QProcess>
+#include <QSaveFile>
 #include <QStandardPaths>
-
-#include <cerrno>
-#include <dirent.h>
 
 namespace bs {
 
@@ -18,6 +19,10 @@ namespace {
 
 QString settingsDir()
 {
+    const QString overrideDir = qEnvironmentVariable("BETTERSPOTLIGHT_SETTINGS_DIR").trimmed();
+    if (!overrideDir.isEmpty()) {
+        return overrideDir;
+    }
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
@@ -40,18 +45,34 @@ QJsonObject readSettings()
     return doc.object();
 }
 
-void writeSettings(const QJsonObject& obj)
+bool writeSettings(const QJsonObject& obj)
 {
     QDir dir;
-    dir.mkpath(settingsDir());
+    if (!dir.mkpath(settingsDir())) {
+        qWarning("OnboardingController: failed to create settings directory %s",
+                 qPrintable(settingsDir()));
+        return false;
+    }
 
-    QFile file(settingsPath());
+    QSaveFile file(settingsPath());
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         qWarning("OnboardingController: failed to write settings to %s",
                  qPrintable(settingsPath()));
-        return;
+        return false;
     }
-    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+
+    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+    if (file.write(payload) != payload.size()) {
+        qWarning("OnboardingController: failed to write complete settings payload to %s",
+                 qPrintable(settingsPath()));
+        return false;
+    }
+    if (!file.commit()) {
+        qWarning("OnboardingController: failed to commit settings to %s",
+                 qPrintable(settingsPath()));
+        return false;
+    }
+    return true;
 }
 
 QString iconForDir(const QString& name)
@@ -74,24 +95,62 @@ QString iconForDir(const QString& name)
     return icons.value(name, QStringLiteral("\U0001F4C1"));  // default: folder
 }
 
-bool tryOpenDirectory(const QString& path, bool* accessDenied)
+bool isValidRootMode(const QString& mode)
 {
-    if (accessDenied) {
-        *accessDenied = false;
+    return mode == QLatin1String("index_embed")
+        || mode == QLatin1String("index_only")
+        || mode == QLatin1String("skip");
+}
+
+QString normalizedRootMode(const QString& rawMode)
+{
+    const QString mode = rawMode.trimmed();
+    return isValidRootMode(mode) ? mode : QStringLiteral("index_only");
+}
+
+bool isSafeHomeDirectoryName(const QString& name)
+{
+    return !name.isEmpty()
+        && name != QLatin1String(".")
+        && name != QLatin1String("..")
+        && !name.contains(QLatin1Char('/'))
+        && !name.contains(QLatin1Char('\\'));
+}
+
+QString currentAppBundlePath()
+{
+    QDir dir(QCoreApplication::applicationDirPath());
+    if (dir.dirName() != QLatin1String("MacOS") || !dir.cdUp()) {
+        return {};
+    }
+    if (dir.dirName() != QLatin1String("Contents") || !dir.cdUp()) {
+        return {};
+    }
+    if (!dir.dirName().endsWith(QStringLiteral(".app"))) {
+        return {};
+    }
+    return QFileInfo(dir.path()).canonicalFilePath();
+}
+
+void registerCurrentAppBundleWithLaunchServices()
+{
+    const QString bundlePath = currentAppBundlePath();
+    if (bundlePath.isEmpty()) {
+        return;
     }
 
-    const QByteArray nativePath = QFile::encodeName(path);
-    errno = 0;
-    DIR* dir = ::opendir(nativePath.constData());
-    if (dir != nullptr) {
-        ::closedir(dir);
-        return true;
+    const QString lsregister = QStringLiteral(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister");
+    if (!QFileInfo::exists(lsregister)) {
+        return;
     }
 
-    if (accessDenied && (errno == EACCES || errno == EPERM)) {
-        *accessDenied = true;
-    }
-    return false;
+    QProcess process;
+    process.setProgram(lsregister);
+    process.setArguments({QStringLiteral("-f"), bundlePath});
+    process.start();
+    process.waitForFinished(1500);
 }
 
 } // anonymous namespace
@@ -127,6 +186,11 @@ bool OnboardingController::fdaGranted() const
     return m_fdaGranted;
 }
 
+QString OnboardingController::fdaStatusMessage() const
+{
+    return m_fdaStatusMessage;
+}
+
 QVariantList OnboardingController::homeDirectories() const
 {
     return m_homeDirectories;
@@ -136,50 +200,45 @@ QVariantList OnboardingController::homeDirectories() const
 // Q_INVOKABLE methods
 // ---------------------------------------------------------------------------
 
-void OnboardingController::checkFda()
+bool OnboardingController::refreshFda()
 {
-    // Probe several protected directories. This both detects FDA and primes
-    // System Settings to list the app for manual toggling.
-    const QString home = QDir::homePath();
-    const QStringList protectedPaths = {
-        home + QStringLiteral("/Library/Mail"),
-        home + QStringLiteral("/Library/Safari"),
-        home + QStringLiteral("/Library/Messages"),
-        home + QStringLiteral("/Library/Calendars"),
-        home + QStringLiteral("/Library/AddressBook"),
-        home + QStringLiteral("/Library/Autosave Information")
-    };
+    return updateFdaState();
+}
 
-    bool accessible = false;
-    bool sawDenied = false;
-    for (const QString& path : protectedPaths) {
-        bool denied = false;
-        if (tryOpenDirectory(path, &denied)) {
-            accessible = true;
-            break;
-        }
-        sawDenied = sawDenied || denied;
-    }
+bool OnboardingController::checkFda()
+{
+    const bool hasAccess = updateFdaState();
+    setFdaStatusMessage(hasAccess
+        ? tr("Access granted")
+        : tr("Still not granted"));
+    return hasAccess;
+}
 
-    // Preserve previous heuristic for users with sparse protected directories.
-    if (!accessible && !sawDenied) {
-        const QString legacyPath = home + QStringLiteral("/Library/Mail");
-        QFileInfo info(legacyPath);
-        if (info.exists() && info.isReadable()) {
-            accessible = true;
-        }
-    }
-
-    if (accessible != m_fdaGranted) {
-        m_fdaGranted = accessible;
+bool OnboardingController::updateFdaState()
+{
+    const bool hasAccess = FdaCheck::hasFullDiskAccess();
+    if (hasAccess != m_fdaGranted) {
+        m_fdaGranted = hasAccess;
         emit fdaGrantedChanged();
     }
+    return hasAccess;
+}
+
+void OnboardingController::setFdaStatusMessage(const QString& message)
+{
+    if (message == m_fdaStatusMessage) {
+        return;
+    }
+    m_fdaStatusMessage = message;
+    emit fdaStatusMessageChanged();
 }
 
 void OnboardingController::openFdaSystemSettings()
 {
-    // Prime FDA registration before jumping to settings.
-    checkFda();
+    // Prime Launch Services and TCC discovery before jumping to settings.
+    registerCurrentAppBundleWithLaunchServices();
+    refreshFda();
+    setFdaStatusMessage(tr("System Settings opened; BetterSpotlight should be listed"));
     QProcess::startDetached(
         QStringLiteral("open"),
         {QStringLiteral("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")});
@@ -195,8 +254,8 @@ void OnboardingController::saveHomeMap(const QVariantList& directories)
     for (const auto& entry : directories) {
         auto map = entry.toMap();
         const QString name = map.value(QStringLiteral("name")).toString().trimmed();
-        const QString mode = map.value(QStringLiteral("mode")).toString();
-        if (name.isEmpty()) {
+        const QString mode = normalizedRootMode(map.value(QStringLiteral("mode")).toString());
+        if (!isSafeHomeDirectoryName(name)) {
             continue;
         }
 
@@ -214,18 +273,17 @@ void OnboardingController::saveHomeMap(const QVariantList& directories)
     }
 
     settings[QStringLiteral("home_directories")] = homeMap;
-    if (!indexRoots.isEmpty()) {
-        settings[QStringLiteral("indexRoots")] = indexRoots;
-    }
-    writeSettings(settings);
+    settings[QStringLiteral("indexRoots")] = indexRoots;
+    (void)writeSettings(settings);
 }
 
 void OnboardingController::completeOnboarding()
 {
     auto settings = readSettings();
-    const bool wasCompleted = settings.value(QStringLiteral("onboarding_completed")).toBool(false);
+    const bool wasCompleted =
+        !m_needsOnboarding || settings.value(QStringLiteral("onboarding_completed")).toBool(false);
     settings[QStringLiteral("onboarding_completed")] = true;
-    writeSettings(settings);
+    (void)writeSettings(settings);
 
     if (m_needsOnboarding) {
         m_needsOnboarding = false;

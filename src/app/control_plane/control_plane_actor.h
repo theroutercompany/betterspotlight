@@ -29,10 +29,10 @@ public:
     Q_INVOKABLE void setLifecyclePhase(const QString& phase);
     Q_INVOKABLE QString lifecyclePhase() const;
     Q_INVOKABLE QJsonArray serviceSnapshotSync() const;
-    Q_INVOKABLE QJsonObject sendServiceRequestSync(const QString& serviceName,
-                                                   const QString& method,
-                                                   const QJsonObject& params = {},
-                                                   int timeoutMs = 10000);
+    Q_INVOKABLE virtual QJsonObject sendServiceRequestSync(const QString& serviceName,
+                                                           const QString& method,
+                                                           const QJsonObject& params = {},
+                                                           int timeoutMs = 10000);
 
 signals:
     void lifecyclePhaseChanged(const QString& phase);

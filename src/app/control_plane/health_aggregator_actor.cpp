@@ -45,6 +45,24 @@ QJsonArray capErrors(const QJsonArray& errors, int cap = 50)
     return out;
 }
 
+QJsonArray normalizedManagedServices(const QJsonArray& services)
+{
+    QJsonArray normalized;
+    for (const QJsonValue& value : services) {
+        if (!value.isObject()) {
+            continue;
+        }
+
+        const ServiceRuntimeState service = serviceRuntimeStateFromJson(value.toObject());
+        if (service.name.isEmpty()) {
+            continue;
+        }
+
+        normalized.append(serviceRuntimeStateToJson(service));
+    }
+    return normalized;
+}
+
 } // namespace
 
 HealthAggregatorActor::HealthAggregatorActor(QObject* parent)
@@ -128,7 +146,7 @@ void HealthAggregatorActor::triggerRefresh()
 
 void HealthAggregatorActor::setManagedServices(const QJsonArray& services)
 {
-    m_managedServices = services;
+    m_managedServices = normalizedManagedServices(services);
     triggerRefresh();
 }
 
@@ -329,8 +347,11 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
     bool missingRequired = false;
     bool degradedService = false;
     bool rebuilding = false;
+    QStringList seenRequiredServices;
+    QStringList readyRequiredServices;
 
-    for (const QJsonValue& value : services) {
+    const QJsonArray normalizedServices = normalizedManagedServices(services);
+    for (const QJsonValue& value : normalizedServices) {
         const QJsonObject row = value.toObject();
         const QString name = row.value(QStringLiteral("name")).toString();
         const bool required = health_contract::isRequiredService(name);
@@ -338,14 +359,30 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
         const bool ready = row.value(QStringLiteral("ready")).toBool(false);
         const QString state = row.value(QStringLiteral("state")).toString();
 
-        if (required && (!running || !ready)) {
-            missingRequired = true;
+        if (required) {
+            if (!seenRequiredServices.contains(name)) {
+                seenRequiredServices.append(name);
+            }
+            if (running && ready) {
+                if (!readyRequiredServices.contains(name)) {
+                    readyRequiredServices.append(name);
+                }
+            } else {
+                missingRequired = true;
+            }
         }
         if (state == QLatin1String("degraded")
             || state == QLatin1String("backoff")
             || state == QLatin1String("crashed")
             || state == QLatin1String("giving_up")) {
             degradedService = true;
+        }
+    }
+    for (const QString& requiredName : health_contract::requiredServiceNames()) {
+        if (!seenRequiredServices.contains(requiredName)
+            || !readyRequiredServices.contains(requiredName)) {
+            missingRequired = true;
+            break;
         }
     }
 
@@ -365,7 +402,7 @@ QString HealthAggregatorActor::computeOverallState(const QJsonArray& services,
         degradedService = true;
     }
 
-    if (missingRequired) {
+    if (missingRequired && !degradedService) {
         if (reason) *reason = QStringLiteral("required_service_unavailable");
         return QStringLiteral("unavailable");
     }
@@ -559,9 +596,10 @@ void HealthAggregatorActor::buildAndPublishSnapshot(const QJsonObject& queryHeal
         }
         const bool running = row.value(QStringLiteral("running")).toBool(false);
         const bool ready = row.value(QStringLiteral("ready")).toBool(false);
-        component.reason = (running && ready)
-            ? QStringLiteral("running")
-            : QStringLiteral("not_ready");
+        const QString rowReason = row.value(QStringLiteral("reason")).toString().trimmed();
+        component.reason = !rowReason.isEmpty()
+            ? rowReason
+            : ((running && ready) ? QStringLiteral("running") : QStringLiteral("not_ready"));
         component.lastUpdatedMs = row.value(QStringLiteral("updatedAtMs")).toInteger(now);
         component.stalenessMs = std::max<qint64>(0, now - component.lastUpdatedMs);
         if (component.stalenessMs > kComponentStaleThresholdMs) {

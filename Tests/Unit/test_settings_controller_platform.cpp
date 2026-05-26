@@ -12,8 +12,12 @@
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 
 #include <sqlite3.h>
+
+#include <cmath>
+#include <limits>
 
 namespace bs {
 
@@ -49,8 +53,23 @@ public:
 
 QString settingsPath()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/settings.json");
+    const QString configuredSettingsDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_SETTINGS_DIR").trimmed();
+    const QString dataDir = configuredSettingsDir.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        : configuredSettingsDir;
+    return QDir(dataDir).filePath(QStringLiteral("settings.json"));
+}
+
+QString runtimeDataDir()
+{
+    const QString configuredDataDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_DATA_DIR").trimmed();
+    if (!configuredDataDir.isEmpty()) {
+        return configuredDataDir;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+        + QStringLiteral("/betterspotlight");
 }
 
 void resetSettings()
@@ -60,14 +79,56 @@ void resetSettings()
 
 void resetRuntimeDb()
 {
-    QFile::remove(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-                  + QStringLiteral("/betterspotlight/index.db"));
+    QDir(runtimeDataDir()).removeRecursively();
 }
 
 QString runtimeDbPath()
 {
-    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-        + QStringLiteral("/betterspotlight/index.db");
+    return QDir(runtimeDataDir()).filePath(QStringLiteral("index.db"));
+}
+
+QString exportDir()
+{
+    const QString configuredExportDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_EXPORT_DIR").trimmed();
+    if (!configuredExportDir.isEmpty()) {
+        return configuredExportDir;
+    }
+    return QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+}
+
+bool runtimeSettingValue(const QString& key, QString* value)
+{
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(runtimeDbPath().toUtf8().constData(), &db, SQLITE_OPEN_READONLY, nullptr)
+        != SQLITE_OK) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    bool found = false;
+    static constexpr const char* kSql =
+        "SELECT value FROM settings WHERE key = ?1 LIMIT 1";
+    if (sqlite3_prepare_v2(db, kSql, -1, &stmt, nullptr) == SQLITE_OK) {
+        const QByteArray keyUtf8 = key.toUtf8();
+        sqlite3_bind_text(stmt, 1, keyUtf8.constData(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (value) {
+                value->clear();
+                const unsigned char* raw = sqlite3_column_text(stmt, 0);
+                if (raw) {
+                    *value = QString::fromUtf8(reinterpret_cast<const char*>(raw));
+                }
+            }
+            found = true;
+        }
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return found;
 }
 
 void ensureRuntimeSettingsTable()
@@ -171,6 +232,17 @@ QJsonObject readSettings()
     return doc.object();
 }
 
+bool writeSettings(const QJsonObject& settings)
+{
+    const QString path = settingsPath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    return file.write(QJsonDocument(settings).toJson(QJsonDocument::Indented)) > 0;
+}
+
 } // namespace
 
 class TestSettingsControllerPlatform : public QObject {
@@ -178,31 +250,108 @@ class TestSettingsControllerPlatform : public QObject {
 
 private slots:
     void initTestCase();
+    void cleanupTestCase();
     void cleanup();
 
     void testLaunchAtLoginFailureDoesNotPersist();
     void testLaunchAtLoginSuccessPersists();
     void testShowInDockFailureDoesNotPersist();
     void testShowInDockSuccessPersists();
+    void testIndexRootsSanitizeInvalidEntriesAndPreserveSkipMode();
+    void testIndexRootModeNormalizationAcceptsLegacyAndCasedInput();
+    void testNonFiniteDoubleSettingsAreClampedBeforePersisting();
+    void testLoadedSettingsNormalizeTypedDriftForUiAndRuntimeDb();
     void testAutoVectorMigrationRoundTripsAsGuidanceSetting();
     void testRuntimeBoolSettingReadsDbValue();
+    void testRuntimeSettingCreatesTableForMissingDb();
+    void testRuntimeSettingDoesNotSignalOnOpenFailure();
     void testClearFeedbackDataPurgesLearningTables();
+    void testClearFeedbackDataDoesNotSignalOnDeleteFailure();
     void testExportDataIncludesLearningTables();
+    void testExportDataReportsWriteFailure();
+
+private:
+    QTemporaryDir m_tempHome;
+    QTemporaryDir m_tempSettingsDir;
+    QTemporaryDir m_tempDataDir;
+    QTemporaryDir m_tempExportDir;
+    QByteArray m_oldHome;
+    QByteArray m_oldSettingsDir;
+    QByteArray m_oldDataDir;
+    QByteArray m_oldExportDir;
+    bool m_hadHome = false;
+    bool m_hadSettingsDir = false;
+    bool m_hadDataDir = false;
+    bool m_hadExportDir = false;
 };
 
 void TestSettingsControllerPlatform::initTestCase()
 {
+    QVERIFY(m_tempHome.isValid());
+    QVERIFY(m_tempSettingsDir.isValid());
+    QVERIFY(m_tempDataDir.isValid());
+    QVERIFY(m_tempExportDir.isValid());
+
+    m_hadHome = qEnvironmentVariableIsSet("HOME");
+    m_oldHome = qgetenv("HOME");
+    m_hadSettingsDir = qEnvironmentVariableIsSet("BETTERSPOTLIGHT_SETTINGS_DIR");
+    m_oldSettingsDir = qgetenv("BETTERSPOTLIGHT_SETTINGS_DIR");
+    m_hadDataDir = qEnvironmentVariableIsSet("BETTERSPOTLIGHT_DATA_DIR");
+    m_oldDataDir = qgetenv("BETTERSPOTLIGHT_DATA_DIR");
+    m_hadExportDir = qEnvironmentVariableIsSet("BETTERSPOTLIGHT_EXPORT_DIR");
+    m_oldExportDir = qgetenv("BETTERSPOTLIGHT_EXPORT_DIR");
+
+    QCoreApplication::setOrganizationName(QStringLiteral("BetterSpotlightTests"));
+    QCoreApplication::setApplicationName(QStringLiteral("test-settings-controller-platform"));
+    qputenv("HOME", m_tempHome.path().toUtf8());
+    qputenv("BETTERSPOTLIGHT_SETTINGS_DIR", m_tempSettingsDir.path().toUtf8());
+    qputenv("BETTERSPOTLIGHT_DATA_DIR", m_tempDataDir.path().toUtf8());
+    qputenv("BETTERSPOTLIGHT_EXPORT_DIR", m_tempExportDir.path().toUtf8());
     QStandardPaths::setTestModeEnabled(true);
     resetSettings();
     resetRuntimeDb();
+}
+
+void TestSettingsControllerPlatform::cleanupTestCase()
+{
+    QStandardPaths::setTestModeEnabled(false);
+
+    if (m_hadHome) {
+        qputenv("HOME", m_oldHome);
+    } else {
+        qunsetenv("HOME");
+    }
+
+    if (m_hadSettingsDir) {
+        qputenv("BETTERSPOTLIGHT_SETTINGS_DIR", m_oldSettingsDir);
+    } else {
+        qunsetenv("BETTERSPOTLIGHT_SETTINGS_DIR");
+    }
+
+    if (m_hadDataDir) {
+        qputenv("BETTERSPOTLIGHT_DATA_DIR", m_oldDataDir);
+    } else {
+        qunsetenv("BETTERSPOTLIGHT_DATA_DIR");
+    }
+
+    if (m_hadExportDir) {
+        qputenv("BETTERSPOTLIGHT_EXPORT_DIR", m_oldExportDir);
+    } else {
+        qunsetenv("BETTERSPOTLIGHT_EXPORT_DIR");
+    }
 }
 
 void TestSettingsControllerPlatform::cleanup()
 {
     resetSettings();
     resetRuntimeDb();
-    QFile::remove(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)
-                  + QStringLiteral("/betterspotlight-data-export.json"));
+    const QString exportPath =
+        QDir(exportDir()).filePath(QStringLiteral("betterspotlight-data-export.json"));
+    if (QFileInfo(exportPath).isDir()) {
+        QDir(exportPath).removeRecursively();
+    } else {
+        QFile::remove(exportPath);
+    }
 }
 
 void TestSettingsControllerPlatform::testLaunchAtLoginFailureDoesNotPersist()
@@ -305,6 +454,247 @@ void TestSettingsControllerPlatform::testShowInDockSuccessPersists()
     QVERIFY(settings.value(QStringLiteral("showInDock")).toBool(false));
 }
 
+void TestSettingsControllerPlatform::testIndexRootsSanitizeInvalidEntriesAndPreserveSkipMode()
+{
+    bs::SettingsController controller;
+    QSignalSpy rootsSpy(&controller, &bs::SettingsController::indexRootsChanged);
+    QSignalSpy settingsSpy(&controller, &bs::SettingsController::settingsChanged);
+
+    const QString skippedRoot = QDir(m_tempHome.path()).filePath(QStringLiteral("Skip Me"));
+    const QString urlRoot = QDir(m_tempHome.path()).filePath(QStringLiteral("URL Root"));
+
+    QVariantList roots;
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), skippedRoot},
+        {QStringLiteral("mode"), QStringLiteral("skip")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("relative/path")},
+        {QStringLiteral("mode"), QStringLiteral("index_embed")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("   ")},
+        {QStringLiteral("mode"), QStringLiteral("index_embed")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), skippedRoot},
+        {QStringLiteral("mode"), QStringLiteral("index_only")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), QStringLiteral("file://") + urlRoot},
+        {QStringLiteral("mode"), QStringLiteral("index_only")},
+    });
+    roots.append(QStringLiteral("not-a-map"));
+
+    controller.setIndexRoots(roots);
+
+    QCOMPARE(rootsSpy.count(), 1);
+    QCOMPARE(settingsSpy.count(), 1);
+
+    const QVariantList normalized = controller.indexRoots();
+    QCOMPARE(normalized.size(), 2);
+
+    const QVariantMap first = normalized.at(0).toMap();
+    QCOMPARE(first.value(QStringLiteral("path")).toString(), QDir::cleanPath(skippedRoot));
+    QCOMPARE(first.value(QStringLiteral("mode")).toString(), QStringLiteral("skip"));
+
+    const QVariantMap second = normalized.at(1).toMap();
+    QCOMPARE(second.value(QStringLiteral("path")).toString(), QDir::cleanPath(urlRoot));
+    QCOMPARE(second.value(QStringLiteral("mode")).toString(), QStringLiteral("index_only"));
+
+    const QJsonArray persisted = readSettings().value(QStringLiteral("indexRoots")).toArray();
+    QCOMPARE(persisted.size(), 2);
+    QCOMPARE(persisted.at(0).toObject().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("skip"));
+    QCOMPARE(persisted.at(1).toObject().value(QStringLiteral("path")).toString(),
+             QDir::cleanPath(urlRoot));
+}
+
+void TestSettingsControllerPlatform::testIndexRootModeNormalizationAcceptsLegacyAndCasedInput()
+{
+    bs::SettingsController controller;
+
+    const QString legacyRoot = QDir(m_tempHome.path()).filePath(QStringLiteral("Legacy"));
+    const QString casedRoot = QDir(m_tempHome.path()).filePath(QStringLiteral("Cased"));
+    const QString missingModeRoot = QDir(m_tempHome.path()).filePath(QStringLiteral("Missing"));
+
+    QVariantList roots;
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), legacyRoot},
+        {QStringLiteral("mode"), QStringLiteral("index")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), casedRoot},
+        {QStringLiteral("mode"), QStringLiteral(" INDEX_EMBED ")},
+    });
+    roots.append(QVariantMap{
+        {QStringLiteral("path"), missingModeRoot},
+    });
+
+    controller.setIndexRoots(roots);
+
+    const QVariantList normalized = controller.indexRoots();
+    QCOMPARE(normalized.size(), 3);
+    QCOMPARE(normalized.at(0).toMap().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_only"));
+    QCOMPARE(normalized.at(1).toMap().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_embed"));
+    QCOMPARE(normalized.at(2).toMap().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_embed"));
+
+    const QJsonArray persisted = readSettings().value(QStringLiteral("indexRoots")).toArray();
+    QCOMPARE(persisted.at(0).toObject().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_only"));
+    QCOMPARE(persisted.at(1).toObject().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_embed"));
+    QCOMPARE(persisted.at(2).toObject().value(QStringLiteral("mode")).toString(),
+             QStringLiteral("index_embed"));
+}
+
+void TestSettingsControllerPlatform::testNonFiniteDoubleSettingsAreClampedBeforePersisting()
+{
+    bs::SettingsController controller;
+
+    controller.setQueryRouterMinConfidence(0.9);
+    QCOMPARE(controller.queryRouterMinConfidence(), 0.9);
+    controller.setQueryRouterMinConfidence(std::numeric_limits<double>::quiet_NaN());
+    QCOMPARE(controller.queryRouterMinConfidence(), 0.45);
+
+    controller.setBm25WeightName(2.5);
+    QCOMPARE(controller.bm25WeightName(), 2.5);
+    controller.setBm25WeightName(std::numeric_limits<double>::infinity());
+    QCOMPARE(controller.bm25WeightName(), 10.0);
+
+    controller.setBm25WeightPath(-7.0);
+    QCOMPARE(controller.bm25WeightPath(), 0.0);
+
+    controller.setBm25WeightContent(4.0);
+    QCOMPARE(controller.bm25WeightContent(), 4.0);
+    controller.setBm25WeightContent(-std::numeric_limits<double>::infinity());
+    QCOMPARE(controller.bm25WeightContent(), 1.0);
+
+    const QJsonObject settings = readSettings();
+    QVERIFY(std::isfinite(settings.value(QStringLiteral("queryRouterMinConfidence")).toDouble()));
+    QVERIFY(std::isfinite(settings.value(QStringLiteral("bm25WeightName")).toDouble()));
+    QVERIFY(std::isfinite(settings.value(QStringLiteral("bm25WeightPath")).toDouble()));
+    QVERIFY(std::isfinite(settings.value(QStringLiteral("bm25WeightContent")).toDouble()));
+
+    QString storedValue;
+    QVERIFY(runtimeSettingValue(QStringLiteral("queryRouterMinConfidence"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("0.45"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightName"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("10"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightPath"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("0"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightContent"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1"));
+}
+
+void TestSettingsControllerPlatform::testLoadedSettingsNormalizeTypedDriftForUiAndRuntimeDb()
+{
+    QJsonArray malformedRoots;
+    malformedRoots.append(QStringLiteral("not-a-root-object"));
+
+    QJsonObject raw;
+    raw[QStringLiteral("indexRoots")] = malformedRoots;
+    raw[QStringLiteral("maxResults")] = -100;
+    raw[QStringLiteral("embeddingEnabled")] = QStringLiteral("off");
+    raw[QStringLiteral("inferenceServiceEnabled")] = QStringLiteral("yes");
+    raw[QStringLiteral("queryRouterEnabled")] = QStringLiteral("0");
+    raw[QStringLiteral("queryRouterMinConfidence")] = QStringLiteral("2.5");
+    raw[QStringLiteral("strongEmbeddingTopK")] = 500;
+    raw[QStringLiteral("fastEmbeddingTopK")] = QStringLiteral("400");
+    raw[QStringLiteral("rerankerStage1Max")] = 0;
+    raw[QStringLiteral("rerankerStage2Max")] = 999;
+    raw[QStringLiteral("semanticBudgetMs")] = 5;
+    raw[QStringLiteral("rerankBudgetMs")] = QStringLiteral("900");
+    raw[QStringLiteral("maxFileSizeMB")] = 0;
+    raw[QStringLiteral("extractionTimeoutMs")] = 999999;
+    raw[QStringLiteral("feedbackRetentionDays")] = 1;
+    raw[QStringLiteral("bm25WeightName")] = -2.5;
+    raw[QStringLiteral("bm25WeightPath")] = QStringLiteral("nan");
+    raw[QStringLiteral("bm25WeightContent")] = QStringLiteral("3.25");
+    raw[QStringLiteral("qaSnippetEnabled")] = QStringLiteral("off");
+    raw[QStringLiteral("enableInteractionTracking")] = QStringLiteral("on");
+    raw[QStringLiteral("behaviorStreamEnabled")] = QStringLiteral("on");
+    raw[QStringLiteral("onlineRankerRolloutMode")] = QStringLiteral("definitely_invalid");
+    raw[QStringLiteral("onlineRankerBlendAlpha")] = 2.0;
+    raw[QStringLiteral("behaviorRawRetentionDays")] = -5;
+
+    QVERIFY(writeSettings(raw));
+
+    bs::SettingsController controller;
+
+    QCOMPARE(controller.indexRoots().size(), 3);
+    QCOMPARE(controller.maxResults(), 5);
+    QVERIFY(!controller.embeddingEnabled());
+    QVERIFY(controller.inferenceServiceEnabled());
+    QVERIFY(!controller.queryRouterEnabled());
+    QCOMPARE(controller.queryRouterMinConfidence(), 1.0);
+    QCOMPARE(controller.strongEmbeddingTopK(), 200);
+    QCOMPARE(controller.fastEmbeddingTopK(), 300);
+    QCOMPARE(controller.rerankerStage1Max(), 4);
+    QCOMPARE(controller.rerankerStage2Max(), 100);
+    QCOMPARE(controller.semanticBudgetMs(), 20);
+    QCOMPARE(controller.rerankBudgetMs(), 600);
+    QCOMPARE(controller.maxFileSizeMB(), 1);
+    QCOMPARE(controller.extractionTimeoutMs(), 120000);
+    QCOMPARE(controller.feedbackRetentionDays(), 7);
+    QCOMPARE(controller.bm25WeightName(), 0.0);
+    QCOMPARE(controller.bm25WeightPath(), 5.0);
+    QCOMPARE(controller.bm25WeightContent(), 3.25);
+    QVERIFY(!controller.qaSnippetEnabled());
+    QVERIFY(controller.enableInteractionTracking());
+    QVERIFY(controller.runtimeBoolSetting(QStringLiteral("behaviorStreamEnabled"), false));
+
+    const QJsonObject persisted = readSettings();
+    QCOMPARE(persisted.value(QStringLiteral("indexRoots")).toArray().size(), 3);
+    QCOMPARE(persisted.value(QStringLiteral("maxResults")).toInt(), 5);
+    QVERIFY(persisted.value(QStringLiteral("embeddingEnabled")).isBool());
+    QVERIFY(!persisted.value(QStringLiteral("embeddingEnabled")).toBool(true));
+    QCOMPARE(persisted.value(QStringLiteral("strongEmbeddingTopK")).toInt(), 200);
+    QCOMPARE(persisted.value(QStringLiteral("fastEmbeddingTopK")).toInt(), 300);
+    QCOMPARE(persisted.value(QStringLiteral("semanticBudgetMs")).toInt(), 20);
+    QCOMPARE(persisted.value(QStringLiteral("rerankBudgetMs")).toInt(), 600);
+    QCOMPARE(persisted.value(QStringLiteral("feedbackRetentionDays")).toInt(), 7);
+    QCOMPARE(persisted.value(QStringLiteral("onlineRankerRolloutMode")).toString(),
+             QStringLiteral("instrumentation_only"));
+
+    QString storedValue;
+    QVERIFY(runtimeSettingValue(QStringLiteral("embeddingEnabled"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("0"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("inferenceServiceEnabled"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("queryRouterEnabled"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("0"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("queryRouterMinConfidence"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1.00"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("strongEmbeddingTopK"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("200"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("fastEmbeddingTopK"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("300"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("semanticBudgetMs"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("20"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("rerankBudgetMs"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("600"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("max_file_size"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1048576"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("extraction_timeout_ms"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("120000"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightName"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("0"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightPath"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("5"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("bm25WeightContent"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("3.25"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("onlineRankerRolloutMode"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("instrumentation_only"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("onlineRankerBlendAlpha"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1"));
+    QVERIFY(runtimeSettingValue(QStringLiteral("behaviorRawRetentionDays"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1"));
+}
+
 void TestSettingsControllerPlatform::testAutoVectorMigrationRoundTripsAsGuidanceSetting()
 {
     bs::SettingsController controller;
@@ -337,12 +727,45 @@ void TestSettingsControllerPlatform::testRuntimeBoolSettingReadsDbValue()
     QVERIFY(!controller.runtimeBoolSetting(QStringLiteral("behaviorStreamEnabled"), true));
 }
 
+void TestSettingsControllerPlatform::testRuntimeSettingCreatesTableForMissingDb()
+{
+    bs::SettingsController controller;
+    resetRuntimeDb();
+
+    QSignalSpy settingsSpy(&controller, &bs::SettingsController::settingsChanged);
+
+    QVERIFY(controller.setRuntimeSetting(QStringLiteral("behaviorStreamEnabled"),
+                                         QStringLiteral("1")));
+    QCOMPARE(settingsSpy.count(), 1);
+
+    QString storedValue;
+    QVERIFY(runtimeSettingValue(QStringLiteral("behaviorStreamEnabled"), &storedValue));
+    QCOMPARE(storedValue, QStringLiteral("1"));
+    QVERIFY(controller.runtimeBoolSetting(QStringLiteral("behaviorStreamEnabled"), false));
+    QVERIFY(QFileInfo(runtimeDbPath()).isFile());
+}
+
+void TestSettingsControllerPlatform::testRuntimeSettingDoesNotSignalOnOpenFailure()
+{
+    bs::SettingsController controller;
+    resetRuntimeDb();
+    QVERIFY(QDir().mkpath(runtimeDbPath()));
+
+    QSignalSpy settingsSpy(&controller, &bs::SettingsController::settingsChanged);
+
+    QVERIFY(!controller.setRuntimeSetting(QStringLiteral("behaviorStreamEnabled"),
+                                          QStringLiteral("1")));
+    QCOMPARE(settingsSpy.count(), 0);
+}
+
 void TestSettingsControllerPlatform::testClearFeedbackDataPurgesLearningTables()
 {
     ensureFeedbackAndLearningTablesWithSeed();
 
     bs::SettingsController controller;
-    controller.clearFeedbackData();
+    QSignalSpy clearedSpy(&controller, &bs::SettingsController::feedbackDataCleared);
+    QVERIFY(controller.clearFeedbackData());
+    QCOMPARE(clearedSpy.count(), 1);
 
     QCOMPARE(tableRowCount(QStringLiteral("feedback")), 0);
     QCOMPARE(tableRowCount(QStringLiteral("interactions")), 0);
@@ -352,11 +775,37 @@ void TestSettingsControllerPlatform::testClearFeedbackDataPurgesLearningTables()
     QCOMPARE(tableRowCount(QStringLiteral("replay_reservoir_v1")), 0);
 }
 
+void TestSettingsControllerPlatform::testClearFeedbackDataDoesNotSignalOnDeleteFailure()
+{
+    const QFileInfo dbInfo(runtimeDbPath());
+    QDir().mkpath(dbInfo.absolutePath());
+    sqlite3* db = nullptr;
+    QVERIFY(sqlite3_open_v2(runtimeDbPath().toUtf8().constData(), &db,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr)
+            == SQLITE_OK);
+    QVERIFY(sqlite3_exec(db,
+                         "CREATE TABLE feedback (id INTEGER PRIMARY KEY);"
+                         "INSERT INTO feedback (id) VALUES (1);",
+                         nullptr,
+                         nullptr,
+                         nullptr)
+            == SQLITE_OK);
+    sqlite3_close(db);
+
+    bs::SettingsController controller;
+    QSignalSpy clearedSpy(&controller, &bs::SettingsController::feedbackDataCleared);
+
+    QVERIFY(!controller.clearFeedbackData());
+    QCOMPARE(clearedSpy.count(), 0);
+    QVERIFY(!controller.platformStatusSuccess());
+    QCOMPARE(tableRowCount(QStringLiteral("feedback")), 1);
+}
+
 void TestSettingsControllerPlatform::testExportDataIncludesLearningTables()
 {
     ensureFeedbackAndLearningTablesWithSeed();
 
-    const QString downloadsDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    const QString downloadsDir = exportDir();
     QVERIFY2(!downloadsDir.isEmpty(), "Download location unavailable");
     QDir().mkpath(downloadsDir);
     const QString exportPath =
@@ -364,7 +813,7 @@ void TestSettingsControllerPlatform::testExportDataIncludesLearningTables()
     QFile::remove(exportPath);
 
     bs::SettingsController controller;
-    controller.exportData();
+    QVERIFY(controller.exportData());
 
     QFile file(exportPath);
     QVERIFY2(file.exists(), "Expected exported data file to exist");
@@ -385,6 +834,25 @@ void TestSettingsControllerPlatform::testExportDataIncludesLearningTables()
     QCOMPARE(payload.value(QStringLiteral("behaviorEvents")).toArray().size(), 1);
     QCOMPARE(payload.value(QStringLiteral("trainingExamples")).toArray().size(), 1);
     QCOMPARE(payload.value(QStringLiteral("replayReservoir")).toArray().size(), 1);
+}
+
+void TestSettingsControllerPlatform::testExportDataReportsWriteFailure()
+{
+    ensureFeedbackAndLearningTablesWithSeed();
+
+    const QString downloadsDir = exportDir();
+    QVERIFY2(!downloadsDir.isEmpty(), "Download location unavailable");
+    QDir().mkpath(downloadsDir);
+    const QString exportPath =
+        downloadsDir + QStringLiteral("/betterspotlight-data-export.json");
+    QFile::remove(exportPath);
+    QVERIFY(QDir().mkpath(exportPath));
+
+    bs::SettingsController controller;
+
+    QVERIFY(!controller.exportData());
+    QVERIFY(!controller.platformStatusSuccess());
+    QCOMPARE(controller.platformStatusKey(), QStringLiteral("exportData"));
 }
 
 QTEST_MAIN(TestSettingsControllerPlatform)

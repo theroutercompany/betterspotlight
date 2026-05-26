@@ -152,8 +152,8 @@ public:
     void setTheme(const QString& theme);
     void setLanguage(const QString& language);
 
-    Q_INVOKABLE void clearFeedbackData();
-    Q_INVOKABLE void exportData();
+    Q_INVOKABLE bool clearFeedbackData();
+    Q_INVOKABLE bool exportData();
     Q_INVOKABLE void pauseIndexing();
     Q_INVOKABLE void resumeIndexing();
     Q_INVOKABLE void rebuildIndex();

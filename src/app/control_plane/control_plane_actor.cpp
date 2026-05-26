@@ -97,7 +97,7 @@ void ControlPlaneActor::configureServices(const QVariantList& serviceDescriptors
         m_serviceStates[name] = QStringLiteral("registered");
     }
 
-    m_servicesConfigured = true;
+    m_servicesConfigured = !m_supervisor->serviceSnapshot().isEmpty();
     publishSnapshot();
 }
 
@@ -106,6 +106,12 @@ bool ControlPlaneActor::startAll()
     if (!ensureSupervisorInitialized()) {
         return false;
     }
+    if (!m_servicesConfigured || m_supervisor->serviceSnapshot().isEmpty()) {
+        LOG_WARN(bsCore, "ControlPlaneActor: startAll ignored (services not configured)");
+        publishSnapshot();
+        return false;
+    }
+
     QString commandKey;
     if (!beginCommand(QString(),
                       QStringLiteral("start_all"),
@@ -115,9 +121,7 @@ bool ControlPlaneActor::startAll()
     }
 
     bool started = false;
-    if (!m_servicesConfigured) {
-        LOG_WARN(bsCore, "ControlPlaneActor: startAll ignored (services not configured)");
-    } else if (m_started && !m_stopping) {
+    if (m_started && !m_stopping) {
         started = true;
     } else {
         m_stopping = false;

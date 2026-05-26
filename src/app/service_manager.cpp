@@ -38,24 +38,75 @@ QJsonArray defaultCuratedRoots()
     };
 }
 
+bool hasJsonArray(const QJsonObject& settings, const QString& key)
+{
+    return settings.contains(key) && settings.value(key).isArray();
+}
+
+bool isSafeHomeDirectoryName(const QString& name)
+{
+    return !name.isEmpty()
+        && name != QLatin1String(".")
+        && name != QLatin1String("..")
+        && !name.contains(QLatin1Char('/'))
+        && !name.contains(QLatin1Char('\\'));
+}
+
+bool isValidRootMode(const QString& mode)
+{
+    return mode == QLatin1String("index_embed")
+        || mode == QLatin1String("index_only")
+        || mode == QLatin1String("skip");
+}
+
+QString normalizedRootMode(const QString& rawMode, const QString& fallback)
+{
+    const QString mode = rawMode.trimmed().toLower();
+    if (mode == QLatin1String("index")) {
+        return QStringLiteral("index_only");
+    }
+    if (isValidRootMode(mode)) {
+        return mode;
+    }
+    return fallback;
+}
+
+QString normalizedConfiguredRootPath(const QString& rawPath)
+{
+    QString path = rawPath.trimmed();
+    if (path.startsWith(QStringLiteral("file://"))) {
+        path = QUrl(path).toLocalFile();
+    }
+    path = QDir::cleanPath(path);
+    if (path.isEmpty() || path == QLatin1String(".") || !QDir::isAbsolutePath(path)) {
+        return {};
+    }
+    return path;
+}
+
 QJsonArray rootsFromIndexRoots(const QJsonObject& settings, bool embedOnly)
 {
     QJsonArray roots;
+    QSet<QString> seenRoots;
     const QJsonArray indexRoots = settings.value(QStringLiteral("indexRoots")).toArray();
     for (const QJsonValue& value : indexRoots) {
         if (!value.isObject()) {
             continue;
         }
         const QJsonObject obj = value.toObject();
-        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        const QString mode = normalizedRootMode(
+            obj.value(QStringLiteral("mode")).toString(),
+            QStringLiteral("index_embed"));
         if (mode == QLatin1String("skip")) {
             continue;
         }
         if (embedOnly && mode != QLatin1String("index_embed")) {
             continue;
         }
-        const QString path = obj.value(QStringLiteral("path")).toString();
-        if (!path.isEmpty()) {
+        const QString path = normalizedConfiguredRootPath(
+            obj.value(QStringLiteral("path")).toString());
+        if (!path.isEmpty() && !seenRoots.contains(path)) {
+            seenRoots.insert(path);
             roots.append(path);
         }
     }
@@ -65,6 +116,7 @@ QJsonArray rootsFromIndexRoots(const QJsonObject& settings, bool embedOnly)
 QJsonArray rootsFromHomeDirectories(const QJsonObject& settings, bool embedOnly)
 {
     QJsonArray roots;
+    QSet<QString> seenRoots;
     const QString home = QDir::homePath();
     const QJsonArray homeDirectories =
         settings.value(QStringLiteral("home_directories")).toArray();
@@ -74,7 +126,9 @@ QJsonArray rootsFromHomeDirectories(const QJsonObject& settings, bool embedOnly)
         }
 
         const QJsonObject obj = value.toObject();
-        const QString mode = obj.value(QStringLiteral("mode")).toString();
+        const QString mode = normalizedRootMode(
+            obj.value(QStringLiteral("mode")).toString(),
+            QStringLiteral("index_only"));
         if (mode == QLatin1String("skip")) {
             continue;
         }
@@ -83,11 +137,15 @@ QJsonArray rootsFromHomeDirectories(const QJsonObject& settings, bool embedOnly)
         }
 
         const QString name = obj.value(QStringLiteral("name")).toString().trimmed();
-        if (name.isEmpty()) {
+        if (!isSafeHomeDirectoryName(name)) {
             continue;
         }
 
-        roots.append(home + QLatin1Char('/') + name);
+        const QString path = QDir::cleanPath(home + QLatin1Char('/') + name);
+        if (!seenRoots.contains(path)) {
+            seenRoots.insert(path);
+            roots.append(path);
+        }
     }
     return roots;
 }
@@ -132,11 +190,32 @@ bool readBoolSetting(const QJsonObject& settings, const QString& key, bool fallb
     return fallback;
 }
 
+Qt::ConnectionType synchronousInvokeConnectionFor(const QObject* target)
+{
+    return target && target->thread() == QThread::currentThread()
+        ? Qt::DirectConnection
+        : Qt::BlockingQueuedConnection;
+}
+
+bool canReceiveSynchronousInvoke(const QObject* target)
+{
+    if (!target) {
+        return false;
+    }
+    const QThread* targetThread = target->thread();
+    return !targetThread
+        || targetThread == QThread::currentThread()
+        || targetThread->isRunning();
+}
+
 QJsonObject readAppSettings()
 {
-    const QString settingsPath =
-        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-        + QStringLiteral("/settings.json");
+    const QString configuredSettingsDir =
+        qEnvironmentVariable("BETTERSPOTLIGHT_SETTINGS_DIR").trimmed();
+    const QString settingsDir = configuredSettingsDir.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        : configuredSettingsDir;
+    const QString settingsPath = QDir(settingsDir).filePath(QStringLiteral("settings.json"));
     QFile settingsFile(settingsPath);
     if (!settingsFile.open(QIODevice::ReadOnly)) {
         return {};
@@ -214,7 +293,10 @@ QString trimSingleLine(const QString& text, int maxChars = 220)
     return normalized.left(std::max(0, maxChars - 3)) + QStringLiteral("...");
 }
 
-bool downloadFileWithCurl(const QString& url, const QString& outputPath, QString* errorOut)
+bool downloadFileWithCurl(const QString& url,
+                          const QString& outputPath,
+                          QString* errorOut,
+                          const std::atomic_bool* cancelRequested = nullptr)
 {
     if (errorOut) {
         *errorOut = QString();
@@ -244,7 +326,18 @@ bool downloadFileWithCurl(const QString& url, const QString& outputPath, QString
         QFile::remove(tmpPath);
         return false;
     }
-    process.waitForFinished(-1);
+    while (!process.waitForFinished(250)) {
+        if (cancelRequested != nullptr
+            && cancelRequested->load(std::memory_order_acquire)) {
+            process.kill();
+            process.waitForFinished(1000);
+            if (errorOut) {
+                *errorOut = QStringLiteral("download cancelled");
+            }
+            QFile::remove(tmpPath);
+            return false;
+        }
+    }
 
     const QString stdErr = QString::fromUtf8(process.readAllStandardError());
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
@@ -291,6 +384,24 @@ bool ServiceManager::envFlagEnabled(const char* key, bool fallback)
         || value == QLatin1String("true")
         || value == QLatin1String("yes")
         || value == QLatin1String("on");
+}
+
+bool ServiceManager::artifactFileReady(const QString& path)
+{
+    const QFileInfo info(path);
+    return info.isFile() && info.isReadable() && info.size() > 0;
+}
+
+bool ServiceManager::modelArtifactsReady(const QString& modelsDir,
+                                         const ModelManifestEntry& entry)
+{
+    if (!artifactFileReady(modelsDir + QStringLiteral("/") + entry.file)) {
+        return false;
+    }
+    if (entry.vocab.isEmpty()) {
+        return true;
+    }
+    return artifactFileReady(modelsDir + QStringLiteral("/") + entry.vocab);
 }
 
 ServiceManager::ServiceManager(QObject* parent)
@@ -609,8 +720,17 @@ void ServiceManager::start()
         updateServiceStatus(name, QStringLiteral("starting"));
     }
 
+    if (descriptors.isEmpty()) {
+        LOG_ERROR(bsCore, "ServiceManager: no service binaries were found; startup aborted");
+        m_started = false;
+        updateTrayState();
+        return;
+    }
+
     if (!m_controlPlaneActor) {
         LOG_ERROR(bsCore, "ServiceManager: control plane actor unavailable");
+        m_started = false;
+        updateTrayState();
         return;
     }
 
@@ -645,6 +765,7 @@ void ServiceManager::stop()
     }
     m_stopping = true;
 
+    m_modelDownloadCancelRequested.store(true, std::memory_order_release);
     joinModelDownloadThreadIfNeeded();
     LOG_INFO(bsCore, "ServiceManager: stopping services");
     resetOperationalReadiness();
@@ -751,7 +872,10 @@ void ServiceManager::startIndexing()
 
 bool ServiceManager::pauseIndexing()
 {
-    if (sendIndexerRequest(QStringLiteral("pauseIndexing"))) {
+    if (sendServiceRequestExpectingBool(QStringLiteral("indexer"),
+                                        QStringLiteral("pauseIndexing"),
+                                        {},
+                                        QStringLiteral("paused"))) {
         m_indexingActive = false;
         updateTrayState();
         return true;
@@ -761,7 +885,10 @@ bool ServiceManager::pauseIndexing()
 
 bool ServiceManager::resumeIndexing()
 {
-    if (sendIndexerRequest(QStringLiteral("resumeIndexing"))) {
+    if (sendServiceRequestExpectingBool(QStringLiteral("indexer"),
+                                        QStringLiteral("resumeIndexing"),
+                                        {},
+                                        QStringLiteral("resumed"))) {
         m_indexingActive = true;
         updateTrayState();
         return true;
@@ -778,21 +905,42 @@ void ServiceManager::setIndexingUserActive(bool active)
 
 bool ServiceManager::rebuildAll()
 {
-    if (sendIndexerRequest(QStringLiteral("rebuildAll"))) {
-        m_indexingActive = true;
-        updateTrayState();
-        return true;
+    const ServiceRequestResult request =
+        sendServiceRequestSync(QStringLiteral("indexer"), QStringLiteral("rebuildAll"));
+    if (!request.ok) {
+        reportServiceRequestFailure(QStringLiteral("indexer"),
+                                    QStringLiteral("rebuildAll"),
+                                    request);
+        return false;
     }
-    return false;
+
+    const QJsonObject result = request.response.value(QStringLiteral("result")).toObject();
+    const bool started = result.value(QStringLiteral("started")).toBool(false);
+    const bool alreadyRunning = result.value(QStringLiteral("alreadyRunning")).toBool(false);
+    if (!started && !alreadyRunning) {
+        reportMalformedServiceAck(QStringLiteral("indexer"),
+                                  QStringLiteral("rebuildAll"),
+                                  QStringLiteral("started"),
+                                  result);
+        return false;
+    }
+
+    m_indexingActive = true;
+    updateTrayState();
+    return true;
 }
 
 bool ServiceManager::rebuildVectorIndex()
 {
     QJsonObject params;
     const QJsonArray embedRoots = loadEmbeddingRoots();
-    if (!embedRoots.isEmpty()) {
-        params[QStringLiteral("includePaths")] = embedRoots;
+    if (embedRoots.isEmpty()) {
+        const QString error = QStringLiteral("No embedding roots are configured for vector rebuild.");
+        LOG_WARN(bsCore, "ServiceManager: %s", qPrintable(error));
+        emit serviceError(QStringLiteral("query"), error);
+        return false;
     }
+    params[QStringLiteral("includePaths")] = embedRoots;
 
     const ServiceRequestResult request =
         sendServiceRequestSync(QStringLiteral("query"),
@@ -810,6 +958,13 @@ bool ServiceManager::rebuildVectorIndex()
     const bool started = result.value(QStringLiteral("started")).toBool();
     const bool alreadyRunning = result.value(QStringLiteral("alreadyRunning")).toBool();
     const qint64 runId = result.value(QStringLiteral("runId")).toInteger();
+    if (!started && !alreadyRunning) {
+        reportMalformedServiceAck(QStringLiteral("query"),
+                                  QStringLiteral("rebuildVectorIndex"),
+                                  QStringLiteral("started"),
+                                  result);
+        return false;
+    }
     if (alreadyRunning) {
         LOG_INFO(bsCore, "ServiceManager: vector rebuild already running (runId=%lld)",
                  static_cast<long long>(runId));
@@ -822,18 +977,27 @@ bool ServiceManager::rebuildVectorIndex()
 
 bool ServiceManager::clearExtractionCache()
 {
-    return sendServiceRequest(QStringLiteral("extractor"), QStringLiteral("clearExtractionCache"));
+    return sendServiceRequestExpectingBool(QStringLiteral("extractor"),
+                                           QStringLiteral("clearExtractionCache"),
+                                           {},
+                                           QStringLiteral("cleared"));
 }
 
 bool ServiceManager::reindexPath(const QString& path)
 {
-    QString normalizedPath = path;
-    if (normalizedPath.startsWith(QStringLiteral("file://"))) {
-        normalizedPath = QUrl(normalizedPath).toLocalFile();
+    const QString normalizedPath = normalizedConfiguredRootPath(path);
+    if (normalizedPath.isEmpty()) {
+        const QString error = QStringLiteral("Invalid path for reindex request.");
+        LOG_WARN(bsCore, "ServiceManager: %s", qPrintable(error));
+        emit serviceError(QStringLiteral("indexer"), error);
+        return false;
     }
     QJsonObject params;
     params[QStringLiteral("path")] = normalizedPath;
-    if (sendIndexerRequest(QStringLiteral("reindexPath"), params)) {
+    if (sendServiceRequestExpectingBool(QStringLiteral("indexer"),
+                                        QStringLiteral("reindexPath"),
+                                        params,
+                                        QStringLiteral("queued"))) {
         m_indexingActive = true;
         updateTrayState();
         return true;
@@ -855,6 +1019,7 @@ bool ServiceManager::downloadModels(const QStringList& roles, bool includeExisti
                           /*hasError=*/false);
 
     joinModelDownloadThreadIfNeeded();
+    m_modelDownloadCancelRequested.store(false, std::memory_order_release);
     m_modelDownloadThread = std::thread(
         &ServiceManager::runModelDownloadWorker, this, roles, includeExisting);
     return true;
@@ -862,6 +1027,9 @@ bool ServiceManager::downloadModels(const QStringList& roles, bool includeExisti
 
 void ServiceManager::runModelDownloadWorker(const QStringList& roles, bool includeExisting)
 {
+    const auto cancelRequested = [this]() {
+        return m_modelDownloadCancelRequested.load(std::memory_order_acquire);
+    };
     const auto publish = [this](bool running,
                                 const QString& status,
                                 bool hasError) {
@@ -876,6 +1044,10 @@ void ServiceManager::runModelDownloadWorker(const QStringList& roles, bool inclu
     const QString modelsDir = ModelRegistry::resolveModelsDir();
     const QString manifestPath = modelsDir + QStringLiteral("/manifest.json");
     const std::optional<ModelManifest> manifestOpt = ModelManifest::loadFromFile(manifestPath);
+    if (cancelRequested()) {
+        publish(/*running=*/false, QStringLiteral("Model download cancelled."), /*hasError=*/false);
+        return;
+    }
     if (!manifestOpt.has_value()) {
         publish(/*running=*/false,
                 QStringLiteral("Model download failed: could not load manifest at %1")
@@ -918,6 +1090,13 @@ void ServiceManager::runModelDownloadWorker(const QStringList& roles, bool inclu
     bool vocabReady = false;
 
     for (int idx = 0; idx < targetRoles.size(); ++idx) {
+        if (cancelRequested()) {
+            publish(/*running=*/false,
+                    QStringLiteral("Model download cancelled."),
+                    /*hasError=*/false);
+            return;
+        }
+
         const QString role = targetRoles.at(idx);
         const auto manifestIt = manifestOpt->models.find(role.toStdString());
         if (manifestIt == manifestOpt->models.end()) {
@@ -927,61 +1106,94 @@ void ServiceManager::runModelDownloadWorker(const QStringList& roles, bool inclu
 
         const ModelManifestEntry& entry = manifestIt->second;
         const QString modelPath = modelsDir + QStringLiteral("/") + entry.file;
-        const QFileInfo modelInfo(modelPath);
-        if (!includeExisting && modelInfo.exists() && modelInfo.isReadable()
-            && modelInfo.size() > 0) {
+        const bool modelReady = artifactFileReady(modelPath);
+        if (!includeExisting && modelArtifactsReady(modelsDir, entry)) {
             ++skippedCount;
             continue;
         }
 
-        publish(/*running=*/true,
-                QStringLiteral("Downloading %1 (%2/%3)...")
-                    .arg(role)
-                    .arg(idx + 1)
-                    .arg(targetRoles.size()),
-                /*hasError=*/false);
-
-        const QStringList urls = modelDownloadUrlsForRole(role);
-        if (urls.isEmpty()) {
-            failures.append(QStringLiteral("%1: no download source configured").arg(role));
-            continue;
-        }
-
-        bool downloaded = false;
-        QString lastError;
-        for (const QString& url : urls) {
-            QString attemptError;
-            if (downloadFileWithCurl(url, modelPath, &attemptError)) {
-                downloaded = true;
-                break;
-            }
-            lastError = QStringLiteral("%1 (%2)").arg(attemptError, url);
-        }
-        if (downloaded) {
-            ++downloadedCount;
+        if (!includeExisting && modelReady) {
+            ++skippedCount;
         } else {
-            failures.append(QStringLiteral("%1: %2")
-                                .arg(role,
-                                     lastError.isEmpty()
-                                         ? QStringLiteral("download failed")
-                                         : trimSingleLine(lastError)));
+            publish(/*running=*/true,
+                    QStringLiteral("Downloading %1 (%2/%3)...")
+                        .arg(role)
+                        .arg(idx + 1)
+                        .arg(targetRoles.size()),
+                    /*hasError=*/false);
+
+            const QStringList urls = modelDownloadUrlsForRole(role);
+            if (urls.isEmpty()) {
+                failures.append(QStringLiteral("%1: no download source configured").arg(role));
+            } else {
+                bool downloaded = false;
+                QString lastError;
+                for (const QString& url : urls) {
+                    if (cancelRequested()) {
+                        publish(/*running=*/false,
+                                QStringLiteral("Model download cancelled."),
+                                /*hasError=*/false);
+                        return;
+                    }
+                    QString attemptError;
+                    if (downloadFileWithCurl(
+                            url,
+                            modelPath,
+                            &attemptError,
+                            &m_modelDownloadCancelRequested)) {
+                        downloaded = true;
+                        break;
+                    }
+                    if (cancelRequested()) {
+                        publish(/*running=*/false,
+                                QStringLiteral("Model download cancelled."),
+                                /*hasError=*/false);
+                        return;
+                    }
+                    lastError = QStringLiteral("%1 (%2)").arg(attemptError, url);
+                }
+                if (downloaded) {
+                    ++downloadedCount;
+                } else {
+                    failures.append(QStringLiteral("%1: %2")
+                                        .arg(role,
+                                             lastError.isEmpty()
+                                                 ? QStringLiteral("download failed")
+                                                 : trimSingleLine(lastError)));
+                }
+            }
         }
 
         if (!vocabChecked && !entry.vocab.isEmpty()) {
             vocabChecked = true;
             const QString vocabPath = modelsDir + QStringLiteral("/") + entry.vocab;
-            const QFileInfo vocabInfo(vocabPath);
-            if (vocabInfo.exists() && vocabInfo.isReadable() && vocabInfo.size() > 0) {
+            if (artifactFileReady(vocabPath)) {
                 vocabReady = true;
             } else {
                 publish(/*running=*/true,
                         QStringLiteral("Downloading tokenizer vocab..."),
                         /*hasError=*/false);
                 for (const QString& url : vocabDownloadUrls()) {
+                    if (cancelRequested()) {
+                        publish(/*running=*/false,
+                                QStringLiteral("Model download cancelled."),
+                                /*hasError=*/false);
+                        return;
+                    }
                     QString attemptError;
-                    if (downloadFileWithCurl(url, vocabPath, &attemptError)) {
+                    if (downloadFileWithCurl(
+                            url,
+                            vocabPath,
+                            &attemptError,
+                            &m_modelDownloadCancelRequested)) {
                         vocabReady = true;
                         break;
+                    }
+                    if (cancelRequested()) {
+                        publish(/*running=*/false,
+                                QStringLiteral("Model download cancelled."),
+                                /*hasError=*/false);
+                        return;
                     }
                 }
                 if (!vocabReady) {
@@ -1057,12 +1269,18 @@ QVariantList ServiceManager::serviceDiagnostics() const
     if (!m_controlPlaneActor) {
         return {};
     }
+    if (!canReceiveSynchronousInvoke(m_controlPlaneActor)) {
+        return {};
+    }
     QJsonArray snapshot;
-    QMetaObject::invokeMethod(
+    const bool invoked = QMetaObject::invokeMethod(
         m_controlPlaneActor,
         "serviceSnapshotSync",
-        Qt::BlockingQueuedConnection,
+        synchronousInvokeConnectionFor(m_controlPlaneActor),
         Q_RETURN_ARG(QJsonArray, snapshot));
+    if (!invoked) {
+        return {};
+    }
     return snapshot.toVariantList();
 }
 
@@ -1078,13 +1296,69 @@ bool ServiceManager::sendServiceRequest(const QString& serviceName,
     const ServiceRequestResult result =
         sendServiceRequestSync(serviceName, method, params, 10000);
     if (!result.ok) {
-        LOG_ERROR(bsCore, "ServiceManager: %s '%s' failed: %s",
-                  qPrintable(serviceName),
-                  qPrintable(method),
-                  qPrintable(result.error));
-        emit serviceError(serviceName, result.error);
+        reportServiceRequestFailure(serviceName, method, result);
     }
     return result.ok;
+}
+
+bool ServiceManager::sendServiceRequestExpectingBool(const QString& serviceName,
+                                                     const QString& method,
+                                                     const QJsonObject& params,
+                                                     const QString& resultKey)
+{
+    const ServiceRequestResult request =
+        sendServiceRequestSync(serviceName, method, params, 10000);
+    if (!request.ok) {
+        reportServiceRequestFailure(serviceName, method, request);
+        return false;
+    }
+
+    const QJsonObject result = request.response.value(QStringLiteral("result")).toObject();
+    if (!result.value(resultKey).toBool(false)) {
+        reportMalformedServiceAck(serviceName, method, resultKey, result);
+        return false;
+    }
+    return true;
+}
+
+bool ServiceManager::reportServiceRequestFailure(const QString& serviceName,
+                                                 const QString& method,
+                                                 const ServiceRequestResult& result)
+{
+    const QString error = result.error.isEmpty()
+        ? QStringLiteral("request_failed")
+        : result.error;
+    LOG_ERROR(bsCore, "ServiceManager: %s '%s' failed: %s",
+              qPrintable(serviceName),
+              qPrintable(method),
+              qPrintable(error));
+    emit serviceError(serviceName, error);
+    return false;
+}
+
+bool ServiceManager::reportMalformedServiceAck(const QString& serviceName,
+                                               const QString& method,
+                                               const QString& resultKey,
+                                               const QJsonObject& result)
+{
+    QString error = QStringLiteral("%1_missing_%2_ack").arg(method, resultKey);
+    const QJsonArray failedPaths = result.value(QStringLiteral("failedPaths")).toArray();
+    if (!failedPaths.isEmpty()) {
+        error = QStringLiteral("%1_failed:%2_path%3")
+                    .arg(method)
+                    .arg(failedPaths.size())
+                    .arg(failedPaths.size() == 1 ? QString() : QStringLiteral("s"));
+    } else if (result.contains(QStringLiteral("error"))) {
+        error = result.value(QStringLiteral("error")).toString(error);
+    }
+
+    LOG_ERROR(bsCore,
+              "ServiceManager: %s '%s' returned malformed or negative ack for '%s'",
+              qPrintable(serviceName),
+              qPrintable(method),
+              qPrintable(resultKey));
+    emit serviceError(serviceName, error);
+    return false;
 }
 
 ServiceManager::ServiceRequestResult ServiceManager::sendServiceRequestSync(
@@ -1098,17 +1372,25 @@ ServiceManager::ServiceRequestResult ServiceManager::sendServiceRequestSync(
         out.error = QStringLiteral("control_plane_unavailable");
         return out;
     }
+    if (!canReceiveSynchronousInvoke(m_controlPlaneActor)) {
+        out.error = QStringLiteral("control_plane_thread_unavailable");
+        return out;
+    }
 
     QJsonObject actorResult;
-    QMetaObject::invokeMethod(
+    const bool invoked = QMetaObject::invokeMethod(
         m_controlPlaneActor,
         "sendServiceRequestSync",
-        Qt::BlockingQueuedConnection,
+        synchronousInvokeConnectionFor(m_controlPlaneActor),
         Q_RETURN_ARG(QJsonObject, actorResult),
         Q_ARG(QString, serviceName),
         Q_ARG(QString, method),
         Q_ARG(QJsonObject, params),
         Q_ARG(int, timeoutMs));
+    if (!invoked) {
+        out.error = QStringLiteral("control_plane_request_unavailable");
+        return out;
+    }
 
     out.ok = actorResult.value(QStringLiteral("ok")).toBool(false);
     out.error = actorResult.value(QStringLiteral("error")).toString();
@@ -1215,17 +1497,22 @@ bool ServiceManager::snapshotSatisfiesOperationalReadiness(const QJsonObject& sn
 QJsonArray ServiceManager::loadIndexRoots() const
 {
     const QJsonObject settings = readAppSettings();
+    const bool hasExplicitIndexRoots = hasJsonArray(settings, QStringLiteral("indexRoots"));
+    const bool hasHomeDirectories = hasJsonArray(settings, QStringLiteral("home_directories"));
 
-    QJsonArray roots = rootsFromIndexRoots(settings, /*embedOnly=*/false);
-    if (isSingleHomeRoot(roots)) {
-        const QJsonArray homeMappedRoots =
-            rootsFromHomeDirectories(settings, /*embedOnly=*/false);
-        if (!homeMappedRoots.isEmpty()) {
-            roots = homeMappedRoots;
-        }
+    QJsonArray roots;
+    if (hasExplicitIndexRoots) {
+        roots = rootsFromIndexRoots(settings, /*embedOnly=*/false);
+    } else {
+        roots = rootsFromHomeDirectories(settings, /*embedOnly=*/false);
     }
 
-    if (roots.isEmpty()) {
+    const bool migratedLegacyHomeRoot = isSingleHomeRoot(roots);
+    if (migratedLegacyHomeRoot) {
+        roots = rootsFromHomeDirectories(settings, /*embedOnly=*/false);
+    }
+
+    if (roots.isEmpty() && (!hasExplicitIndexRoots || (migratedLegacyHomeRoot && !hasHomeDirectories))) {
         roots = defaultCuratedRoots();
     }
 
@@ -1235,17 +1522,23 @@ QJsonArray ServiceManager::loadIndexRoots() const
 QJsonArray ServiceManager::loadEmbeddingRoots() const
 {
     const QJsonObject settings = readAppSettings();
+    const bool hasExplicitIndexRoots = hasJsonArray(settings, QStringLiteral("indexRoots"));
+    const bool hasHomeDirectories = hasJsonArray(settings, QStringLiteral("home_directories"));
 
-    QJsonArray roots = rootsFromIndexRoots(settings, /*embedOnly=*/true);
-    if (isSingleHomeRoot(rootsFromIndexRoots(settings, /*embedOnly=*/false))) {
-        const QJsonArray homeMappedRoots =
-            rootsFromHomeDirectories(settings, /*embedOnly=*/true);
-        if (!homeMappedRoots.isEmpty()) {
-            roots = homeMappedRoots;
-        }
+    QJsonArray roots;
+    const QJsonArray allIndexRoots = hasExplicitIndexRoots
+        ? rootsFromIndexRoots(settings, /*embedOnly=*/false)
+        : QJsonArray{};
+    const bool migratedLegacyHomeRoot = isSingleHomeRoot(allIndexRoots);
+    if (migratedLegacyHomeRoot) {
+        roots = rootsFromHomeDirectories(settings, /*embedOnly=*/true);
+    } else if (hasExplicitIndexRoots) {
+        roots = rootsFromIndexRoots(settings, /*embedOnly=*/true);
+    } else {
+        roots = rootsFromHomeDirectories(settings, /*embedOnly=*/true);
     }
 
-    if (roots.isEmpty()) {
+    if (roots.isEmpty() && (!hasExplicitIndexRoots || (migratedLegacyHomeRoot && !hasHomeDirectories))) {
         const QJsonArray curated = defaultCuratedRoots();
         for (const QJsonValue& value : curated) {
             roots.append(value);

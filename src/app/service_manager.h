@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QVariantList>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -17,6 +18,7 @@ namespace bs {
 class ControlPlaneActor;
 class HealthAggregatorActor;
 class Supervisor;
+struct ModelManifestEntry;
 
 class ServiceManager : public QObject {
     Q_OBJECT
@@ -97,6 +99,9 @@ private:
     };
 
     static bool envFlagEnabled(const char* key, bool fallback = false);
+    static bool artifactFileReady(const QString& path);
+    static bool modelArtifactsReady(const QString& modelsDir,
+                                    const ModelManifestEntry& entry);
 
     QString findServiceBinary(const QString& name) const;
     void completeOperationalReadiness();
@@ -116,6 +121,17 @@ private:
     bool sendServiceRequest(const QString& serviceName,
                             const QString& method,
                             const QJsonObject& params = {});
+    bool sendServiceRequestExpectingBool(const QString& serviceName,
+                                         const QString& method,
+                                         const QJsonObject& params,
+                                         const QString& resultKey);
+    bool reportServiceRequestFailure(const QString& serviceName,
+                                     const QString& method,
+                                     const ServiceRequestResult& result);
+    bool reportMalformedServiceAck(const QString& serviceName,
+                                   const QString& method,
+                                   const QString& resultKey,
+                                   const QJsonObject& result);
     ServiceRequestResult sendServiceRequestSync(const QString& serviceName,
                                                 const QString& method,
                                                 const QJsonObject& params = {},
@@ -153,6 +169,7 @@ private:
     bool m_started = false;
     bool m_stopping = false;
     std::thread m_modelDownloadThread;
+    std::atomic_bool m_modelDownloadCancelRequested{false};
     mutable std::mutex m_modelDownloadMutex;
     bool m_modelDownloadRunning = false;
     QString m_modelDownloadStatus;
